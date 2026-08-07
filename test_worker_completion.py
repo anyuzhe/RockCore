@@ -86,6 +86,35 @@ class _PrematureThenEditingRouter:
         return {"content": "Task fully implemented.", "tool_calls": [], "usage": {}}
 
 
+class _ReviewSequenceRouter:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls <= 4:
+            return {
+                "content": "Reading relevant evidence.",
+                "tool_calls": [{
+                    "id": f"read-{self.calls}",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({
+                            "path": "game.js",
+                            "start": (self.calls - 1) * 20 + 1,
+                            "end": self.calls * 20,
+                        }),
+                    },
+                }],
+                "usage": {},
+            }
+        return {
+            "content": "Review report: game-over blocks input and restart resets the full state.",
+            "tool_calls": [],
+            "usage": {},
+        }
+
+
 def test_coding_worker_corrects_premature_no_tool_completion():
     async def scenario():
         router = _PrematureThenEditingRouter()
@@ -98,6 +127,23 @@ def test_coding_worker_corrects_premature_no_tool_completion():
         assert router.calls == 3
         assert router.tool_choices == ["auto", "required", "auto"]
         assert broker.executed == ["apply_patch"]
+
+    asyncio.run(scenario())
+
+
+def test_read_only_review_stops_after_evidence_and_returns_report():
+    async def scenario():
+        router = _ReviewSequenceRouter()
+        broker = _RecordingBroker()
+        task = _task("analysis")
+        task.title = "Audit game end and restart"
+        worker = WorkerAgent(router, broker, max_turns=10, max_exploration_turns=4)
+
+        result = await worker.run(task, project_root=".")
+
+        assert result["status"] == "completed"
+        assert "Review report" in result["content"]
+        assert broker.executed == ["read_file"] * 4
 
     asyncio.run(scenario())
 

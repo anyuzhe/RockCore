@@ -593,10 +593,13 @@ class Engine:
         behavior_count = sum(description.count(mark) for mark in ("；", ";", "。", "."))
         reasons = [f"base={base_turns}"]
 
-        if task_type == "analysis":
-            turns = min(base_turns, 10 if total_lines >= 800 else 8)
+        if task_type in {"analysis", "review"}:
+            # Read-only reports need a final model turn after search/read calls.
+            # A fast preset may set the coding budget to 8, which is too short
+            # for a two-file audit and previously caused false dependency failure.
+            turns = max(base_turns, 12 if total_lines >= 600 else 10)
             exploration = min(max(base_exploration, 4), max(4, turns - 2))
-            reasons.append("read-only analysis")
+            reasons.append("read-only report")
         elif task_type in {"testing", "review"}:
             turns = min(base_turns, 18 if len(files) > 2 else 14)
             exploration = min(max(base_exploration, 3), max(3, turns // 2))
@@ -757,7 +760,7 @@ class Engine:
             )
 
             if result and result.get("status") == "completed":
-                # Coding tasks must edit files. Read-only analysis tasks instead
+                # Coding tasks must edit files. Read-only report tasks instead
                 # succeed when they return a substantive report.
                 has_file_changes = await self._check_file_changes(
                     task_worktree_root, task_baseline
@@ -774,7 +777,7 @@ class Engine:
                 missing_required_output = (
                     t.task_type == "coding" and not has_file_changes
                 ) or (
-                    t.task_type == "analysis"
+                    t.task_type in {"analysis", "review"}
                     and not has_file_changes
                     and not task_output
                 )

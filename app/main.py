@@ -19,7 +19,7 @@ from qasync import QApplication
 
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, icon_path
 from app.paths import default_workspace_dir
-from app.runtime import configure_windows_identity
+from app.runtime import configure_runtime_logging, configure_windows_identity
 
 logging.basicConfig(
     level=logging.INFO,

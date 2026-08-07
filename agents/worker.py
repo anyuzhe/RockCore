@@ -24,7 +24,7 @@ CRITICAL RULES:
 1. You are working in a USER project, NOT in the AI Engineering Studio codebase.
 2. Do NOT explore or investigate any "studio" code, databases, or configs.
 3. Use ONLY relative paths like "index.html", "src/main.py", etc.
-4. For analysis tasks: inspect the project and return a concrete report. Do not
+4. For analysis/review tasks: inspect the project and return a concrete report. Do not
    create or modify files unless the task explicitly requests a report artifact.
 5. For coding tasks: use write_file to create files, read_file to check existing ones.
 6. For testing tasks: run the test command and report results.
@@ -112,8 +112,12 @@ Description: {task.description}
 Type: {task.task_type}
 """
 
-        if task.task_type == "analysis":
-            task_context += "\nFocus on understanding the codebase. Read files, search for patterns, and report findings."
+        if task.task_type in {"analysis", "review"}:
+            task_context += (
+                "\nThis is a read-only review task. Inspect only the relevant files, "
+                "then return a concrete findings report. Do not modify project files. "
+                "After the evidence is sufficient, stop using tools and write the report."
+            )
         elif task.task_type == "coding":
             task_context += "\nRead existing code, then implement the changes. Verify with git_diff."
         elif task.task_type == "testing":
@@ -258,7 +262,7 @@ Type: {task.task_type}
                         has_written,
                     )
                     repeated_exploration = (
-                        task.task_type == "coding"
+                        task.task_type in {"coding", "analysis", "review"}
                         and func_name in EXPLORATION_TOOLS
                         and exploration_signature in seen_exploration_calls
                     )
@@ -272,7 +276,7 @@ Type: {task.task_type}
                         }
                         exploration_blocked = True
                     elif (
-                        task.task_type == "coding"
+                        task.task_type in {"coding", "analysis", "review"}
                         and func_name in EXPLORATION_TOOLS
                         and exploration_calls >= (
                             self.max_exploration_turns + (2 if has_written else 0)
@@ -281,8 +285,12 @@ Type: {task.task_type}
                         result = {
                             "status": "rejected",
                             "error": (
-                                "Exploration budget exhausted. Use write_file, "
-                                "apply_patch, insert_before, or insert_after now."
+                            "Exploration budget exhausted. Stop reading and return "
+                            "the concrete report now."
+                            if task.task_type in {"analysis", "review"}
+                            else
+                            "Exploration budget exhausted. Use write_file, "
+                            "apply_patch, insert_before, or insert_after now."
                             ),
                         }
                         exploration_blocked = True
@@ -318,6 +326,11 @@ Type: {task.task_type}
                     messages.append({
                         "role": "user",
                         "content": (
+                            "The read-only exploration limit has been reached. "
+                            "Do not read or search again. Return the final concrete "
+                            "review report now."
+                            if task.task_type in {"analysis", "review"}
+                            else
                             "The read-only exploration limit has been reached. "
                             "Do not read or search again. Apply the remaining code "
                             "changes now, or return the final completion response if "

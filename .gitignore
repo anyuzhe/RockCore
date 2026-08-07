@@ -2,5 +2,6 @@ build/pyinstaller/
 dist/
 release/
 build/version_info.generated.txt
+.test_project/
 __pycache__/
 *.pyc

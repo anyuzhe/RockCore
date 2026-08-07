@@ -1,6 +1,7 @@
 """Regression tests for read-only analysis tasks and dependency failures."""
 
 import asyncio
+from types import SimpleNamespace
 
 from app.ui.task_panel import STATUS_STYLE
 from orchestrator.engine import Engine
@@ -138,3 +139,21 @@ def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
 
 def test_blocked_tasks_have_a_distinct_user_facing_status():
     assert STATUS_STYLE["blocked"]["text"] == "已阻塞"
+
+
+def test_read_only_report_budget_leaves_a_final_report_turn(tmp_path):
+    (tmp_path / "game.js").write_text("const state = 'playing';\n" * 450)
+    (tmp_path / "index.html").write_text("<button id='restart'>Restart</button>\n" * 180)
+    task = SimpleNamespace(
+        task_type="analysis",
+        allowed_paths=["game.js", "index.html"],
+        dependencies=[],
+        description="审核游戏结束与重新开始流程",
+    )
+
+    budget = Engine._estimate_task_budget(
+        task, str(tmp_path), base_turns=8, base_exploration=4, mode="fast"
+    )
+
+    assert budget["max_turns"] == 12
+    assert budget["exploration_turns"] == 4
