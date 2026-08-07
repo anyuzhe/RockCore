@@ -54,3 +54,29 @@ def test_model_chat_usage_is_persisted_for_job_and_task(tmp_path: Path):
             repos["_session"].close()
 
     asyncio.run(scenario())
+
+
+def test_usage_event_uses_a_separate_session_from_job_lifecycle(tmp_path: Path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project = repos["project"].create("Session Demo", str(tmp_path))
+        job = repos["job"].create("JOB-SESSION", project.id, "demo")
+
+        try:
+            await engine.event_bus.publish(
+                "model_chat",
+                job_id=job.job_id,
+                agent_type="governor",
+                provider="codex",
+                input_tokens=10,
+                output_tokens=5,
+                estimated_cost=0.001,
+            )
+            # The event handler must not close or detach this lifecycle object.
+            repos["_session"].refresh(job)
+            assert job.usage_calls == 1
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())

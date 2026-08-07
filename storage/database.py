@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 from sqlalchemy import create_engine, inspect
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker
 
 from .models import Base
 
@@ -76,4 +76,8 @@ def _migrate_schema(engine):
 
 
 def create_session_factory(engine):
-    return scoped_session(sessionmaker(bind=engine, expire_on_commit=False))
+    # Each repository bundle must own an independent session. A scoped session
+    # would return the caller's active session to nested event handlers (for
+    # example model-usage persistence), allowing a handler to close or expire
+    # ORM objects that the main job lifecycle is still using.
+    return sessionmaker(bind=engine, expire_on_commit=False)

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -10,9 +11,10 @@ logger = logging.getLogger(__name__)
 class ShellTools:
     """Restricted shell command execution."""
 
-    def __init__(self, project_root: str, allowed_commands: set[str] | None = None):
+    def __init__(self, project_root: str | os.PathLike[str] | None,
+                 allowed_commands: set[str] | None = None):
+        project_root = os.fspath(project_root) if project_root is not None else ""
         if not project_root or not project_root.strip():
-            import os
             project_root = os.getcwd()
             logger.warning(f"ShellTools: empty project_root, falling back to cwd: {project_root}")
         self.project_root = project_root

@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 class FileTools:
     """Safe file operations limited to project root."""
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str | os.PathLike[str] | None):
+        # Config defaults may be pathlib.Path objects (notably on Windows).
+        # Normalize before string-only validation such as ``strip``.
+        project_root = os.fspath(project_root) if project_root is not None else ""
         if not project_root or not project_root.strip():
-            import os
             project_root = os.getcwd()
             logger.warning(f"FileTools: empty project_root, falling back to cwd: {project_root}")
         self.project_root = Path(project_root).resolve()

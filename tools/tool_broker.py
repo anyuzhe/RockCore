@@ -1,6 +1,7 @@
 """ToolBroker — central security checkpoint for all AI tool execution."""
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -17,14 +18,17 @@ logger = logging.getLogger(__name__)
 class ToolBroker:
     """Central security layer: all AI tool calls go through here."""
 
-    def __init__(self, project_root: str, policy_engine: PolicyEngine):
-        self.project_root = project_root
+    def __init__(self, project_root: str | os.PathLike[str] | None,
+                 policy_engine: PolicyEngine):
+        self.project_root = (
+            os.fspath(project_root) if project_root is not None else os.getcwd()
+        )
         self.policy = policy_engine
-        self.file_tools = FileTools(project_root)
-        self.shell_tools = ShellTools(project_root)
-        self.search_tools = SearchTools(project_root)
-        self.git_tools = GitTools(project_root)
-        self.test_tools = TestTools(project_root)
+        self.file_tools = FileTools(self.project_root)
+        self.shell_tools = ShellTools(self.project_root)
+        self.search_tools = SearchTools(self.project_root)
+        self.git_tools = GitTools(self.project_root)
+        self.test_tools = TestTools(self.project_root)
 
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
@@ -279,14 +283,16 @@ class ToolBroker:
                 "duration_ms": int((time.time() - start) * 1000),
             }
 
-    def set_project_root(self, project_root: str):
+    def set_project_root(self, project_root: str | os.PathLike[str] | None):
         """Update the project root (called per-job to match the actual project)."""
-        self.project_root = project_root
-        self.file_tools = FileTools(project_root)
-        self.shell_tools = ShellTools(project_root)
-        self.search_tools = SearchTools(project_root)
-        self.git_tools = GitTools(project_root)
-        self.test_tools = TestTools(project_root)
+        self.project_root = (
+            os.fspath(project_root) if project_root is not None else os.getcwd()
+        )
+        self.file_tools = FileTools(self.project_root)
+        self.shell_tools = ShellTools(self.project_root)
+        self.search_tools = SearchTools(self.project_root)
+        self.git_tools = GitTools(self.project_root)
+        self.test_tools = TestTools(self.project_root)
         # Rebuild registry so bound methods point to the new tool instances
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
