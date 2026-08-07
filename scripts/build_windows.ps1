@@ -1,26 +1,56 @@
 $ErrorActionPreference = "Stop"
 
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    Write-Host "==> $Label"
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label failed with exit code $LASTEXITCODE"
+    }
+}
+
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
 $Python = (Get-Command python).Source
 
 Write-Host "Building RockCore $Version for Windows x64"
-& $Python scripts/make_brand_assets.py
-& $Python build/make_version_info.py
+Invoke-Native "Generate branding assets" $Python @("scripts/make_brand_assets.py")
+Invoke-Native "Generate version metadata" $Python @("build/make_version_info.py")
 
 if (Test-Path dist) { Remove-Item dist -Recurse -Force }
 if (Test-Path build/pyinstaller) { Remove-Item build/pyinstaller -Recurse -Force }
 if (Test-Path release) { Remove-Item release -Recurse -Force }
 New-Item -ItemType Directory -Force release | Out-Null
 
-& $Python -m PyInstaller --noconfirm --clean --distpath dist --workpath build/pyinstaller build/RockCore.spec
+Invoke-Native "Run PyInstaller" $Python @(
+    "-m", "PyInstaller", "--noconfirm", "--clean",
+    "--distpath", "dist", "--workpath", "build/pyinstaller",
+    "build/RockCore.spec"
+)
+
+$AppDir = Join-Path $Root "dist/RockCore"
+$AppExe = Join-Path $AppDir "RockCore.exe"
+if (-not (Test-Path $AppExe -PathType Leaf)) {
+    throw "PyInstaller completed but expected executable was not created: $AppExe"
+}
 
 $Portable = Join-Path $Root "release/RockCore-$Version-Windows-x64-portable.zip"
-Compress-Archive -Path (Join-Path $Root "dist/RockCore/*") -DestinationPath $Portable -Force
+Compress-Archive -Path (Join-Path $AppDir "*") -DestinationPath $Portable -Force
+if (-not (Test-Path $Portable -PathType Leaf)) {
+    throw "Portable package was not created: $Portable"
+}
 
-if (Get-Command iscc -ErrorAction SilentlyContinue) {
-    & iscc "/DAppVersion=$Version" installer/RockCore.iss
+$Iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+if ($Iscc) {
+    Invoke-Native "Build Inno Setup installer" $Iscc.Source @(
+        "/DAppVersion=$Version", "installer/RockCore.iss"
+    )
 } else {
     Write-Warning "Inno Setup is not installed; portable ZIP was created, installer skipped."
 }

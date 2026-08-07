@@ -23,6 +23,7 @@ class UsageRecord:
     agent_type: str
     input_tokens: int
     output_tokens: int
+    provider: str = ""
     timestamp: str = ""
 
 
@@ -42,6 +43,12 @@ class CostEngine:
         "planner": {"input": 0.002, "output": 0.008},
         "worker": {"input": 0.0005, "output": 0.002},
     }
+    PROVIDER_COSTS = {
+        "codex": {"input": 0.010, "output": 0.030},
+        "openai": {"input": 0.010, "output": 0.030},
+        "kimi": {"input": 0.002, "output": 0.008},
+        "deepseek": {"input": 0.0005, "output": 0.002},
+    }
 
     def __init__(self):
         self._budgets: dict[str, JobBudget] = {}
@@ -56,7 +63,8 @@ class CostEngine:
         return self._budgets.get(job_id, self._default_budget)
 
     async def record_usage(self, job_id: str, agent_type: str,
-                           input_tokens: int = 0, output_tokens: int = 0):
+                           input_tokens: int = 0, output_tokens: int = 0,
+                           provider: str = ""):
         """Record token usage for a job."""
         if job_id not in self._usage:
             self._usage[job_id] = []
@@ -64,6 +72,7 @@ class CostEngine:
             agent_type=agent_type,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            provider=provider or "",
             timestamp=datetime.now(timezone.utc).isoformat(),
         ))
         logger.debug(f"Usage: {job_id} {agent_type} +{input_tokens}i/{output_tokens}o")
@@ -80,7 +89,7 @@ class CostEngine:
         # Calculate cost
         total_cost = 0.0
         for record in usage:
-            costs = self.MODEL_COSTS.get(record.agent_type, {"input": 0.01, "output": 0.03})
+            costs = self._cost_rates(record.agent_type, record.provider)
             total_cost += (record.input_tokens / 1000) * costs["input"]
             total_cost += (record.output_tokens / 1000) * costs["output"]
 
@@ -106,11 +115,15 @@ class CostEngine:
             by_agent[record.agent_type]["output"] += record.output_tokens
             by_agent[record.agent_type]["calls"] += 1
 
-        total_cost = 0.0
-        for agent, data in by_agent.items():
-            costs = self.MODEL_COSTS.get(agent, {"input": 0.01, "output": 0.03})
-            total_cost += (data["input"] / 1000) * costs["input"]
-            total_cost += (data["output"] / 1000) * costs["output"]
+        total_cost = sum(
+            self.estimate_cost(
+                record.agent_type,
+                record.input_tokens,
+                record.output_tokens,
+                record.provider,
+            )
+            for record in usage
+        )
 
         return {
             "by_agent": by_agent,
@@ -119,3 +132,21 @@ class CostEngine:
             "total_calls": len(usage),
             "total_cost": round(total_cost, 4),
         }
+
+    @classmethod
+    def _cost_rates(cls, agent_type: str, provider: str = "") -> dict:
+        return cls.PROVIDER_COSTS.get(
+            (provider or "").lower(),
+            cls.MODEL_COSTS.get(agent_type, {"input": 0.01, "output": 0.03}),
+        )
+
+    @classmethod
+    def estimate_cost(cls, agent_type: str, input_tokens: int = 0,
+                      output_tokens: int = 0, provider: str = "") -> float:
+        """Estimate USD cost using the provider rate when it is known."""
+        rates = cls._cost_rates(agent_type, provider)
+        return round(
+            (max(0, input_tokens) / 1000) * rates["input"]
+            + (max(0, output_tokens) / 1000) * rates["output"],
+            6,
+        )

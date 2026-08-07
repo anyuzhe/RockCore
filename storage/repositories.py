@@ -80,6 +80,18 @@ class JobRepository:
             self.session.commit()
         return job
 
+    def add_usage(self, job_id: str, input_tokens: int = 0,
+                  output_tokens: int = 0, cost: float = 0.0) -> Optional[Job]:
+        job = self.get_by_id(job_id)
+        if job:
+            job.usage_input_tokens = (job.usage_input_tokens or 0) + max(0, int(input_tokens or 0))
+            job.usage_output_tokens = (job.usage_output_tokens or 0) + max(0, int(output_tokens or 0))
+            job.usage_calls = (job.usage_calls or 0) + 1
+            job.usage_cost = round((job.usage_cost or 0.0) + max(0.0, float(cost or 0.0)), 6)
+            job.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return job
+
 
 class ConstitutionRepository:
     def __init__(self, session: Session):
@@ -232,6 +244,11 @@ class AgentRunRepository:
                 run.completed_at = datetime.now(timezone.utc)
             self.session.commit()
         return run
+
+    def list_by_task(self, task_id: int) -> list[AgentRun]:
+        return self.session.query(AgentRun).filter(
+            AgentRun.task_id == task_id
+        ).order_by(AgentRun.created_at.asc()).all()
 
 
 class ToolCallRepository:

@@ -1002,8 +1002,19 @@ class Engine:
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
+                if self._is_provider_unavailable(last_error):
+                    logger.warning(
+                        f"Task {task.task_id}: provider failure is not retryable "
+                        "on the same provider; switching to fallback"
+                    )
+                    break
 
         if self._is_provider_unavailable(last_error):
+            fallback = await self._run_worker_fallback(
+                worker, task, worktree_root, last_error
+            )
+            if fallback:
+                return fallback
             return {"status": "failed", "error": last_error}
 
         # L0 + L1 failed — escalate
@@ -1059,12 +1070,21 @@ class Engine:
             "status code: 402", "error code: 401", "status code: 401",
             "error code: 403", "status code: 403", "invalid api key",
             "authentication", "quota exceeded", "billing",
+            "connection error", "connection reset", "network error",
+            "timed out", "timeout", "rate limit", "too many requests",
+            "temporarily unavailable", "service unavailable", "server error",
+            "status code: 500", "status code: 502", "status code: 503",
+            "status code: 504", "error code: 500", "error code: 502",
+            "error code: 503", "error code: 504",
+            "invalid response", "malformed response", "expected a json object",
+            "missing credentials", "credentials were not found", "api key",
         )
         return any(marker in normalized for marker in markers)
 
     async def _run_worker_fallback(self, worker, task, worktree_root: str,
                                    original_error: str) -> dict | None:
         """Try one tool-capable alternate worker when the primary provider is unavailable."""
+        fallback_errors = []
         for provider in ("kimi",):
             if not self.model_router.has_provider(provider):
                 continue
@@ -1073,12 +1093,34 @@ class Engine:
                 from_provider="deepseek", to_provider=provider,
                 reason=original_error[:200],
             )
-            result = await worker.run(
-                task, project_root=worktree_root, provider_override=provider
-            )
+            try:
+                result = await worker.run(
+                    task,
+                    project_root=worktree_root,
+                    provider_override=provider,
+                    recovery_context=(
+                        "The primary worker provider failed before completing this task. "
+                        "Use the existing project state and finish the task with focused "
+                        "tool calls; do not repeat broad exploration."
+                    ),
+                )
+            except Exception as error:
+                fallback_errors.append(f"{provider}: {error}")
+                continue
             if result and result.get("status") == "completed":
                 return {"status": "completed", "result": result,
                         "fallback_provider": provider}
+            if result and result.get("error"):
+                fallback_errors.append(f"{provider}: {result['error']}")
+        if fallback_errors:
+            logger.warning("Worker fallback attempts failed: %s", "; ".join(fallback_errors))
+            return {
+                "status": "failed",
+                "error": (
+                    f"Primary worker provider failed: {original_error}; "
+                    f"fallback attempts failed: {'; '.join(fallback_errors)}"
+                ),
+            }
         return None
 
     async def _repair_plan(self, job, failed_task, error, repos) -> dict | None:

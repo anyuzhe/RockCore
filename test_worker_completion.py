@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from agents.worker import WorkerAgent
 from orchestrator.agent_config import ProjectAgentConfig
 from orchestrator.engine import Engine
+from orchestrator.model_router import ModelRouter
 
 
 def _task(task_type="coding"):
@@ -115,6 +116,116 @@ class _ReviewSequenceRouter:
         }
 
 
+class _MalformedResponseRouter:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        return {"content": "A concise report", "tool_calls": [], "usage": {}}
+
+
+class _ToolFailureRouter:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "Applying the change.",
+                "tool_calls": [{
+                    "id": "bad-args",
+                    "function": {"name": "apply_patch", "arguments": "{"},
+                }],
+                "usage": {},
+            }
+        if self.calls == 2:
+            return {
+                "content": "Applying with valid arguments.",
+                "tool_calls": [{
+                    "id": "good-edit",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": json.dumps({
+                            "path": "game.js", "search": "old", "replace": "new"
+                        }),
+                    },
+                }],
+                "usage": {},
+            }
+        return {"content": "Done", "tool_calls": [], "usage": {}}
+
+
+class _ToolExceptionRouter(_ToolFailureRouter):
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls <= 2:
+            return {
+                "content": "Applying with valid arguments.",
+                "tool_calls": [{
+                    "id": f"edit-{self.calls}",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": json.dumps({
+                            "path": "game.js", "search": "old", "replace": "new"
+                        }),
+                    },
+                }],
+                "usage": {},
+            }
+        return {"content": "Done", "tool_calls": [], "usage": {}}
+
+
+class _ThrowingBroker(_RecordingBroker):
+    def __init__(self):
+        super().__init__()
+        self._thrown = False
+
+    async def execute(self, _task_value, name, args):
+        self.executed.append(name)
+        if name == "apply_patch" and args.get("search") == "old" and not self._thrown:
+            self._thrown = True
+            raise PermissionError("read-only workspace")
+        return {"status": "success", "content": "ok"}
+
+
+class _InvalidResultBroker(_RecordingBroker):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def execute(self, _task_value, name, _args):
+        self.executed.append(name)
+        self.calls += 1
+        return None if self.calls == 1 else {"status": "success", "content": "ok"}
+
+
+class _InvalidResultRouter:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls <= 2:
+            return {
+                "content": "Retrying after tool failure.",
+                "tool_calls": [{
+                    "id": "invalid-result",
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": json.dumps({
+                            "path": "game.js", "search": "old", "replace": "new"
+                        }),
+                    },
+                }],
+                "usage": {},
+            }
+        return {"content": "Done", "tool_calls": [], "usage": {}}
+
+
 def test_coding_worker_corrects_premature_no_tool_completion():
     async def scenario():
         router = _PrematureThenEditingRouter()
@@ -144,6 +255,55 @@ def test_read_only_review_stops_after_evidence_and_returns_report():
         assert result["status"] == "completed"
         assert "Review report" in result["content"]
         assert broker.executed == ["read_file"] * 4
+
+    asyncio.run(scenario())
+
+
+def test_worker_never_crashes_on_a_malformed_provider_response():
+    async def scenario():
+        worker = WorkerAgent(_MalformedResponseRouter(), _RecordingBroker(), max_turns=4)
+        result = await worker.run(_task("analysis"), project_root=".")
+
+        assert result["status"] == "failed"
+        assert "invalid response object" in result["error"]
+
+    asyncio.run(scenario())
+
+
+def test_worker_returns_tool_argument_errors_to_the_model():
+    async def scenario():
+        router = _ToolFailureRouter()
+        broker = _RecordingBroker()
+        worker = WorkerAgent(router, broker, max_turns=5)
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["apply_patch"]
+
+    asyncio.run(scenario())
+
+
+def test_worker_continues_after_a_tool_exception():
+    async def scenario():
+        router = _ToolExceptionRouter()
+        broker = _ThrowingBroker()
+        worker = WorkerAgent(router, broker, max_turns=5)
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["apply_patch", "apply_patch"]
+
+    asyncio.run(scenario())
+
+
+def test_worker_converts_an_invalid_tool_result_to_recoverable_error():
+    async def scenario():
+        broker = _InvalidResultBroker()
+        worker = WorkerAgent(_InvalidResultRouter(), broker, max_turns=3)
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["apply_patch", "apply_patch"]
 
     asyncio.run(scenario())
 
@@ -210,6 +370,28 @@ class _RecoveringWorker:
         return {"status": "failed", "error": "Max turns (10) reached"}
 
 
+class _TransientProviderWorker:
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, *_args, **kwargs):
+        self.calls.append(kwargs.get("provider_override"))
+        if kwargs.get("provider_override") == "kimi":
+            return {"status": "completed", "content": "Recovered with Kimi."}
+        return {"status": "failed", "error": "Connection error"}
+
+
+class _ThrowingProviderWorker:
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, *_args, **kwargs):
+        self.calls.append(kwargs.get("provider_override"))
+        if kwargs.get("provider_override") == "kimi":
+            return {"status": "completed", "content": "Recovered with Kimi."}
+        raise RuntimeError("Missing credentials for DeepSeek")
+
+
 def test_no_change_turn_limit_switches_to_kimi_repair(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
@@ -236,6 +418,106 @@ def test_no_change_turn_limit_switches_to_kimi_repair(tmp_path):
         assert result["status"] == "completed"
         assert worker.calls[-1]["provider_override"] == "kimi"
         assert "Finish the existing implementation" in worker.calls[-1]["recovery_context"]
+
+    asyncio.run(scenario())
+
+
+def test_connection_failure_switches_to_kimi_immediately(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        worker = _TransientProviderWorker()
+        engine.model_router._providers["kimi"] = object()
+
+        result = await engine._execute_single_task_with_escalation(
+            _task(),
+            SimpleNamespace(job_id="JOB-TRANSIENT", project=None),
+            {},
+            worker,
+            str(tmp_path),
+        )
+
+        assert result["status"] == "completed"
+        assert worker.calls == [None, "kimi"]
+
+    asyncio.run(scenario())
+
+
+def test_thrown_provider_failure_skips_same_provider_retries(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        worker = _ThrowingProviderWorker()
+        engine.model_router._providers["kimi"] = object()
+
+        result = await engine._execute_single_task_with_escalation(
+            _task(),
+            SimpleNamespace(job_id="JOB-CREDENTIALS", project=None),
+            {},
+            worker,
+            str(tmp_path),
+        )
+
+        assert result["status"] == "completed"
+        assert worker.calls == [None, "kimi"]
+
+    asyncio.run(scenario())
+
+
+def test_transient_provider_error_is_classified_for_fallback():
+    assert Engine._is_provider_unavailable("Connection error")
+    assert Engine._is_provider_unavailable("HTTP 503 Service Unavailable")
+    assert Engine._is_provider_unavailable("Request timed out")
+
+
+class _SlowProvider:
+    async def chat(self, *_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return {"content": "late", "usage": {}}
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return {"content": "late", "tool_calls": [], "usage": {}}
+
+
+class _SyncMalformedProvider:
+    def chat(self, *_args, **_kwargs):
+        return None
+
+    def chat_with_tools(self, *_args, **_kwargs):
+        return {"content": None, "tool_calls": None, "usage": "invalid"}
+
+
+def test_model_router_translates_provider_timeout():
+    async def scenario():
+        router = ModelRouter(provider_map={"worker": "deepseek"})
+        router.register_provider("deepseek", _SlowProvider())
+        router.request_timeout = 0.01
+
+        try:
+            await router.chat("worker", "system", [])
+        except TimeoutError as error:
+            assert "timed out" in str(error)
+        else:
+            raise AssertionError("expected provider timeout")
+
+    asyncio.run(scenario())
+
+
+def test_model_router_normalizes_sync_and_malformed_provider_output():
+    async def scenario():
+        router = ModelRouter(provider_map={"worker": "deepseek"})
+        router.register_provider("deepseek", _SyncMalformedProvider())
+
+        try:
+            await router.chat("worker", "system", [])
+        except RuntimeError as error:
+            assert "invalid response object" in str(error)
+        else:
+            raise AssertionError("expected invalid response error")
+
+        response = await router.chat_with_tools("worker", "system", [], [])
+        assert response["content"] == ""
+        assert response["tool_calls"] == []
+        assert response["usage"] == {"input_tokens": 0, "output_tokens": 0}
 
     asyncio.run(scenario())
 

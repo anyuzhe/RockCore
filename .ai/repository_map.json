@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-07 09:39:51.256616+00:00",
+  "generated_at": "2026-08-07 10:03:01.548272+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -14,7 +14,7 @@
     {
       "path": "test_worker_completion.py",
       "category": "source",
-      "symbols": 21
+      "symbols": 49
     },
     {
       "path": "requirements.txt",
@@ -264,7 +264,7 @@
     {
       "path": "agents/worker.py",
       "category": "source",
-      "symbols": 3
+      "symbols": 4
     },
     {
       "path": "agents/planner.py",
@@ -464,7 +464,7 @@
     {
       "path": "orchestrator/model_router.py",
       "category": "source",
-      "symbols": 7
+      "symbols": 9
     },
     {
       "path": "orchestrator/merge_manager.py",
@@ -559,127 +559,295 @@
     {
       "name": "_task",
       "type": "function",
-      "line": 12,
+      "line": 13,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ToolSequenceRouter",
       "type": "class",
-      "line": 23,
+      "line": 24,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_RecordingBroker",
       "type": "class",
-      "line": 48,
+      "line": 49,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_PrematureThenEditingRouter",
       "type": "class",
-      "line": 62,
+      "line": 63,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ReviewSequenceRouter",
       "type": "class",
-      "line": 89,
+      "line": 90,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_MalformedResponseRouter",
+      "type": "class",
+      "line": 119,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_ToolFailureRouter",
+      "type": "class",
+      "line": 130,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_ToolExceptionRouter",
+      "type": "class",
+      "line": 162,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_ThrowingBroker",
+      "type": "class",
+      "line": 182,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_InvalidResultBroker",
+      "type": "class",
+      "line": 195,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_InvalidResultRouter",
+      "type": "class",
+      "line": 206,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_coding_worker_corrects_premature_no_tool_completion",
       "type": "function",
-      "line": 118,
+      "line": 229,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_read_only_review_stops_after_evidence_and_returns_report",
       "type": "function",
-      "line": 134,
+      "line": 245,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_never_crashes_on_a_malformed_provider_response",
+      "type": "function",
+      "line": 262,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_returns_tool_argument_errors_to_the_model",
+      "type": "function",
+      "line": 273,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_continues_after_a_tool_exception",
+      "type": "function",
+      "line": 286,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_converts_an_invalid_tool_result_to_recoverable_error",
+      "type": "function",
+      "line": 299,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_enforces_edit_after_exploration_budget",
       "type": "function",
-      "line": 151,
+      "line": 311,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_AlwaysPartialWorker",
       "type": "class",
-      "line": 169,
+      "line": 329,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_partial_changes_at_turn_limit_do_not_auto_pass",
       "type": "function",
-      "line": 178,
+      "line": 338,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_RecoveringWorker",
       "type": "class",
-      "line": 202,
+      "line": 362,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_TransientProviderWorker",
+      "type": "class",
+      "line": 373,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_ThrowingProviderWorker",
+      "type": "class",
+      "line": 384,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_no_change_turn_limit_switches_to_kimi_repair",
       "type": "function",
-      "line": 213,
+      "line": 395,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_connection_failure_switches_to_kimi_immediately",
+      "type": "function",
+      "line": 425,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_thrown_provider_failure_skips_same_provider_retries",
+      "type": "function",
+      "line": 445,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_transient_provider_error_is_classified_for_fallback",
+      "type": "function",
+      "line": 465,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_SlowProvider",
+      "type": "class",
+      "line": 471,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_SyncMalformedProvider",
+      "type": "class",
+      "line": 481,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_model_router_translates_provider_timeout",
+      "type": "function",
+      "line": 489,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_model_router_normalizes_sync_and_malformed_provider_output",
+      "type": "function",
+      "line": 505,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_default_worker_budgets_use_reliable_soft_limits",
       "type": "function",
-      "line": 243,
+      "line": 525,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_large_existing_task_receives_a_dynamic_budget",
       "type": "function",
-      "line": 254,
+      "line": 536,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 24,
+      "line": 25,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 51,
+      "line": 52,
       "file": "test_worker_completion.py"
     },
     {
       "name": "get_tool_definitions",
       "type": "function",
-      "line": 54,
+      "line": 55,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 63,
+      "line": 64,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 90,
+      "line": 91,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 170,
+      "line": 120,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 203,
+      "line": 131,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 183,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 196,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 207,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 330,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 363,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 374,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 385,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "chat",
+      "type": "function",
+      "line": 482,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "chat_with_tools",
+      "type": "function",
+      "line": 485,
       "file": "test_worker_completion.py"
     },
     {
@@ -2239,19 +2407,25 @@
     {
       "name": "WorkerAgent",
       "type": "class",
-      "line": 57,
+      "line": 58,
       "file": "agents/worker.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 60,
+      "line": 61,
       "file": "agents/worker.py"
     },
     {
       "name": "scoped_to",
       "type": "function",
-      "line": 70,
+      "line": 71,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "_failure",
+      "type": "function",
+      "line": 457,
       "file": "agents/worker.py"
     },
     {
@@ -3301,37 +3475,37 @@
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 1055,
+      "line": 1066,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 1235,
+      "line": 1277,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 1250,
+      "line": 1292,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 1304,
+      "line": 1346,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 1309,
+      "line": 1351,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 1317,
+      "line": 1359,
       "file": "orchestrator/engine.py"
     },
     {
@@ -3529,43 +3703,55 @@
     {
       "name": "ModelRouter",
       "type": "class",
-      "line": 23,
+      "line": 27,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 33,
+      "line": 37,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "set_job_id",
       "type": "function",
-      "line": 46,
+      "line": 51,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "register_provider",
       "type": "function",
-      "line": 49,
+      "line": 54,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "get_provider",
       "type": "function",
-      "line": 52,
+      "line": 57,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "has_provider",
       "type": "function",
-      "line": 58,
+      "line": 63,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_normalize_response",
+      "type": "function",
+      "line": 75,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_normalize_token_count",
+      "type": "function",
+      "line": 97,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "get_route",
       "type": "function",
-      "line": 61,
+      "line": 104,
       "file": "orchestrator/model_router.py"
     },
     {

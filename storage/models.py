@@ -41,6 +41,10 @@ class Job(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
+    usage_input_tokens = Column(Integer, default=0)
+    usage_output_tokens = Column(Integer, default=0)
+    usage_calls = Column(Integer, default=0)
+    usage_cost = Column(Float, default=0.0)
 
     project = relationship("Project", back_populates="jobs")
     constitution = relationship("Constitution", uselist=False, back_populates="job",

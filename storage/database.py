@@ -47,6 +47,20 @@ def _migrate_schema(engine):
                 "ON jobs (source_job_id)"
             )
 
+    usage_columns = {
+        "usage_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "usage_output_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "usage_calls": "INTEGER NOT NULL DEFAULT 0",
+        "usage_cost": "FLOAT NOT NULL DEFAULT 0.0",
+    }
+    missing_usage = [name for name in usage_columns if name not in columns]
+    if missing_usage:
+        with engine.begin() as connection:
+            for name in missing_usage:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE jobs ADD COLUMN {name} {usage_columns[name]}"
+                )
+
     # Old project deletions could leave test runs behind. SQLite may then reuse
     # the deleted task ID, making an unrelated new task display stale results.
     with engine.begin() as connection:

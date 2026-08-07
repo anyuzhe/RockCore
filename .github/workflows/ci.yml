@@ -9,13 +9,21 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt pytest
-      - name: Run tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pytest>=8.2,<9"
+      - name: Run core tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q
+          PYTHONFAULTHANDLER: '1'
+        run: python -m pytest -q --ignore=test_codex_style_ui.py --tb=long
+      - name: Run Qt UI tests headlessly
+        env:
+          QT_QPA_PLATFORM: minimal
+          PYTHONFAULTHANDLER: '1'
+        run: python -m pytest -q test_codex_style_ui.py --tb=long

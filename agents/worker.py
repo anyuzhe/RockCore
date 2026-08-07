@@ -11,6 +11,7 @@ from tools.tool_broker import ToolBroker
 logger = logging.getLogger(__name__)
 
 WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
+REPORT_TASK_TYPES = {"analysis", "review", "testing"}
 EXPLORATION_TOOLS = {
     "list_files", "read_file", "search_in_file", "search_code",
     "git_status", "git_diff", "read_log",
@@ -141,6 +142,7 @@ Type: {task.task_type}
         progress_warning_sent = False
         finish_warning_sent = False
         premature_completion_count = 0
+        empty_report_count = 0
         force_tool_call = False
         progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
         finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
@@ -186,12 +188,56 @@ Type: {task.task_type}
                     ),
                 )
 
-                usage = response.get("usage", {})
-                total_input += usage.get("input_tokens", 0)
-                total_output += usage.get("output_tokens", 0)
+                if not isinstance(response, dict):
+                    return self._failure(
+                        "Provider returned an invalid response object",
+                        tool_calls_made, total_input, total_output,
+                    )
+
+                usage = response.get("usage") or {}
+                if not isinstance(usage, dict):
+                    usage = {}
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+                total_input += input_tokens if isinstance(input_tokens, (int, float)) else 0
+                total_output += output_tokens if isinstance(output_tokens, (int, float)) else 0
 
                 content = response.get("content", "")
-                tool_calls = response.get("tool_calls", [])
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False, default=str)
+                raw_tool_calls = response.get("tool_calls") or []
+                if not isinstance(raw_tool_calls, list):
+                    raw_tool_calls = [raw_tool_calls]
+                tool_calls = []
+                malformed_calls = []
+                for index, raw_call in enumerate(raw_tool_calls):
+                    call = raw_call if isinstance(raw_call, dict) else {}
+                    function = call.get("function") or {}
+                    if not isinstance(function, dict) or not function.get("name"):
+                        malformed_calls.append(f"tool call {index + 1} has no function name")
+                        continue
+                    arguments = function.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, ensure_ascii=False, default=str)
+                    tool_calls.append({
+                        "id": str(call.get("id") or f"worker-{turn}-{index}"),
+                        "function": {
+                            "name": str(function["name"]),
+                            "arguments": arguments,
+                        },
+                    })
+
+                if malformed_calls:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The provider returned malformed tool calls: "
+                            + "; ".join(malformed_calls)
+                            + ". Return a valid tool call or a final response."
+                        ),
+                    })
+                    if not tool_calls:
+                        continue
 
                 if not tool_calls:
                     if task.task_type == "coding" and not has_written:
@@ -223,6 +269,21 @@ Type: {task.task_type}
                         # Force tool use at the API level until a write succeeds.
                         force_tool_call = True
                         continue
+                    if task.task_type in REPORT_TASK_TYPES and not (content or "").strip():
+                        empty_report_count += 1
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Your response was empty. Return a concise, concrete "
+                                "report of the work or findings now."
+                            ),
+                        })
+                        if empty_report_count < 2:
+                            continue
+                        return self._failure(
+                            "Read-only task ended without a report",
+                            tool_calls_made, total_input, total_output,
+                        )
                     # No more tool calls — task is complete
                     logger.info(f"Worker: task {task.task_id} completed in {turn+1} turns")
                     final_content = content or ""
@@ -251,9 +312,14 @@ Type: {task.task_type}
                 exploration_blocked = False
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
+                    argument_error = None
                     try:
                         args = json.loads(tc["function"]["arguments"])
-                    except json.JSONDecodeError:
+                        if not isinstance(args, dict):
+                            argument_error = "Tool arguments must be a JSON object"
+                            args = {}
+                    except (TypeError, json.JSONDecodeError) as error:
+                        argument_error = f"Invalid tool arguments: {error}"
                         args = {}
 
                     exploration_signature = (
@@ -294,8 +360,28 @@ Type: {task.task_type}
                             ),
                         }
                         exploration_blocked = True
+                    elif argument_error:
+                        result = {"status": "error", "error": argument_error}
                     else:
-                        result = await self.tool_broker.execute(task, func_name, args)
+                        try:
+                            result = await self.tool_broker.execute(task, func_name, args)
+                        except Exception as error:
+                            logger.warning(
+                                "Worker tool %s failed for %s: %s",
+                                func_name, task.task_id, error,
+                            )
+                            result = {
+                                "status": "error",
+                                "error": f"Tool {func_name} failed: {error}",
+                            }
+                        if not isinstance(result, dict):
+                            result = {
+                                "status": "error",
+                                "error": (
+                                    f"Tool {func_name} returned an invalid result; "
+                                    "expected a JSON object"
+                                ),
+                            }
                         if func_name in EXPLORATION_TOOLS:
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
@@ -366,3 +452,15 @@ Type: {task.task_type}
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
             }
+
+    @staticmethod
+    def _failure(error: str, tool_calls: list[dict], input_tokens: int,
+                 output_tokens: int) -> dict:
+        return {
+            "status": "failed",
+            "error": error,
+            "turns": len(tool_calls),
+            "tool_calls": tool_calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
