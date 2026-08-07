@@ -4,11 +4,12 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 
 from app.ui.main_window import MainWindow
 from app.ui.project_config_dialog import ProjectConfigDialog
 from app.ui.project_panel import ProjectPanel
+from app.ui.settings_dialog import SettingsDialog
 from app.ui.task_panel import TaskPanel
 
 
@@ -52,10 +53,18 @@ def test_live_stage_updates_expand_inside_the_conversation():
 
     worker = panel.stages["worker"]
     assert worker._status == "running"
+    assert worker.indicator.is_spinning
+    assert panel.job_status_indicator.is_spinning
     assert not worker.output.isHidden()
     assert "正在修改 index.html" in worker.output.toPlainText()
     assert hasattr(panel, "diff_details")
     assert hasattr(panel, "test_details")
+
+    panel.update_stage("worker", "success", "修改完成")
+    panel.update_job_status("JOB-1", "done")
+    assert not worker.indicator.is_spinning
+    assert not panel.job_status_indicator.is_spinning
+    panel.close()
 
 
 def test_switching_from_fast_to_auto_restores_the_full_pipeline(tmp_path):
@@ -106,4 +115,34 @@ def test_sidebar_primary_action_creates_a_project():
     assert panel.new_project_btn.toolTip() == "添加本地项目"
     assert not hasattr(panel, "new_request_btn")
     assert not hasattr(panel, "add_project_btn")
+    panel.close()
+
+
+def test_api_key_fields_have_reveal_buttons():
+    _app()
+    dialog = SettingsDialog()
+
+    for field, button in (
+        (dialog.kimi_api_key, dialog.kimi_api_key_reveal),
+        (dialog.ds_api_key, dialog.ds_api_key_reveal),
+    ):
+        assert field.echoMode() == QLineEdit.EchoMode.Password
+        assert button.toolTip() == "显示密钥"
+        button.click()
+        assert field.echoMode() == QLineEdit.EchoMode.Normal
+        assert button.toolTip() == "隐藏密钥"
+        button.click()
+        assert field.echoMode() == QLineEdit.EchoMode.Password
+
+    dialog.close()
+
+
+def test_sidebar_uses_rock_innovation_branding():
+    _app()
+    panel = ProjectPanel()
+    labels = panel.findChildren(QLabel)
+    assert any(label.text() == "RockCore" for label in labels)
+    assert any(label.text() == "岩创科技" for label in labels)
+    mark = next(label for label in labels if label.text() == "")
+    assert not mark.pixmap().isNull()
     panel.close()

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-07 08:04:26.753096+00:00",
+  "generated_at": "2026-08-07 09:24:19.992700+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -9,7 +9,12 @@
     {
       "path": "test_codex_style_ui.py",
       "category": "source",
-      "symbols": 5
+      "symbols": 7
+    },
+    {
+      "path": "test_worker_completion.py",
+      "category": "source",
+      "symbols": 18
     },
     {
       "path": "test_storage_integrity.py",
@@ -19,7 +24,7 @@
     {
       "path": "test_kimi_models.py",
       "category": "source",
-      "symbols": 2
+      "symbols": 5
     },
     {
       "path": "__init__.py",
@@ -43,6 +48,11 @@
     },
     {
       "path": "world_cup_2022_bracket_layout_design.md",
+      "category": "markup",
+      "symbols": 0
+    },
+    {
+      "path": "README.md",
       "category": "markup",
       "symbols": 0
     },
@@ -82,9 +92,14 @@
       "symbols": 3
     },
     {
+      "path": "test_reviewer_recovery.py",
+      "category": "source",
+      "symbols": 8
+    },
+    {
       "path": "test_workflow_routing.py",
       "category": "source",
-      "symbols": 7
+      "symbols": 8
     },
     {
       "path": "today_weekday.html",
@@ -154,7 +169,7 @@
     {
       "path": "app/ui/settings_dialog.py",
       "category": "source",
-      "symbols": 8
+      "symbols": 13
     },
     {
       "path": "app/ui/project_config_dialog.py",
@@ -164,7 +179,7 @@
     {
       "path": "app/ui/task_panel.py",
       "category": "source",
-      "symbols": 44
+      "symbols": 51
     },
     {
       "path": "memory/repo_map.py",
@@ -244,7 +259,7 @@
     {
       "path": "agents/reviewer.py",
       "category": "source",
-      "symbols": 3
+      "symbols": 4
     },
     {
       "path": "backend/server.py",
@@ -349,7 +364,7 @@
     {
       "path": "orchestrator/engine.py",
       "category": "source",
-      "symbols": 19
+      "symbols": 22
     },
     {
       "path": "orchestrator/scheduler.py",
@@ -416,32 +431,152 @@
     {
       "name": "_app",
       "type": "function",
-      "line": 18,
+      "line": 19,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_running_request_can_queue_a_followup",
       "type": "function",
-      "line": 24,
+      "line": 25,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_live_stage_updates_expand_inside_the_conversation",
       "type": "function",
-      "line": 41,
+      "line": 42,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_switching_from_fast_to_auto_restores_the_full_pipeline",
       "type": "function",
-      "line": 61,
+      "line": 70,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_sidebar_settings_and_context_project_removal",
       "type": "function",
-      "line": 78,
+      "line": 87,
       "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_sidebar_primary_action_creates_a_project",
+      "type": "function",
+      "line": 110,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_api_key_fields_have_reveal_buttons",
+      "type": "function",
+      "line": 121,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "_task",
+      "type": "function",
+      "line": 12,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_ToolSequenceRouter",
+      "type": "class",
+      "line": 23,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_RecordingBroker",
+      "type": "class",
+      "line": 48,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_PrematureThenEditingRouter",
+      "type": "class",
+      "line": 62,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_coding_worker_corrects_premature_no_tool_completion",
+      "type": "function",
+      "line": 89,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_enforces_edit_after_exploration_budget",
+      "type": "function",
+      "line": 105,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_AlwaysPartialWorker",
+      "type": "class",
+      "line": 123,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_partial_changes_at_turn_limit_do_not_auto_pass",
+      "type": "function",
+      "line": 132,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_RecoveringWorker",
+      "type": "class",
+      "line": 156,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_no_change_turn_limit_switches_to_kimi_repair",
+      "type": "function",
+      "line": 167,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_default_worker_budgets_use_reliable_soft_limits",
+      "type": "function",
+      "line": 197,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_large_existing_task_receives_a_dynamic_budget",
+      "type": "function",
+      "line": 208,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 24,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 51,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "get_tool_definitions",
+      "type": "function",
+      "line": 54,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 63,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 124,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 157,
+      "file": "test_worker_completion.py"
     },
     {
       "name": "test_reused_task_primary_key_does_not_inherit_stale_test_runs",
@@ -452,13 +587,31 @@
     {
       "name": "test_kimi_k3_is_available_for_project_configuration",
       "type": "function",
-      "line": 7,
+      "line": 10,
       "file": "test_kimi_models.py"
     },
     {
       "name": "test_kimi_provider_accepts_k3_configuration",
       "type": "function",
-      "line": 11,
+      "line": 14,
+      "file": "test_kimi_models.py"
+    },
+    {
+      "name": "test_kimi_forwards_required_tool_choice_only_for_tool_chat",
+      "type": "function",
+      "line": 21,
+      "file": "test_kimi_models.py"
+    },
+    {
+      "name": "_Completions",
+      "type": "class",
+      "line": 22,
+      "file": "test_kimi_models.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 23,
       "file": "test_kimi_models.py"
     },
     {
@@ -642,6 +795,54 @@
       "file": "test_pipeline.py"
     },
     {
+      "name": "_ReviewRouter",
+      "type": "class",
+      "line": 10,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_retries_an_empty_codex_response",
+      "type": "function",
+      "line": 24,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_falls_back_to_kimi_after_invalid_codex_output",
+      "type": "function",
+      "line": 39,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_reports_empty_output_clearly_when_all_attempts_fail",
+      "type": "function",
+      "line": 55,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_reads_changes_from_commits_for_the_current_job",
+      "type": "function",
+      "line": 69,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 11,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "has_provider",
+      "type": "function",
+      "line": 16,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "git",
+      "type": "function",
+      "line": 70,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
       "name": "test_auto_mode_keeps_full_workflow_for_simple_requests",
       "type": "function",
       "line": 14,
@@ -672,15 +873,21 @@
       "file": "test_workflow_routing.py"
     },
     {
-      "name": "test_unavailable_reviewer_cannot_auto_pass_a_job",
+      "name": "test_transitive_dependencies_are_pruned_after_serialization",
       "type": "function",
       "line": 164,
       "file": "test_workflow_routing.py"
     },
     {
+      "name": "test_unavailable_reviewer_cannot_auto_pass_a_job",
+      "type": "function",
+      "line": 182,
+      "file": "test_workflow_routing.py"
+    },
+    {
       "name": "FailedReviewer",
       "type": "class",
-      "line": 179,
+      "line": 197,
       "file": "test_workflow_routing.py"
     },
     {
@@ -830,163 +1037,163 @@
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 226,
+      "line": 225,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 244,
+      "line": 243,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_followup_requested",
       "type": "function",
-      "line": 320,
+      "line": 319,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_clear_followup_source",
       "type": "function",
-      "line": 331,
+      "line": 330,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_start_new_request",
       "type": "function",
-      "line": 338,
+      "line": 337,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_project_deleted",
       "type": "function",
-      "line": 349,
+      "line": 348,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_create_project",
       "type": "function",
-      "line": 370,
+      "line": 369,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_submit_request",
       "type": "function",
-      "line": 411,
+      "line": 410,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_submit_queued_followup",
       "type": "function",
-      "line": 519,
+      "line": 518,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_cancel_queued_request",
       "type": "function",
-      "line": 533,
+      "line": 532,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_update_send_state",
       "type": "function",
-      "line": 539,
+      "line": 538,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_run",
       "type": "function",
-      "line": 548,
+      "line": 547,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_pause",
       "type": "function",
-      "line": 555,
+      "line": 554,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_stop",
       "type": "function",
-      "line": 562,
+      "line": 561,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_event",
       "type": "function",
-      "line": 570,
+      "line": 569,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_capture_diff",
       "type": "function",
-      "line": 710,
+      "line": 714,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_reload_selected_workflow",
       "type": "function",
-      "line": 762,
+      "line": 766,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_refresh_job_list",
       "type": "function",
-      "line": 767,
+      "line": 771,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_status",
       "type": "function",
-      "line": 791,
+      "line": 795,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_poll_events",
       "type": "function",
-      "line": 795,
+      "line": 799,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_project_config",
       "type": "function",
-      "line": 802,
+      "line": 806,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_settings",
       "type": "function",
-      "line": 814,
+      "line": 818,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_switch_tab",
       "type": "function",
-      "line": 821,
+      "line": 825,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_show_about",
       "type": "function",
-      "line": 824,
+      "line": 828,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 832,
+      "line": 836,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 851,
+      "line": 855,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "closeEvent",
       "type": "function",
-      "line": 854,
+      "line": 858,
       "file": "app/ui/main_window.py"
     },
     {
@@ -1022,151 +1229,181 @@
     {
       "name": "__init__",
       "type": "function",
-      "line": 102,
+      "line": 101,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 109,
+      "line": 108,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_projects",
       "type": "function",
-      "line": 166,
+      "line": 159,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_jobs",
       "type": "function",
-      "line": 185,
+      "line": 178,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_job",
       "type": "function",
-      "line": 209,
+      "line": 202,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "clear_job_selection",
       "type": "function",
-      "line": 217,
+      "line": 210,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_project",
       "type": "function",
-      "line": 221,
+      "line": 214,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_job_id",
       "type": "function",
-      "line": 229,
+      "line": 222,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_project_name",
       "type": "function",
-      "line": 234,
+      "line": 227,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "update_job_status",
       "type": "function",
-      "line": 239,
+      "line": 232,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "remove_project",
       "type": "function",
-      "line": 254,
+      "line": 247,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 262,
+      "line": 255,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 266,
+      "line": 259,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_add_project",
       "type": "function",
-      "line": 270,
+      "line": 263,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_show_project_menu",
       "type": "function",
-      "line": 283,
+      "line": 276,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_delete_project",
       "type": "function",
-      "line": 296,
+      "line": 289,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 312,
+      "line": 305,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "load_config",
       "type": "function",
-      "line": 20,
+      "line": 21,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "save_config",
       "type": "function",
-      "line": 29,
+      "line": 30,
+      "file": "app/ui/settings_dialog.py"
+    },
+    {
+      "name": "PasswordRevealButton",
+      "type": "class",
+      "line": 35,
+      "file": "app/ui/settings_dialog.py"
+    },
+    {
+      "name": "_password_field",
+      "type": "function",
+      "line": 77,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "SettingsDialog",
       "type": "class",
-      "line": 34,
+      "line": 88,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 37,
+      "line": 38,
+      "file": "app/ui/settings_dialog.py"
+    },
+    {
+      "name": "_set_password_visible",
+      "type": "function",
+      "line": 47,
+      "file": "app/ui/settings_dialog.py"
+    },
+    {
+      "name": "paintEvent",
+      "type": "function",
+      "line": 56,
+      "file": "app/ui/settings_dialog.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 91,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 46,
+      "line": 100,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_refresh_scoring",
       "type": "function",
-      "line": 221,
+      "line": 277,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_save",
       "type": "function",
-      "line": 227,
+      "line": 283,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "get_config",
       "type": "function",
-      "line": 255,
+      "line": 311,
       "file": "app/ui/settings_dialog.py"
     },
     {
@@ -1214,7 +1451,7 @@
     {
       "name": "_save",
       "type": "function",
-      "line": 278,
+      "line": 282,
       "file": "app/ui/project_config_dialog.py"
     },
     {
@@ -1230,267 +1467,309 @@
       "file": "app/ui/project_config_dialog.py"
     },
     {
+      "name": "StatusIndicator",
+      "type": "class",
+      "line": 45,
+      "file": "app/ui/task_panel.py"
+    },
+    {
       "name": "WorkflowStage",
       "type": "class",
-      "line": 43,
+      "line": 100,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "ExecutionDisclosure",
       "type": "class",
-      "line": 138,
+      "line": 192,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "TaskPanel",
       "type": "class",
-      "line": 199,
+      "line": 253,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 46,
+      "line": 48,
       "file": "app/ui/task_panel.py"
     },
     {
-      "name": "_toggle_output",
+      "name": "is_spinning",
       "type": "function",
-      "line": 95,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "set_expanded",
-      "type": "function",
-      "line": 98,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "reset",
-      "type": "function",
-      "line": 104,
+      "line": 59,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_status",
       "type": "function",
-      "line": 111,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "set_output",
-      "type": "function",
-      "line": 121,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "append_output",
-      "type": "function",
-      "line": 128,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "__init__",
-      "type": "function",
-      "line": 141,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "toggle",
-      "type": "function",
-      "line": 169,
-      "file": "app/ui/task_panel.py"
-    },
-    {
-      "name": "set_expanded",
-      "type": "function",
-      "line": 172,
+      "line": 62,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "clear",
       "type": "function",
-      "line": 178,
+      "line": 74,
       "file": "app/ui/task_panel.py"
     },
     {
-      "name": "set_text",
+      "name": "_advance",
       "type": "function",
-      "line": 183,
+      "line": 78,
       "file": "app/ui/task_panel.py"
     },
     {
-      "name": "append",
+      "name": "paintEvent",
       "type": "function",
-      "line": 188,
+      "line": 82,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 212,
+      "line": 103,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_toggle_output",
+      "type": "function",
+      "line": 150,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "set_expanded",
+      "type": "function",
+      "line": 153,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "reset",
+      "type": "function",
+      "line": 159,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "set_status",
+      "type": "function",
+      "line": 166,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "set_output",
+      "type": "function",
+      "line": 175,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "append_output",
+      "type": "function",
+      "line": 182,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 195,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "toggle",
+      "type": "function",
+      "line": 223,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "set_expanded",
+      "type": "function",
+      "line": 226,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "clear",
+      "type": "function",
+      "line": 232,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "set_text",
+      "type": "function",
+      "line": 237,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "append",
+      "type": "function",
+      "line": 242,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 266,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 219,
+      "line": 273,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_project_context",
       "type": "function",
-      "line": 343,
+      "line": 400,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "begin_new_request",
       "type": "function",
-      "line": 353,
+      "line": 410,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_workflow",
       "type": "function",
-      "line": 357,
+      "line": 414,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "clear_workflow",
       "type": "function",
-      "line": 470,
+      "line": 527,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_stage",
       "type": "function",
-      "line": 486,
+      "line": 544,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "append_stage_output",
       "type": "function",
-      "line": 499,
+      "line": 557,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "add_model_output",
       "type": "function",
-      "line": 504,
+      "line": 562,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_tasks",
       "type": "function",
-      "line": 526,
+      "line": 584,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_task_status",
       "type": "function",
-      "line": 531,
+      "line": 589,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "has_task",
       "type": "function",
-      "line": 538,
+      "line": 596,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_job_status",
       "type": "function",
-      "line": 541,
+      "line": 599,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log",
       "type": "function",
-      "line": 548,
+      "line": 606,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log_event",
       "type": "function",
-      "line": 555,
+      "line": 613,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log_test_result",
       "type": "function",
-      "line": 565,
+      "line": 626,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_diff",
       "type": "function",
-      "line": 571,
+      "line": 632,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "expand_detail",
       "type": "function",
-      "line": 574,
+      "line": 635,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_request_followup",
       "type": "function",
-      "line": 585,
+      "line": 646,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_set_header_status",
       "type": "function",
-      "line": 589,
+      "line": 650,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_refresh_worker_stage",
       "type": "function",
-      "line": 594,
+      "line": 656,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_populate_test_details",
       "type": "function",
-      "line": 636,
+      "line": 698,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_bottom",
       "type": "function",
-      "line": 650,
+      "line": 712,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_top",
       "type": "function",
-      "line": 654,
+      "line": 716,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 658,
+      "line": 720,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_issue_text",
       "type": "function",
-      "line": 662,
+      "line": 724,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_details",
       "type": "function",
-      "line": 668,
+      "line": 730,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_normalize_model_output",
       "type": "function",
-      "line": 681,
+      "line": 743,
       "file": "app/ui/task_panel.py"
     },
     {
@@ -1784,37 +2063,37 @@
     {
       "name": "WorkerAgent",
       "type": "class",
-      "line": 50,
+      "line": 57,
       "file": "agents/worker.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 53,
+      "line": 60,
       "file": "agents/worker.py"
     },
     {
       "name": "scoped_to",
       "type": "function",
-      "line": 61,
+      "line": 70,
       "file": "agents/worker.py"
     },
     {
       "name": "PlannerAgent",
       "type": "class",
-      "line": 50,
+      "line": 57,
       "file": "agents/planner.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 53,
+      "line": 60,
       "file": "agents/planner.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 179,
+      "line": 186,
       "file": "agents/planner.py"
     },
     {
@@ -1832,7 +2111,7 @@
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 99,
+      "line": 100,
       "file": "agents/emergency_coder.py"
     },
     {
@@ -1856,19 +2135,25 @@
     {
       "name": "ReviewerAgent",
       "type": "class",
-      "line": 45,
+      "line": 46,
       "file": "agents/reviewer.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 48,
+      "line": 49,
+      "file": "agents/reviewer.py"
+    },
+    {
+      "name": "_collect_job_changes",
+      "type": "function",
+      "line": 142,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 119,
+      "line": 189,
       "file": "agents/reviewer.py"
     },
     {
@@ -2708,115 +2993,133 @@
     {
       "name": "Engine",
       "type": "class",
-      "line": 45,
+      "line": 46,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 48,
+      "line": 49,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 70,
+      "line": 71,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 85,
+      "line": 86,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "register_agent",
       "type": "function",
-      "line": 88,
+      "line": 89,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "get_agent",
       "type": "function",
-      "line": 91,
+      "line": 92,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_on_state_change_sync",
       "type": "function",
-      "line": 102,
+      "line": 103,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_classify_request",
       "type": "function",
-      "line": 138,
+      "line": 139,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_direct_plan_data",
       "type": "function",
-      "line": 437,
+      "line": 443,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_tasks_from_plan",
       "type": "function",
-      "line": 453,
+      "line": 459,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_serialize_overlapping_tasks",
       "type": "function",
-      "line": 471,
+      "line": 477,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_prune_transitive_dependencies",
+      "type": "function",
+      "line": 497,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_path_patterns_overlap",
       "type": "function",
-      "line": 491,
+      "line": 529,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_estimate_task_budget",
+      "type": "function",
+      "line": 553,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_direct_plan",
       "type": "function",
-      "line": 514,
+      "line": 639,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 878,
+      "line": 1052,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 1058,
+      "line": 1232,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 1073,
+      "line": 1247,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 1127,
+      "line": 1301,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 1132,
+      "line": 1306,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 1140,
+      "line": 1314,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "reaches",
+      "type": "function",
+      "line": 505,
       "file": "orchestrator/engine.py"
     },
     {
@@ -3116,10 +3419,11 @@
   ],
   "categories": {
     "source": {
-      "count": 65,
+      "count": 67,
       "files": [
         "test_workflow_followup.py",
         "test_codex_style_ui.py",
+        "test_worker_completion.py",
         "test_storage_integrity.py",
         "test_kimi_models.py",
         "__init__.py",
@@ -3128,6 +3432,7 @@
         "test_analysis_tasks.py",
         "test_resilient_validation.py",
         "test_pipeline.py",
+        "test_reviewer_recovery.py",
         "test_workflow_routing.py",
         "tools/shell_tools.py",
         "tools/git_tools.py",
@@ -3165,9 +3470,7 @@
         "backend/websocket.py",
         "storage/models.py",
         "storage/database.py",
-        "storage/__init__.py",
-        "storage/repositories.py",
-        "git/__init__.py"
+        "storage/__init__.py"
       ]
     },
     "config": {
@@ -3177,9 +3480,10 @@
       ]
     },
     "markup": {
-      "count": 10,
+      "count": 11,
       "files": [
         "world_cup_2022_bracket_layout_design.md",
+        "README.md",
         "world_cup_2022_knockout_analysis.md",
         "today.html",
         "weekday.html",

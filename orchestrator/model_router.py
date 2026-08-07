@@ -92,7 +92,7 @@ class ModelRouter:
             return {"content": f"Error: Budget exceeded ({msg})", "finish_reason": "error"}
 
         # Route to best provider
-        route = self.get_route(agent_type, task)
+        route = kwargs.pop("provider_override", None) or self.get_route(agent_type, task)
         provider = self.get_provider(route)
 
         # Snapshot messages for chat log before the call

@@ -78,7 +78,8 @@ Run the acceptance command to verify.
 
             result.setdefault("summary", "Emergency fix applied")
             result.setdefault("changes", [])
-            result.setdefault("fix_success", True)
+            # Never claim success when the model omitted an explicit result.
+            result.setdefault("fix_success", False)
             result.setdefault("remaining_issues", [])
 
             logger.info(

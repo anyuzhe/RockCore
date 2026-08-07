@@ -28,6 +28,13 @@ Rules:
     when one exists; otherwise leave acceptance_command empty for local validation.
 11. Analysis tasks are read-only by default. Their final written analysis is the
     deliverable, so do not require them to create or modify project files.
+12. Keep each coding task to at most 2-3 independently verifiable behaviors. Split
+    state logic, UI wiring, persistence/restart, and integration when they are
+    substantial, even if they touch the same file.
+13. Dependencies must list only direct prerequisites. Do not repeat every transitive
+    dependency on all later tasks.
+14. Use at most one read-only analysis task for a small or single-page project.
+    Searching and reading the identified code sections belong in the same task.
 
 Output ONLY valid JSON with this structure:
 {

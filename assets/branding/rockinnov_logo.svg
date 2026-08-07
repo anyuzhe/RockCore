@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>岩创科技 Rock Innovation</title>
+  <path fill="#c85620" d="M128 12 226 68v120l-98 56-98-56V68z"/>
+  <path fill="#f3a34b" d="m128 12 98 56-98 57L30 68z"/>
+  <path fill="#8e3519" d="M30 68v120l98 56V125z"/>
+  <path fill="#fffaf4" d="M88 77h48c25 0 40 12 40 31 0 13-8 24-21 29l27 42h-28l-22-37h-18v37H88zm26 21v24h21c10 0 16-4 16-12s-6-12-16-12z"/>
+</svg>

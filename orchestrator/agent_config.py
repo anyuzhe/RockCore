@@ -43,17 +43,17 @@ class ProjectAgentConfig:
     # ── Agent profiles ──
     governor: AgentProfile = field(default_factory=lambda: AgentProfile(enabled=True, provider="codex", model="codex-sdk"))
     planner: AgentProfile = field(default_factory=lambda: AgentProfile(enabled=True, provider="kimi", model="kimi-k2.6", max_turns=8))
-    worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=20, max_exploration_turns=4, patch_recovery_turns=2, retry_count=2))
+    worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=24, max_exploration_turns=4, patch_recovery_turns=2, retry_count=2))
     reviewer: AgentProfile = field(default_factory=lambda: AgentProfile(enabled=True, provider="codex", model="codex-sdk"))
 
     # ── Per-complexity turn overrides ──
     complexity_turns: dict[str, int] = field(default_factory=lambda: {
-        "simple": 10,
-        "normal": 20,
-        "complex": 30,
+        "simple": 16,
+        "normal": 24,
+        "complex": 36,
     })
     complexity_exploration: dict[str, int] = field(default_factory=lambda: {
-        "simple": 3,
+        "simple": 4,
         "normal": 6,
         "complex": 8,
     })
@@ -128,9 +128,9 @@ class ProjectAgentConfig:
             mode="standard",
             governor=AgentProfile(enabled=True, provider="codex", model="codex-sdk"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k2.6", max_turns=8),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=16, max_exploration_turns=4, retry_count=2),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=24, max_exploration_turns=4, retry_count=2),
             reviewer=AgentProfile(enabled=True, provider="codex", model="codex-sdk"),
-            complexity_turns={"simple": 12, "normal": 16, "complex": 20},
+            complexity_turns={"simple": 16, "normal": 24, "complex": 32},
             continuation_context=True,
             auto_validation=True,
         )
@@ -142,9 +142,9 @@ class ProjectAgentConfig:
             mode="strict",
             governor=AgentProfile(enabled=True, provider="codex", model="codex-sdk"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k2.6", max_turns=10),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=25, max_exploration_turns=6, retry_count=2),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=6, retry_count=2),
             reviewer=AgentProfile(enabled=True, provider="codex", model="codex-sdk"),
-            complexity_turns={"simple": 14, "normal": 25, "complex": 30},
+            complexity_turns={"simple": 20, "normal": 30, "complex": 40},
             continuation_context=True,
             auto_validation=True,
             auto_repair=True,

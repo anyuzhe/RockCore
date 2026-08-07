@@ -14,9 +14,13 @@ _default_db_path = None
 def get_default_db_path():
     global _default_db_path
     if _default_db_path is None:
-        data_dir = Path.home() / ".ai_engineering_studio"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        _default_db_path = str(data_dir / "studio.db")
+        try:
+            from app.paths import database_path
+            _default_db_path = str(database_path())
+        except ImportError:
+            data_dir = Path.home() / ".ai_engineering_studio"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            _default_db_path = str(data_dir / "studio.db")
     return _default_db_path
 
 

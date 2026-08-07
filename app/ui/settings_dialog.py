@@ -7,14 +7,16 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QPushButton, QLabel, QTabWidget, QWidget, QMessageBox, QSpinBox,
-    QDoubleSpinBox, QTextEdit, QComboBox, QGroupBox
+    QDoubleSpinBox, QTextEdit, QComboBox, QGroupBox, QToolButton
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtGui import QPainter, QPainterPath, QPen
 
 from orchestrator.agent_config import PROVIDER_MODELS
+from app.paths import config_path
 
 
-CONFIG_PATH = Path.home() / ".ai_engineering_studio" / "config.json"
+CONFIG_PATH = config_path()
 
 
 def load_config() -> dict:
@@ -29,6 +31,59 @@ def load_config() -> dict:
 def save_config(config: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(config, indent=2))
+
+
+class PasswordRevealButton(QToolButton):
+    """Eye button that toggles one password field without exposing it by default."""
+
+    def __init__(self, field: QLineEdit, parent=None):
+        super().__init__(parent)
+        self._field = field
+        self.setObjectName("passwordRevealButton")
+        self.setCheckable(True)
+        self.setFixedSize(32, 32)
+        self.toggled.connect(self._set_password_visible)
+        self._set_password_visible(False)
+
+    def _set_password_visible(self, visible: bool):
+        self._field.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+        action = "隐藏密钥" if visible else "显示密钥"
+        self.setToolTip(action)
+        self.setAccessibleName(action)
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(self.palette().buttonText().color(), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+
+        eye = QPainterPath()
+        eye.moveTo(6, 16)
+        eye.cubicTo(9, 11, 12, 9, 16, 9)
+        eye.cubicTo(20, 9, 23, 11, 26, 16)
+        eye.cubicTo(23, 21, 20, 23, 16, 23)
+        eye.cubicTo(12, 23, 9, 21, 6, 16)
+        painter.drawPath(eye)
+        painter.drawEllipse(QRectF(13, 13, 6, 6))
+        if not self.isChecked():
+            painter.drawLine(7, 24, 25, 8)
+
+
+def _password_field(field: QLineEdit) -> tuple[QWidget, PasswordRevealButton]:
+    container = QWidget()
+    layout = QHBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    layout.addWidget(field, 1)
+    reveal = PasswordRevealButton(field)
+    layout.addWidget(reveal)
+    return container, reveal
 
 
 class SettingsDialog(QDialog):
@@ -54,7 +109,8 @@ class SettingsDialog(QDialog):
         self.kimi_api_key = QLineEdit()
         self.kimi_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.kimi_api_key.setText(self._config.get("kimi", {}).get("api_key", ""))
-        kimi_layout.addRow("API 密钥：", self.kimi_api_key)
+        kimi_key_field, self.kimi_api_key_reveal = _password_field(self.kimi_api_key)
+        kimi_layout.addRow("API 密钥：", kimi_key_field)
 
         self.kimi_model = QComboBox()
         self.kimi_model.setEditable(True)
@@ -75,7 +131,8 @@ class SettingsDialog(QDialog):
         self.ds_api_key = QLineEdit()
         self.ds_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.ds_api_key.setText(self._config.get("deepseek", {}).get("api_key", ""))
-        ds_layout.addRow("API 密钥：", self.ds_api_key)
+        ds_key_field, self.ds_api_key_reveal = _password_field(self.ds_api_key)
+        ds_layout.addRow("API 密钥：", ds_key_field)
 
         self.ds_model = QLineEdit(
             self._config.get("deepseek", {}).get("model", "deepseek-v4-flash")

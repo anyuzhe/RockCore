@@ -83,6 +83,7 @@ class KimiProvider(BaseProvider):
             tools=tools if tools else None,
             temperature=self._resolve_temperature(**kwargs),
             max_tokens=kwargs.get("max_tokens", 8192),
+            tool_choice=kwargs.get("tool_choice", "auto") if tools else None,
         )
 
         choice = response.choices[0]

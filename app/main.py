@@ -17,6 +17,10 @@ sys.path.insert(0, str(project_root))
 
 from qasync import QApplication
 
+from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, icon_path
+from app.paths import default_workspace_dir
+from app.runtime import configure_windows_identity
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
+    configure_runtime_logging()
     from storage.database import init_database
     from orchestrator.engine import Engine
     from orchestrator.model_router import ModelRouter
@@ -70,7 +75,7 @@ async def main():
     await engine.start()
 
     # ── Initialize context manager (V5) ──
-    working_dir = config.get("working_dir", str(Path(__file__).parent.parent.resolve()))
+    working_dir = config.get("working_dir", str(default_workspace_dir()))
     context_manager = ContextManager(working_dir)
     await context_manager.initialize()
 
@@ -128,8 +133,12 @@ async def main():
     # ── Start PyQt application ──
     # qasync.run() already created the QApplication, get the existing instance
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("RockCore")
-    app.setOrganizationName("RockCore")
+    app.setApplicationName(FULL_PRODUCT_NAME)
+    app.setOrganizationName(COMPANY_NAME)
+    configure_windows_identity()
+    if icon_path().exists():
+        from PyQt6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(icon_path())))
 
     app.setStyleSheet("""
         QMainWindow, QDialog, QMessageBox, QWidget#workspace,
@@ -144,6 +153,7 @@ async def main():
         }
         QLabel { color: #25231f; }
         QLabel#brandLabel { font-size: 17px; font-weight: 700; }
+        QLabel#brandCompanyLabel { color: #b85a20; font-size: 10px; font-weight: 600; }
         QLabel#sectionLabel, QLabel#traceLabel {
             color: #7a746c; font-size: 11px; font-weight: 600;
         }
@@ -231,6 +241,12 @@ async def main():
         QToolButton#disclosureButton:hover, QToolButton#detailButton:hover {
             color: #25231f; background: #eeeae4; border-radius: 4px;
         }
+        QToolButton#passwordRevealButton {
+            background: transparent; color: #766f67; border: none;
+            border-radius: 5px; padding: 0;
+        }
+        QToolButton#passwordRevealButton:hover,
+        QToolButton#passwordRevealButton:checked { background: #eeeae4; color: #25231f; }
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
             background: #ffffff; color: #25231f; border: 1px solid #d6d1c9;
             border-radius: 6px; padding: 6px; selection-background-color: #ead9c7;

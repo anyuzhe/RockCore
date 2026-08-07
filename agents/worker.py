@@ -2,12 +2,19 @@
 
 import json
 import logging
+import math
 from typing import Any
 
 from orchestrator.model_router import ModelRouter
 from tools.tool_broker import ToolBroker
 
 logger = logging.getLogger(__name__)
+
+WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
+EXPLORATION_TOOLS = {
+    "list_files", "read_file", "search_in_file", "search_code",
+    "git_status", "git_diff", "read_log",
+}
 
 WORKER_SYSTEM_PROMPT = """You are a code executor, not an investigator.
 
@@ -51,11 +58,13 @@ class WorkerAgent:
     """DeepSeek Worker: executes tasks using tools."""
 
     def __init__(self, model_router: ModelRouter, tool_broker: ToolBroker,
-                 max_turns: int = 25, context_manager=None):
+                 max_turns: int = 25, max_exploration_turns: int = 4,
+                 context_manager=None):
         self.model_router = model_router
         self.tool_broker = tool_broker
         self.agent_type = "worker"
         self.max_turns = max_turns
+        self.max_exploration_turns = max_exploration_turns
         self.context_manager = context_manager
 
     def scoped_to(self, project_root: str) -> "WorkerAgent":
@@ -65,11 +74,13 @@ class WorkerAgent:
             self.model_router,
             broker,
             max_turns=self.max_turns,
+            max_exploration_turns=self.max_exploration_turns,
             context_manager=self.context_manager,
         )
 
     async def run(self, task, project=None, project_root: str | None = None,
-                  provider_override: str | None = None) -> dict:
+                  provider_override: str | None = None,
+                  recovery_context: str = "") -> dict:
         """Execute a single task using the tool-calling loop."""
         logger.info(f"Worker: executing task {task.task_id}: {task.title}")
 
@@ -107,15 +118,55 @@ Type: {task.task_type}
             task_context += "\nRead existing code, then implement the changes. Verify with git_diff."
         elif task.task_type == "testing":
             task_context += "\nWrite tests and verify they pass."
+        if recovery_context:
+            task_context += (
+                "\n\nThis is a focused continuation after an earlier attempt. "
+                "Keep existing useful changes, avoid repeating broad exploration, "
+                "and finish the task now.\nRecovery guidance:\n"
+                + recovery_context[:4000]
+            )
 
         messages = [{"role": "user", "content": task_context}]
         total_input = 0
         total_output = 0
         tool_calls_made = []
         final_content = ""
+        exploration_calls = 0
+        has_written = False
+        seen_exploration_calls: set[tuple[str, str, bool]] = set()
+        progress_warning_sent = False
+        finish_warning_sent = False
+        premature_completion_count = 0
+        force_tool_call = False
+        progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
+        finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
 
         try:
             for turn in range(self.max_turns):
+                if turn >= finish_warning_turn and not finish_warning_sent:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have used 85% of the task budget. Stop broad work, "
+                            "complete the required edits, run one focused verification, "
+                            "and return the final completion response."
+                        ),
+                    })
+                    finish_warning_sent = True
+                elif (
+                    turn >= progress_warning_turn
+                    and not has_written
+                    and not progress_warning_sent
+                ):
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have used 70% of the task budget without editing. "
+                            "Stop investigating and apply the required change now."
+                        ),
+                    })
+                    progress_warning_sent = True
+
                 response = await self.model_router.chat_with_tools(
                     self.agent_type,
                     system_prompt,
@@ -123,6 +174,12 @@ Type: {task.task_type}
                     tools=self.tool_broker.get_tool_definitions(),
                     provider_override=provider_override,
                     task=task,
+                    max_tokens=8192,
+                    tool_choice=(
+                        "required"
+                        if task.task_type == "coding" and force_tool_call and not has_written
+                        else "auto"
+                    ),
                 )
 
                 usage = response.get("usage", {})
@@ -133,6 +190,35 @@ Type: {task.task_type}
                 tool_calls = response.get("tool_calls", [])
 
                 if not tool_calls:
+                    if task.task_type == "coding" and not has_written:
+                        premature_completion_count += 1
+                        messages.append({
+                            "role": "assistant",
+                            "content": (content or "")[-1600:],
+                        })
+                        if premature_completion_count >= 2:
+                            return {
+                                "status": "failed",
+                                "error": "Coding model ended without editing files",
+                                "content": content or "",
+                                "turns": len(tool_calls_made),
+                                "tool_calls": tool_calls_made,
+                                "input_tokens": total_input,
+                                "output_tokens": total_output,
+                            }
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "This is a coding task and no editing tool has been "
+                                "used. The task is not complete. Use write_file, "
+                                "apply_patch, insert_before, or insert_after now."
+                            ),
+                        })
+                        # The text reminder alone is not reliable: some models
+                        # repeatedly promise to edit without emitting a tool call.
+                        # Force tool use at the API level until a write succeeds.
+                        force_tool_call = True
+                        continue
                     # No more tool calls — task is complete
                     logger.info(f"Worker: task {task.task_id} completed in {turn+1} turns")
                     final_content = content or ""
@@ -142,7 +228,9 @@ Type: {task.task_type}
                 # Process tool calls
                 messages.append({
                     "role": "assistant",
-                    "content": content or "",
+                    # Long narrated reasoning is not needed on later turns and
+                    # can crowd the actual file/tool context out of the window.
+                    "content": (content or "")[-1600:],
                     "tool_calls": [
                         {
                             "id": tc["id"],
@@ -156,6 +244,7 @@ Type: {task.task_type}
                     ],
                 })
 
+                exploration_blocked = False
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
                     try:
@@ -163,8 +252,52 @@ Type: {task.task_type}
                     except json.JSONDecodeError:
                         args = {}
 
-                    # Execute through ToolBroker
-                    result = await self.tool_broker.execute(task, func_name, args)
+                    exploration_signature = (
+                        func_name,
+                        json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
+                        has_written,
+                    )
+                    repeated_exploration = (
+                        task.task_type == "coding"
+                        and func_name in EXPLORATION_TOOLS
+                        and exploration_signature in seen_exploration_calls
+                    )
+                    if repeated_exploration:
+                        result = {
+                            "status": "rejected",
+                            "error": (
+                                "This exact read/search was already completed in the "
+                                "current phase. Use the existing result and change strategy."
+                            ),
+                        }
+                        exploration_blocked = True
+                    elif (
+                        task.task_type == "coding"
+                        and func_name in EXPLORATION_TOOLS
+                        and exploration_calls >= (
+                            self.max_exploration_turns + (2 if has_written else 0)
+                        )
+                    ):
+                        result = {
+                            "status": "rejected",
+                            "error": (
+                                "Exploration budget exhausted. Use write_file, "
+                                "apply_patch, insert_before, or insert_after now."
+                            ),
+                        }
+                        exploration_blocked = True
+                    else:
+                        result = await self.tool_broker.execute(task, func_name, args)
+                        if func_name in EXPLORATION_TOOLS:
+                            exploration_calls += 1
+                            seen_exploration_calls.add(exploration_signature)
+                        if (
+                            func_name in WRITE_TOOLS
+                            and result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
+                            has_written = True
+                            force_tool_call = False
                     tool_calls_made.append({
                         "tool": func_name,
                         "args": args,
@@ -180,6 +313,17 @@ Type: {task.task_type}
                     })
 
                     logger.info(f"Worker: {func_name} -> {result.get('status', 'ok')}")
+
+                if exploration_blocked:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The read-only exploration limit has been reached. "
+                            "Do not read or search again. Apply the remaining code "
+                            "changes now, or return the final completion response if "
+                            "the task is fully implemented."
+                        ),
+                    })
 
             else:
                 logger.warning(f"Worker: task {task.task_id} reached max turns ({self.max_turns})")

@@ -32,7 +32,7 @@ def test_auto_mode_keeps_full_workflow_for_simple_requests(tmp_path):
         async def planner(job, repos, config=None):
             await record("planner")
 
-        async def execution(job, repos, baseline=None):
+        async def execution(job, repos, baseline=None, **_kwargs):
             await record("worker")
 
         async def reviewer(job, repos):
@@ -159,6 +159,24 @@ def test_overlapping_task_paths_are_serialized():
     assert "T004" in plan["tasks"][1]["dependencies"]
     assert "T004" in plan["tasks"][2]["dependencies"]
     assert "T005" in plan["tasks"][2]["dependencies"]
+
+
+def test_transitive_dependencies_are_pruned_after_serialization():
+    plan = {
+        "tasks": [
+            {"id": "T001", "allowed_paths": ["game.js"], "dependencies": []},
+            {"id": "T002", "allowed_paths": ["game.js"], "dependencies": []},
+            {"id": "T003", "allowed_paths": ["game.js"], "dependencies": []},
+            {"id": "T004", "allowed_paths": ["game.js"], "dependencies": []},
+        ]
+    }
+
+    Engine._serialize_overlapping_tasks(plan)
+    Engine._prune_transitive_dependencies(plan)
+
+    assert [task["dependencies"] for task in plan["tasks"]] == [
+        [], ["T001"], ["T002"], ["T003"]
+    ]
 
 
 def test_unavailable_reviewer_cannot_auto_pass_a_job(tmp_path):

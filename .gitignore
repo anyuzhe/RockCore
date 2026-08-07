@@ -1,0 +1,6 @@
+build/pyinstaller/
+dist/
+release/
+build/version_info.generated.txt
+__pycache__/
+*.pyc

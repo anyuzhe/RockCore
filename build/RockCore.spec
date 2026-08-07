@@ -1,0 +1,40 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller spec for the RockCore Windows desktop application."""
+
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_submodules
+
+
+ROOT = Path(SPECPATH).resolve().parent
+APP = ROOT / "app" / "main.py"
+ASSETS = ROOT / "assets"
+VERSION_FILE = ROOT / "build" / "version_info.generated.txt"
+
+hiddenimports = ["qasync", "PyQt6.QtSvg", "PyQt6.QtSvgWidgets"]
+hiddenimports += collect_submodules("sqlalchemy")
+
+a = Analysis(
+    [str(APP)],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=[(str(ASSETS), "assets")],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["pytest", "tests"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe_kwargs = {
+    "name": "RockCore",
+    "console": False,
+    "exclude_binaries": True,
+    "disable_windowed_traceback": False,
+    "icon": str(ASSETS / "branding" / "rockcore.ico"),
+}
+if VERSION_FILE.exists():
+    exe_kwargs["version"] = str(VERSION_FILE)
+exe = EXE(pyz, a.scripts, [], **exe_kwargs)
+COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="RockCore")

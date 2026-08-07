@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from typing import Any
 
 from orchestrator.model_router import ModelRouter
@@ -53,24 +54,8 @@ class ReviewerAgent:
         """Run a review on the job's changes."""
         logger.info(f"Reviewer (Codex): reviewing job {job.job_id}")
 
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["git", "diff"],
-                capture_output=True, text=True,
-                cwd=job.project.root_path if job.project else ".",
-            )
-            diff = result.stdout or "(no changes)"
-
-            result2 = subprocess.run(
-                ["git", "diff", "--name-only"],
-                capture_output=True, text=True,
-                cwd=job.project.root_path if job.project else ".",
-            )
-            changed_files = result2.stdout.strip().split("\n") if result2.stdout else []
-        except Exception as e:
-            diff = f"(error getting diff: {e})"
-            changed_files = []
+        project_root = job.project.root_path if job.project else "."
+        diff, changed_files = self._collect_job_changes(project_root, job.job_id)
 
         messages = [
             {
@@ -92,14 +77,7 @@ Output ONLY valid JSON."""
         ]
 
         try:
-            response = await self.model_router.chat(
-                self.agent_type,
-                REVIEWER_SYSTEM_PROMPT,
-                messages,
-            )
-
-            content = response.get("content", "{}")
-            review = self._parse_json(content)
+            review = await self._request_review(messages)
 
             review.setdefault("result", "pass")
             review.setdefault("severity", "low")
@@ -116,10 +94,115 @@ Output ONLY valid JSON."""
             logger.error(f"Reviewer (Codex) failed: {e}")
             raise
 
+    async def _request_review(self, messages: list[dict]) -> dict:
+        """Retry malformed output, then use a configured alternate reviewer."""
+        attempts = [
+            (None, messages),
+            (None, messages + [{
+                "role": "user",
+                "content": (
+                    "Your previous response was empty or invalid. Return the review "
+                    "now as one valid JSON object only, with no Markdown fences or prose."
+                ),
+            }]),
+        ]
+        if self.model_router.has_provider("kimi"):
+            attempts.append(("kimi", messages + [{
+                "role": "user",
+                "content": "Return exactly one valid JSON review object.",
+            }]))
+
+        failures = []
+        for provider_override, attempt_messages in attempts:
+            provider_name = provider_override or "codex"
+            try:
+                response = await self.model_router.chat(
+                    self.agent_type,
+                    REVIEWER_SYSTEM_PROMPT,
+                    attempt_messages,
+                    provider_override=provider_override,
+                    response_format={"type": "json_object"},
+                )
+                content = response.get("content", "")
+                return self._parse_json(content)
+            except Exception as exc:
+                failures.append(f"{provider_name}: {exc}")
+                logger.warning(
+                    "Reviewer attempt failed via %s: %s",
+                    provider_name, exc,
+                )
+
+        raise RuntimeError(
+            "审核模型未返回有效 JSON；已重试 Codex"
+            + (" 并尝试 Kimi 备用审核" if self.model_router.has_provider("kimi") else "")
+            + "。" + "；".join(failures)[:500]
+        )
+
+    @staticmethod
+    def _collect_job_changes(project_root: str, job_id: str) -> tuple[str, list[str]]:
+        """Collect committed patches for this job, with worktree diff as fallback."""
+        import subprocess
+
+        try:
+            commit_result = subprocess.run(
+                [
+                    "git", "log", "--reverse", "--format=%H", "--fixed-strings",
+                    f"--grep=AI {job_id}:",
+                ],
+                capture_output=True, text=True, cwd=project_root, timeout=10,
+            )
+            commits = [line.strip() for line in commit_result.stdout.splitlines() if line.strip()]
+            if commit_result.returncode == 0 and commits:
+                patches = []
+                changed_files = set()
+                for commit in commits:
+                    show = subprocess.run(
+                        ["git", "show", "--format=medium", "--stat", "--patch", commit],
+                        capture_output=True, text=True, cwd=project_root, timeout=10,
+                    )
+                    if show.stdout.strip():
+                        patches.append(show.stdout.strip())
+                    names = subprocess.run(
+                        ["git", "show", "--format=", "--name-only", commit],
+                        capture_output=True, text=True, cwd=project_root, timeout=10,
+                    )
+                    changed_files.update(
+                        line.strip() for line in names.stdout.splitlines() if line.strip()
+                    )
+                return "\n\n".join(patches) or "(no changes)", sorted(changed_files)
+
+            diff_result = subprocess.run(
+                ["git", "diff"], capture_output=True, text=True,
+                cwd=project_root, timeout=10,
+            )
+            names_result = subprocess.run(
+                ["git", "diff", "--name-only"], capture_output=True, text=True,
+                cwd=project_root, timeout=10,
+            )
+            changed_files = [
+                line.strip() for line in names_result.stdout.splitlines() if line.strip()
+            ]
+            return diff_result.stdout or "(no changes)", changed_files
+        except Exception as exc:
+            return f"(error getting job changes: {exc})", []
+
     def _parse_json(self, content: str) -> dict:
-        content = content.strip()
+        content = (content or "").strip()
+        if not content:
+            raise ValueError("模型返回了空响应")
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
         elif "```" in content:
             content = content.split("```")[1].split("```")[0].strip()
-        return json.loads(content)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # Some providers prepend one short sentence despite the JSON-only
+            # instruction. Extract the outer object without accepting prose as data.
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not match:
+                raise ValueError("响应中没有 JSON 对象")
+            parsed = json.loads(match.group(0))
+        if not isinstance(parsed, dict):
+            raise ValueError("审核响应必须是 JSON 对象")
+        return parsed

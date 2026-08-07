@@ -67,6 +67,7 @@ class OpenAIProvider(BaseProvider):
             temperature=kwargs.get("temperature", 0.3),
             max_tokens=kwargs.get("max_tokens", 8192),
             parallel_tool_calls=kwargs.get("parallel_tool_calls", True),
+            tool_choice=kwargs.get("tool_choice", "auto") if tools else None,
         )
 
         choice = response.choices[0]

@@ -1,6 +1,7 @@
 """Main orchestrator engine — the brain of the AI Engineering Studio."""
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -283,7 +284,11 @@ class Engine:
                     return
 
                 # ── Phase 3: Execute tasks ──
-                await self._run_execution(job, repos, job_baseline)
+                await self._run_execution(
+                    job, repos, job_baseline,
+                    proj_config=proj_config,
+                    complexity=complexity,
+                )
                 repos["_session"].refresh(job)
                 if job.status == "cancelled":
                     if worker and saved_turns is not None:
@@ -392,6 +397,7 @@ class Engine:
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
         self._serialize_overlapping_tasks(plan_data)
+        self._prune_transitive_dependencies(plan_data)
 
         plan = repos["plan"].create(
             job_id=job.id,
@@ -488,6 +494,38 @@ class Engine:
             task["dependencies"] = dependencies
 
     @staticmethod
+    def _prune_transitive_dependencies(plan_data: dict):
+        """Keep only direct DAG prerequisites after path serialization."""
+        tasks = plan_data.get("tasks", [])
+        dependencies_by_id = {
+            task.get("id"): list(task.get("dependencies") or [])
+            for task in tasks if task.get("id")
+        }
+
+        def reaches(start: str, target: str, seen: set[str] | None = None) -> bool:
+            if start == target:
+                return True
+            seen = set() if seen is None else seen
+            if start in seen:
+                return False
+            seen.add(start)
+            return any(
+                dependency == target or reaches(dependency, target, set(seen))
+                for dependency in dependencies_by_id.get(start, [])
+            )
+
+        for task in tasks:
+            dependencies = list(dict.fromkeys(task.get("dependencies") or []))
+            task["dependencies"] = [
+                dependency
+                for dependency in dependencies
+                if not any(
+                    other != dependency and reaches(other, dependency)
+                    for other in dependencies
+                )
+            ]
+
+    @staticmethod
     def _path_patterns_overlap(left: str, right: str) -> bool:
         import fnmatch
 
@@ -511,6 +549,93 @@ class Engine:
                  or right_prefix.startswith(left_prefix + "/"))
         )
 
+    @staticmethod
+    def _estimate_task_budget(task, project_root: str, base_turns: int,
+                              base_exploration: int, mode: str = "auto") -> dict:
+        """Size a Worker budget from the task and the files it will actually touch."""
+        root = Path(project_root).resolve()
+        files: set[Path] = set()
+        ignored_parts = {".git", ".ai", "node_modules", ".venv", "venv"}
+        for pattern in task.allowed_paths or []:
+            normalized = (pattern or "").replace("\\", "/").lstrip("./")
+            if not normalized:
+                continue
+            try:
+                candidates = root.glob(normalized)
+                for candidate in candidates:
+                    if len(files) >= 30:
+                        break
+                    if (
+                        candidate.is_file()
+                        and not ignored_parts.intersection(candidate.relative_to(root).parts)
+                    ):
+                        files.add(candidate)
+            except (OSError, ValueError):
+                continue
+
+        text_suffixes = {
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".scss",
+            ".vue", ".json", ".md", ".toml", ".yaml", ".yml", ".java",
+            ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp",
+        }
+        total_lines = 0
+        for path in files:
+            try:
+                if path.suffix.lower() in text_suffixes and path.stat().st_size <= 2 * 1024 * 1024:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        total_lines += sum(1 for _ in handle)
+            except OSError:
+                continue
+
+        task_type = (task.task_type or "coding").lower()
+        dependency_count = len(task.dependencies or [])
+        description = task.description or ""
+        behavior_count = sum(description.count(mark) for mark in ("；", ";", "。", "."))
+        reasons = [f"base={base_turns}"]
+
+        if task_type == "analysis":
+            turns = min(base_turns, 10 if total_lines >= 800 else 8)
+            exploration = min(max(base_exploration, 4), max(4, turns - 2))
+            reasons.append("read-only analysis")
+        elif task_type in {"testing", "review"}:
+            turns = min(base_turns, 18 if len(files) > 2 else 14)
+            exploration = min(max(base_exploration, 3), max(3, turns // 2))
+            reasons.append("validation task")
+        else:
+            turns = base_turns
+            exploration = base_exploration
+            if total_lines >= 400:
+                turns += 6
+                exploration += 2
+                reasons.append(f"existing_code={total_lines} lines")
+            if total_lines >= 1000:
+                turns += 6
+                exploration += 1
+                reasons.append("large codebase slice")
+            if len(files) >= 2:
+                turns += 3
+                reasons.append(f"files={len(files)}")
+            if len(files) >= 5:
+                turns += 3
+                exploration += 1
+            if dependency_count >= 4:
+                turns += 3
+                reasons.append(f"dependencies={dependency_count}")
+            if behavior_count >= 4 or len(description) >= 320:
+                turns += 3
+                reasons.append("multiple behaviors")
+
+        cap = 20 if mode == "fast" else 50
+        turns = max(6, min(cap, turns))
+        exploration = max(2, min(12, exploration, max(2, turns // 2)))
+        return {
+            "max_turns": turns,
+            "exploration_turns": exploration,
+            "existing_files": len(files),
+            "total_lines": total_lines,
+            "reason": ", ".join(reasons),
+        }
+
     def _create_direct_plan(self, job, repos, proj_config=None):
         """Persist a direct task for a deliberately disabled Planner phase."""
         plan_data = self._direct_plan_data(job, repos, proj_config)
@@ -521,7 +646,9 @@ class Engine:
         )
         self._create_tasks_from_plan(job, repos, plan_data)
 
-    async def _run_execution(self, job, repos, job_baseline: dict | None = None):
+    async def _run_execution(self, job, repos, job_baseline: dict | None = None,
+                             proj_config: ProjectAgentConfig | None = None,
+                             complexity: str = "normal"):
         """Execute tasks in parallel using DAG scheduler (V4: worktree isolation)."""
         if self._is_cancelled(job.job_id, job, repos):
             return
@@ -596,10 +723,33 @@ class Engine:
                 task_worktree_root = job.project.root_path if job.project else "."
             task_baseline = self.test_manager.capture_snapshot(task_worktree_root)
             task_worker = worker.scoped_to(task_worktree_root)
+            base_exploration = (
+                proj_config.get_exploration_turns(complexity)
+                if proj_config else getattr(task_worker, "max_exploration_turns", 4)
+            )
+            budget = self._estimate_task_budget(
+                t,
+                task_worktree_root,
+                getattr(task_worker, "max_turns", 24),
+                base_exploration,
+                proj_config.mode if proj_config else "auto",
+            )
+            task_worker.max_turns = budget["max_turns"]
+            task_worker.max_exploration_turns = budget["exploration_turns"]
+            logger.info(
+                f"Task {task_id} budget: turns={task_worker.max_turns}, "
+                f"exploration={task_worker.max_exploration_turns} "
+                f"({budget['reason']})"
+            )
 
             repos["task"].update_status_by_pk(t.id, "running")
-            await self.event_bus.publish("task_running", job_id=job.job_id,
-                                          task_id=task_id, title=t.title)
+            await self.event_bus.publish(
+                "task_running", job_id=job.job_id,
+                task_id=task_id, title=t.title,
+                max_turns=task_worker.max_turns,
+                exploration_limit=task_worker.max_exploration_turns,
+                budget_reason=budget["reason"],
+            )
 
             # L0-L3: Attempt with escalation
             result = await self._execute_single_task_with_escalation(
@@ -791,6 +941,8 @@ class Engine:
         replan_count = 0
         escalation_count = 0
         last_error = ""
+        initial_turn_budget = getattr(worker, "max_turns", 16)
+        continuation_turn_budget = min(12, max(8, initial_turn_budget // 2))
 
         for attempt in range(1, MAX_FLASH_RETRY + 2):  # L0 + L1 retry
             try:
@@ -807,32 +959,43 @@ class Engine:
                         if fallback:
                             return fallback
                         return {"status": "failed", "error": last_error}
+                    if "ended without editing files" in last_error.lower():
+                        logger.warning(
+                            f"Task {task.task_id}: model ended before editing; "
+                            "switching to focused repair"
+                        )
+                        break
 
-                # Max turns reached but may have done real work — validate before failing
+                # A turn limit means the model did not explicitly finish. Keep
+                # partial edits for a continuation, but never auto-pass merely
+                # because some file changed.
                 if result and "Max turns" in str(result.get("error", "")):
                     has_changes = await self._check_file_changes(worktree_root)
                     if has_changes:
-                        # Auto-validate: run acceptance test if defined, otherwise just confirm changes
-                        validated = False
-                        if task.acceptance_command:
-                            test_result = await self.test_manager.run_tests(
-                                task, repos, self.event_bus, project_root=worktree_root
-                            )
-                            validated = test_result and test_result.get("status") == "passed"
-                        else:
-                            # No explicit test — if files were modified, consider it a success
-                            validated = True
-
-                        if validated:
-                            logger.info(f"Task {task.task_id}: max turns but changes validated — treating as completed")
-                            return {"status": "completed", "result": result}
-                        else:
-                            logger.warning(f"Task {task.task_id}: max turns, changes exist but validation failed")
-                            return {"status": "failed", "error": "Max turns reached: changes made but validation failed"}
+                        last_error = (
+                            "Max turns reached: partial changes require completion"
+                        )
+                        logger.warning(
+                            f"Task {task.task_id}: max turns with partial changes; "
+                            "continuing in the same worktree"
+                        )
+                        await self.event_bus.publish(
+                            "task_continuing",
+                            job_id=job.job_id,
+                            task_id=task.task_id,
+                            reason=last_error,
+                            attempt=attempt + 1,
+                            max_turns=continuation_turn_budget,
+                        )
+                        worker.max_turns = continuation_turn_budget
+                        continue
                     else:
-                        logger.warning(f"Task {task.task_id}: max turns with NO changes — failing")
-                        return {"status": "failed", "error": f"Max turns reached: no changes detected"}
-                    # Don't retry with fresh context
+                        last_error = "Max turns reached: no changes detected"
+                        logger.warning(
+                            f"Task {task.task_id}: max turns with no changes; "
+                            "switching to focused repair"
+                        )
+                        break
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
@@ -841,6 +1004,7 @@ class Engine:
             return {"status": "failed", "error": last_error}
 
         # L0 + L1 failed — escalate
+        worker.max_turns = continuation_turn_budget
         await self.event_bus.publish("task_repairing", job_id=job.job_id,
                                       task_id=task.task_id, error=last_error)
 
@@ -851,9 +1015,19 @@ class Engine:
                                           task_id=task.task_id)
             repair_plan = await self._repair_plan(job, task, last_error, repos)
             if repair_plan:
+                recovery_context = json.dumps(
+                    repair_plan, ensure_ascii=False, default=str
+                )
                 for attempt in range(1, MAX_FLASH_RETRY + 2):
                     try:
-                        result = await worker.run(task, project_root=worktree_root)
+                        result = await worker.run(
+                            task,
+                            project_root=worktree_root,
+                            provider_override=(
+                                "kimi" if self.model_router.has_provider("kimi") else None
+                            ),
+                            recovery_context=recovery_context,
+                        )
                         if result and result.get("status") == "completed":
                             return {"status": "completed", "result": result}
                         if result and result.get("error"):
@@ -1192,7 +1366,9 @@ Focus on finding the right insertion point using search_in_file, then make targe
         baseline = self.test_manager.capture_snapshot(
             job.project.root_path if job.project else "."
         )
-        await self._run_execution(job, repos, baseline)
+        await self._run_execution(
+            job, repos, baseline, proj_config=cfg, complexity="simple"
+        )
         repos["_session"].refresh(job)
         if job.status == "cancelled":
             worker.max_turns = saved_turns

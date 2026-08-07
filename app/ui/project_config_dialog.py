@@ -132,7 +132,7 @@ class ProjectConfigDialog(QDialog):
 
         self.worker_max_turns = QSpinBox()
         self.worker_max_turns.setRange(4, 50)
-        self.worker_max_turns.setValue(16)
+        self.worker_max_turns.setValue(24)
         form.addRow("最大轮次：", self.worker_max_turns)
 
         self.worker_exploration = QSpinBox()
@@ -158,7 +158,7 @@ class ProjectConfigDialog(QDialog):
         for key, label in [("simple", "简单"), ("normal", "普通"), ("complex", "复杂")]:
             spin = QSpinBox()
             spin.setRange(4, 50)
-            spin.setValue({"simple": 10, "normal": 20, "complex": 30}[key])
+            spin.setValue({"simple": 16, "normal": 24, "complex": 36}[key])
             form2.addRow(f"{label}：", spin)
             self._complexity_spins[key] = spin
         worker_layout.addWidget(gb2)
@@ -260,7 +260,7 @@ class ProjectConfigDialog(QDialog):
         midx = self.worker_model.findData(cfg.worker.model)
         if midx >= 0:
             self.worker_model.setCurrentIndex(midx)
-        self.worker_max_turns.setValue(cfg.worker.max_turns or 16)
+        self.worker_max_turns.setValue(cfg.worker.max_turns or 24)
         self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 4)
         self.worker_retry.setValue(cfg.worker.retry_count or 2)
         self.worker_patch_recovery.setValue(cfg.worker.patch_recovery_turns or 2)
@@ -268,7 +268,11 @@ class ProjectConfigDialog(QDialog):
         # Complexity
         for key in ("simple", "normal", "complex"):
             if key in self._complexity_spins:
-                self._complexity_spins[key].setValue(cfg.complexity_turns.get(key, 10))
+                self._complexity_spins[key].setValue(
+                    cfg.complexity_turns.get(
+                        key, {"simple": 16, "normal": 24, "complex": 36}[key]
+                    )
+                )
 
         # Features
         self.continuation_cb.setChecked(cfg.continuation_context)

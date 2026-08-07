@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.branding import COMPANY_NAME, PRODUCT_NAME, logo_path
 
 
 JOB_STATUS = {
@@ -111,9 +113,26 @@ class ProjectPanel(QWidget):
         layout.setSpacing(10)
 
         brand_row = QHBoxLayout()
-        brand = QLabel("RockCore")
+        brand_mark = QLabel()
+        brand_mark.setFixedSize(28, 28)
+        pixmap = QPixmap(str(logo_path()))
+        if not pixmap.isNull():
+            brand_mark.setPixmap(pixmap.scaled(
+                24, 24, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            brand_mark.setText("岩")
+        brand_row.addWidget(brand_mark)
+        brand_names = QVBoxLayout()
+        brand_names.setSpacing(0)
+        brand = QLabel(PRODUCT_NAME)
         brand.setObjectName("brandLabel")
-        brand_row.addWidget(brand)
+        company = QLabel(COMPANY_NAME)
+        company.setObjectName("brandCompanyLabel")
+        brand_names.addWidget(brand)
+        brand_names.addWidget(company)
+        brand_row.addLayout(brand_names)
         brand_row.addStretch()
         layout.addLayout(brand_row)
 

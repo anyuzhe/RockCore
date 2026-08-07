@@ -3,8 +3,8 @@
 import json
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -39,6 +39,63 @@ STATUS_STYLE = {
     "idle": {"icon": "○", "color": "#74747e", "text": "等待中"},
 }
 
+ACTIVE_STATUSES = {"executing", "reviewing", "governing", "planning", "running"}
+
+
+class StatusIndicator(QWidget):
+    """Static status glyph that becomes a rotating ring while work is active."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._icon = "○"
+        self._color = QColor("#74747e")
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._advance)
+        self.setFixedSize(17, 17)
+
+    @property
+    def is_spinning(self) -> bool:
+        return self._timer.isActive()
+
+    def set_status(self, status: str, style: dict):
+        self._icon = style["icon"]
+        self._color = QColor(style["color"])
+        if status in ACTIVE_STATUSES:
+            if not self._timer.isActive():
+                self._angle = 0
+                self._timer.start()
+        else:
+            self._timer.stop()
+        self.show()
+        self.update()
+
+    def clear(self):
+        self._timer.stop()
+        self.hide()
+
+    def _advance(self):
+        self._angle = (self._angle - 30) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._timer.isActive():
+            pen = QPen(self._color, 2.0)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawArc(QRectF(2.5, 2.5, 12, 12), self._angle * 16, 275 * 16)
+            return
+
+        painter.setPen(self._color)
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._icon)
+
 
 class WorkflowStage(QFrame):
     """One collapsible line in the assistant's execution trace."""
@@ -56,9 +113,7 @@ class WorkflowStage(QFrame):
 
         header = QHBoxLayout()
         header.setSpacing(9)
-        self.indicator = QLabel("○")
-        self.indicator.setFixedWidth(17)
-        self.indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.indicator = StatusIndicator()
         header.addWidget(self.indicator)
 
         self.title_label = QLabel(title)
@@ -111,8 +166,7 @@ class WorkflowStage(QFrame):
     def set_status(self, status: str):
         self._status = status
         style = STATUS_STYLE.get(status, STATUS_STYLE["pending"])
-        self.indicator.setText(style["icon"])
-        self.indicator.setStyleSheet(f"color:{style['color']}; font-weight:700;")
+        self.indicator.set_status(status, style)
         self.status_label.setText(style["text"])
         self.status_label.setStyleSheet(f"color:{style['color']};")
         if status in {"running", "failed", "blocked", "rejected", "fallback"}:
@@ -234,6 +288,9 @@ class TaskPanel(QWidget):
         names.addWidget(self.workflow_title)
         names.addWidget(self.job_meta_label)
         header_layout.addLayout(names, 1)
+        self.job_status_indicator = StatusIndicator()
+        self.job_status_indicator.clear()
+        header_layout.addWidget(self.job_status_indicator)
         self.job_status_label = QLabel("")
         self.job_status_label.setObjectName("jobStatus")
         header_layout.addWidget(self.job_status_label)
@@ -473,6 +530,7 @@ class TaskPanel(QWidget):
         self._worker_outputs = []
         self.workflow_title.setText("新需求")
         self.job_meta_label.setText("选择项目后即可开始")
+        self.job_status_indicator.clear()
         self.job_status_label.clear()
         self.followup_btn.setEnabled(False)
         self.user_row_widget.hide()
@@ -555,7 +613,10 @@ class TaskPanel(QWidget):
     def log_event(self, event_type: str, **data):
         timestamp = datetime.now().strftime("%H:%M:%S")
         useful = []
-        for key in ("task_id", "title", "status", "summary", "error", "command"):
+        for key in (
+            "task_id", "title", "status", "summary", "error", "command",
+            "max_turns", "exploration_limit", "budget_reason",
+        ):
             value = data.get(key)
             if value not in (None, ""):
                 useful.append(f"{key}={str(value)[:180]}")
@@ -588,7 +649,8 @@ class TaskPanel(QWidget):
 
     def _set_header_status(self, status: str):
         style = STATUS_STYLE.get(status, STATUS_STYLE["created"])
-        self.job_status_label.setText(f"{style['icon']}  {style['text']}")
+        self.job_status_indicator.set_status(status, style)
+        self.job_status_label.setText(style["text"])
         self.job_status_label.setStyleSheet(f"color:{style['color']};")
 
     def _refresh_worker_stage(self):

@@ -16,6 +16,7 @@ from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from .project_panel import ProjectPanel
 from .task_panel import TaskPanel
 from .settings_dialog import SettingsDialog, load_config
+from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class MainWindow(QMainWindow):
         self._poll_timer.start(200)
 
     def _setup_ui(self):
-        self.setWindowTitle("RockCore")
+        self.setWindowTitle(FULL_PRODUCT_NAME)
         self.setMinimumSize(1080, 720)
         self.resize(1380, 900)
 
@@ -631,6 +632,11 @@ class MainWindow(QMainWindow):
                 "worker", "running",
                 f"{data.get('task_id', '')} 首次执行失败，正在准备修复",
             )
+        elif event_type == "task_continuing" and is_selected:
+            self.task_panel.update_stage(
+                "worker", "running",
+                f"{data.get('task_id', '')} 已保留部分改动，正在继续完成",
+            )
         elif event_type == "task_replanning" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
@@ -822,9 +828,10 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(
-            self, "关于 RockCore",
-            "RockCore\n\n"
-            "面向本地项目的 AI 工程工作台\n"
+            self, f"关于 {PRODUCT_NAME}",
+            f"{FULL_PRODUCT_NAME}\n\n"
+            f"{PRODUCT_LINE}\n"
+            f"{LEGAL_COMPANY_NAME}\n\n"
             "Codex SDK(裁决/审核) → Kimi K2.6(策划) → DeepSeek V4 Flash(执行)"
         )
 
