@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>今天星期几</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #ffffff;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 20px;
+            padding: 56px 72px;
+            text-align: center;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+            backdrop-filter: blur(6px);
+        }
+        .date {
+            font-size: 22px;
+            letter-spacing: 1px;
+            opacity: 0.85;
+            margin-bottom: 20px;
+        }
+        .weekday {
+            font-size: 60px;
+            font-weight: 700;
+            letter-spacing: 4px;
+        }
+        .hint {
+            margin-top: 24px;
+            font-size: 14px;
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="date" id="dateText"></div>
+        <div class="weekday" id="weekdayText"></div>
+        <div class="hint">以上信息由浏览器根据当前系统时间动态生成</div>
+    </div>
+
+    <script>
+        // getDay() 返回 0(周日) ~ 6(周六)，映射为中文星期名称
+        var weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+
+        function updateDisplay() {
+            var now = new Date();
+
+            var year = now.getFullYear();
+            var month = now.getMonth() + 1;   // getMonth() 从 0 开始
+            var day = now.getDate();
+            var weekday = weekdays[now.getDay()];
+
+            document.getElementById("dateText").textContent = year + "年" + month + "月" + day + "日";
+            document.getElementById("weekdayText").textContent = weekday;
+        }
+
+        // 页面加载时立即计算并显示
+        updateDisplay();
+    </script>
+</body>
+</html>

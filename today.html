@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>今天星期几</title>
+    <style>
+        body {
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: #fff;
+        }
+        .card {
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 16px;
+            padding: 48px 64px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(4px);
+        }
+        .date {
+            font-size: 20px;
+            opacity: 0.85;
+            margin-bottom: 16px;
+        }
+        .weekday {
+            font-size: 56px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="date" id="dateText"></div>
+        <div class="weekday" id="weekdayText"></div>
+    </div>
+
+    <script>
+        // 将 getDay() 返回的数字 (0-6) 映射为对应的中文星期字符串
+        var weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+
+        function getCurrentWeekday() {
+            var now = new Date();
+            var weekdayIndex = Date.prototype.getDay.call(now);
+            return weekdays[weekdayIndex];
+        }
+
+        function displayToday() {
+            var now = new Date();
+            var year = now.getFullYear();
+            var month = now.getMonth() + 1;
+            var day = now.getDate();
+
+            document.getElementById("dateText").textContent = year + "年" + month + "月" + day + "日";
+            document.getElementById("weekdayText").textContent = getCurrentWeekday();
+        }
+
+        displayToday();
+    </script>
+</body>
+</html>

@@ -1,0 +1,88 @@
+"""Shell command execution tools with security restrictions."""
+
+import asyncio
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class ShellTools:
+    """Restricted shell command execution."""
+
+    def __init__(self, project_root: str, allowed_commands: set[str] | None = None):
+        if not project_root or not project_root.strip():
+            import os
+            project_root = os.getcwd()
+            logger.warning(f"ShellTools: empty project_root, falling back to cwd: {project_root}")
+        self.project_root = project_root
+        self.allowed_commands = allowed_commands or {
+            "pytest", "npm", "pnpm", "yarn", "python", "python3",
+            "cmake", "ctest", "make", "ruff", "flake8", "black",
+            "eslint", "tsc", "vitest", "jest", "mypy",
+            "git", "pip", "pip3", "poetry", "cargo", "go",
+            "node", "deno", "bun", "echo", "cat", "ls", "head", "tail",
+            "ruff", "mypy", "black", "isort",
+        }
+
+    async def run_command(self, command: str, timeout: int = 120,
+                          max_output: int = 10000) -> dict:
+        """Run a shell command with restrictions."""
+        if not command or not command.strip():
+            return {
+                "error": "Empty command",
+                "status": "rejected",
+                "stdout": "",
+                "stderr": "Command is empty",
+                "return_code": -1,
+            }
+        base_cmd = command.split()[0] if command.split() else ""
+        if base_cmd not in self.allowed_commands:
+            return {
+                "error": f"Command not allowed: {base_cmd}",
+                "status": "rejected",
+                "stdout": "",
+                "stderr": "Command not in allowed list",
+                "return_code": -1,
+            }
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.project_root,
+            )
+
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                return {
+                    "error": f"Command timed out ({timeout}s)",
+                    "status": "timeout",
+                    "stdout": "",
+                    "stderr": "",
+                    "return_code": -1,
+                }
+
+            stdout_str = stdout.decode("utf-8", errors="replace")[:max_output]
+            stderr_str = stderr.decode("utf-8", errors="replace")[:max_output]
+
+            return {
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "return_code": proc.returncode or 0,
+                "status": "success" if proc.returncode == 0 else "failed",
+            }
+        except Exception as e:
+            logger.error(f"Command execution error: {e}")
+            return {
+                "error": str(e),
+                "status": "error",
+                "stdout": "",
+                "stderr": str(e),
+                "return_code": -1,
+            }

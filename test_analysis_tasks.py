@@ -1,0 +1,140 @@
+"""Regression tests for read-only analysis tasks and dependency failures."""
+
+import asyncio
+
+from app.ui.task_panel import STATUS_STYLE
+from orchestrator.engine import Engine
+from orchestrator.scheduler import Scheduler
+from orchestrator.state_machine import JobState
+
+
+class _AnalysisWorker:
+    def scoped_to(self, _project_root):
+        return self
+
+    async def run(self, _task, **_kwargs):
+        return {
+            "status": "completed",
+            "content": "The project is empty and has no existing technical stack.",
+            "turns": 2,
+        }
+
+
+class _NoChangeCodingWorker:
+    def scoped_to(self, _project_root):
+        return self
+
+    async def run(self, _task, **_kwargs):
+        return {"status": "completed", "content": "No changes made.", "turns": 0}
+
+
+def test_analysis_report_succeeds_without_file_changes(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        try:
+            project = repos["project"].create("Empty", str(project_root))
+            job = repos["job"].create("JOB-ANALYSIS", project.id, "Inspect project")
+            task = repos["task"].create(
+                "T001",
+                job.id,
+                "Inspect project structure",
+                task_type="analysis",
+                allowed_paths=["*"],
+            )
+            engine.register_agent("worker", _AnalysisWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job,
+                repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            assert task.status == "done"
+            done_events = engine.event_bus.get_history("task_done")
+            assert done_events[-1]["data"]["result"]["output"].startswith(
+                "The project is empty"
+            )
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_scheduler_marks_transitive_dependents_as_blocked():
+    async def scenario():
+        scheduler = Scheduler(max_concurrent=1)
+        executed = []
+
+        async def runner(task_id, _task_data):
+            executed.append(task_id)
+            raise RuntimeError("upstream failed")
+
+        results = await scheduler.run_dag(
+            [
+                {"task_id": "T001", "dependencies": []},
+                {"task_id": "T002", "dependencies": ["T001"]},
+                {"task_id": "T003", "dependencies": ["T002"]},
+            ],
+            runner,
+        )
+
+        assert executed == ["T001"]
+        assert results["T002"]["status"] == "blocked"
+        assert results["T002"]["blocked_by"] == ["T001"]
+        assert results["T003"]["status"] == "blocked"
+        assert results["T003"]["blocked_by"] == ["T002"]
+        assert scheduler._completed == set()
+        assert scheduler._failed == {"T001", "T002", "T003"}
+
+    asyncio.run(scenario())
+
+
+def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        try:
+            project = repos["project"].create("Empty", str(project_root))
+            job = repos["job"].create("JOB-BLOCKED", project.id, "Build app")
+            first = repos["task"].create(
+                "T001", job.id, "Create app", task_type="coding"
+            )
+            second = repos["task"].create(
+                "T002", job.id, "Add behavior", dependencies=["T001"], order=1
+            )
+            third = repos["task"].create(
+                "T003", job.id, "Test app", task_type="testing",
+                dependencies=["T002"], order=2,
+            )
+            engine.register_agent("worker", _NoChangeCodingWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job,
+                repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            for task in (first, second, third):
+                repos["_session"].refresh(task)
+            assert first.status == "failed"
+            assert second.status == "blocked"
+            assert third.status == "blocked"
+
+            summary = engine.event_bus.get_history("phase_summary")[-1]["data"]
+            assert summary["details"] == {"done": 0, "failed": 1, "blocked": 2}
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_blocked_tasks_have_a_distinct_user_facing_status():
+    assert STATUS_STYLE["blocked"]["text"] == "已阻塞"

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>今天是星期几</title>
+    <style>
+        body {
+            font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 16px;
+            padding: 48px 64px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(4px);
+        }
+        .date {
+            font-size: 20px;
+            opacity: 0.85;
+            margin-bottom: 16px;
+        }
+        .weekday {
+            font-size: 56px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="date" id="dateText"></div>
+        <div class="weekday" id="weekdayText"></div>
+    </div>
+
+    <script>
+        const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+        const now = new Date();
+
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        const day = now.getDate();
+
+        document.getElementById("dateText").textContent = year + "年" + month + "月" + day + "日";
+        document.getElementById("weekdayText").textContent = weekdays[now.getDay()];
+    </script>
+</body>
+</html>

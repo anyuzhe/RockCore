@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="2022卡塔尔世界杯晋级图：全部淘汰赛比赛数据静态嵌入页面">
+  <title>2022卡塔尔世界杯晋级图</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --muted: #656d76;
+      --accent: #0b6e4f;
+      --win: #0b6e4f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      padding: 24px 16px 48px;
+    }
+    header {
+      text-align: center;
+      padding: 24px 0 8px;
+    }
+    header h1 { font-size: 28px; color: var(--accent); }
+    header p { color: var(--muted); margin-top: 4px; }
+    main { max-width: 960px; margin: 0 auto; }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-top: 20px;
+    }
+    section h2 {
+      font-size: 20px;
+      border-left: 4px solid var(--accent);
+      padding-left: 10px;
+      margin-bottom: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: center;
+    }
+    th { background: #f0f3f6; font-weight: 600; }
+    tr:nth-child(even) td { background: #fafbfc; }
+    .home { text-align: right; }
+    .away { text-align: left; }
+    .score { font-weight: 700; white-space: nowrap; color: var(--accent); }
+    .winner { color: var(--win); font-weight: 600; }
+    .note { color: var(--muted); font-size: 12px; }
+    footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+    @media (max-width: 600px) {
+      header h1 { font-size: 22px; }
+      table { font-size: 12px; }
+      th, td { padding: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>2022卡塔尔世界杯晋级图</h1>
+    <p>淘汰赛阶段全部比赛 · 2022-12-03 至 2022-12-18 · 数据静态内嵌</p>
+  </header>
+
+  <main>
+    <!-- ============ 静态嵌入的比赛数据（JSON） ============ -->
+    <script type="application/json" id="match-data">
+    {
+      "tournament": "2022年卡塔尔世界杯",
+      "tournament_en": "FIFA World Cup Qatar 2022",
+      "stage": "淘汰赛 (Knockout Stage)",
+      "match_dates": "2022-12-03 至 2022-12-18",
+      "rounds": [
+        {
+          "round": "round_of_16",
+          "name": "16强 / 八分之一决赛",
+          "matches": [
+            { "match_no": 1,  "date": "2022-12-03", "home": "荷兰", "away": "美国",   "full_time_score": "3-1", "penalty_score": null, "winner": "荷兰" },
+            { "match_no": 2,  "date": "2022-12-03", "home": "阿根廷", "away": "澳大利亚", "full_time_score": "2-1", "penalty_score": null, "winner": "阿根廷" },
+            { "match_no": 3,  "date": "2022-12-04", "home": "法国", "away": "波兰",   "full_time_score": "3-1", "penalty_score": null, "winner": "法国" },
+            { "match_no": 4,  "date": "2022-12-04", "home": "英格兰", "away": "塞内加尔", "full_time_score": "3-0", "penalty_score": null, "winner": "英格兰" },
+            { "match_no": 5,  "date": "2022-12-05", "home": "日本", "away": "克罗地亚", "full_time_score": "1-1", "penalty_score": "1-3", "winner": "克罗地亚" },
+            { "match_no": 6,  "date": "2022-12-05", "home": "巴西", "away": "韩国",   "full_time_score": "4-1", "penalty_score": null, "winner": "巴西" },
+            { "match_no": 7,  "date": "2022-12-06", "home": "摩洛哥", "away": "西班牙", "full_time_score": "0-0", "penalty_score": "3-0", "winner": "摩洛哥" },
+            { "match_no": 8,  "date": "2022-12-06", "home": "葡萄牙", "away": "瑞士",   "full_time_score": "6-1", "penalty_score": null, "winner": "葡萄牙" }
+          ]
+        },
+        {
+          "round": "quarterfinals",
+          "name": "8强 / 四分之一决赛",
+          "matches": [
+            { "match_no": 9,  "date": "2022-12-09", "home": "克罗地亚", "away": "巴西", "full_time_score": "1-1", "penalty_score": "4-2", "winner": "克罗地亚" },
+            { "match_no": 10, "date": "2022-12-09", "home": "荷兰", "away": "阿根廷", "full_time_score": "2-2", "penalty_score": "3-4", "winner": "阿根廷" },
+            { "match_no": 11, "date": "2022-12-10", "home": "摩洛哥", "away": "葡萄牙", "full_time_score": "1-0", "penalty_score": null, "winner": "摩洛哥" },
+            { "match_no": 12, "date": "2022-12-10", "home": "英格兰", "away": "法国", "full_time_score": "1-2", "penalty_score": null, "winner": "法国" }
+          ]
+        },
+        {
+          "round": "semifinals",
+          "name": "4强 / 半决赛",
+          "matches": [
+            { "match_no": 13, "date": "2022-12-13", "home": "阿根廷", "away": "克罗地亚", "full_time_score": "3-0", "penalty_score": null, "winner": "阿根廷" },
+            { "match_no": 14, "date": "2022-12-14", "home": "法国", "away": "摩洛哥", "full_time_score": "2-0", "penalty_score": null, "winner": "法国" }
+          ]
+        },
+        {
+          "round": "third_place_match",
+          "name": "季军赛",
+          "matches": [
+            { "match_no": 15, "date": "2022-12-17", "home": "克罗地亚", "away": "摩洛哥", "full_time_score": "2-1", "penalty_score": null, "winner": "克罗地亚" }
+          ]
+        },
+        {
+          "round": "final",
+          "name": "决赛",
+          "matches": [
+            { "match_no": 16, "date": "2022-12-18", "home": "阿根廷", "away": "法国", "full_time_score": "3-3", "penalty_score": "4-2", "winner": "阿根廷", "note": "90分钟2-2，加时赛1-1，点球4-2，阿根廷夺冠" }
+          ]
+        }
+      ],
+      "final_standings": [
+        { "rank": 1, "team": "阿根廷", "result": "冠军" },
+        { "rank": 2, "team": "法国", "result": "亚军" },
+        { "rank": 3, "team": "克罗地亚", "result": "季军" },
+        { "rank": 4, "team": "摩洛哥", "result": "第四名" }
+      ]
+    }
+    </script>
+
+    <!-- ============ 语义化结构：各轮比赛一览 ============ -->
+
+    <section id="round-of-16" aria-labelledby="round-of-16-title">
+      <h2 id="round-of-16-title">16强 / 八分之一决赛</h2>
+      <table>
+        <thead>
+          <tr><th>场次</th><th>日期</th><th>主队</th><th>比分</th><th>客队</th><th>胜者</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>2022-12-03</td><td class="home">荷兰</td><td class="score">3-1</td><td class="away">美国</td><td class="winner">荷兰</td></tr>
+          <tr><td>2</td><td>2022-12-03</td><td class="home">阿根廷</td><td class="score">2-1</td><td class="away">澳大利亚</td><td class="winner">阿根廷</td></tr>
+          <tr><td>3</td><td>2022-12-04</td><td class="home">法国</td><td class="score">3-1</td><td class="away">波兰</td><td class="winner">法国</td></tr>
+          <tr><td>4</td><td>2022-12-04</td><td class="home">英格兰</td><td class="score">3-0</td><td class="away">塞内加尔</td><td class="winner">英格兰</td></tr>
+          <tr><td>5</td><td>2022-12-05</td><td class="home">日本</td><td class="score">1-1 (点球1-3)</td><td class="away">克罗地亚</td><td class="winner">克罗地亚</td></tr>
+          <tr><td>6</td><td>2022-12-05</td><td class="home">巴西</td><td class="score">4-1</td><td class="away">韩国</td><td class="winner">巴西</td></tr>
+          <tr><td>7</td><td>2022-12-06</td><td class="home">摩洛哥</td><td class="score">0-0 (点球3-0)</td><td class="away">西班牙</td><td class="winner">摩洛哥</td></tr>
+          <tr><td>8</td><td>2022-12-06</td><td class="home">葡萄牙</td><td class="score">6-1</td><td class="away">瑞士</td><td class="winner">葡萄牙</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="quarterfinals" aria-labelledby="quarterfinals-title">
+      <h2 id="quarterfinals-title">8强 / 四分之一决赛</h2>
+      <table>
+        <thead>
+          <tr><th>场次</th><th>日期</th><th>主队</th><th>比分</th><th>客队</th><th>胜者</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>9</td><td>2022-12-09</td><td class="home">克罗地亚</td><td class="score">1-1 (点球4-2)</td><td class="away">巴西</td><td class="winner">克罗地亚</td></tr>
+          <tr><td>10</td><td>2022-12-09</td><td class="home">荷兰</td><td class="score">2-2 (点球3-4)</td><td class="away">阿根廷</td><td class="winner">阿根廷</td></tr>
+          <tr><td>11</td><td>2022-12-10</td><td class="home">摩洛哥</td><td class="score">1-0</td><td class="away">葡萄牙</td><td class="winner">摩洛哥</td></tr>
+          <tr><td>12</td><td>2022-12-10</td><td class="home">英格兰</td><td class="score">1-2</td><td class="away">法国</td><td class="winner">法国</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="semifinals" aria-labelledby="semifinals-title">
+      <h2 id="semifinals-title">4强 / 半决赛</h2>
+      <table>
+        <thead>
+          <tr><th>场次</th><th>日期</th><th>主队</th><th>比分</th><th>客队</th><th>胜者</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>13</td><td>2022-12-13</td><td class="home">阿根廷</td><td class="score">3-0</td><td class="away">克罗地亚</td><td class="winner">阿根廷</td></tr>
+          <tr><td>14</td><td>2022-12-14</td><td class="home">法国</td><td class="score">2-0</td><td class="away">摩洛哥</td><td class="winner">法国</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="third-place" aria-labelledby="third-place-title">
+      <h2 id="third-place-title">季军赛</h2>
+      <table>
+        <thead>
+          <tr><th>场次</th><th>日期</th><th>主队</th><th>比分</th><th>客队</th><th>胜者</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>15</td><td>2022-12-17</td><td class="home">克罗地亚</td><td class="score">2-1</td><td class="away">摩洛哥</td><td class="winner">克罗地亚</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="final" aria-labelledby="final-title">
+      <h2 id="final-title">决赛</h2>
+      <table>
+        <thead>
+          <tr><th>场次</th><th>日期</th><th>主队</th><th>比分</th><th>客队</th><th>胜者</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>16</td>
+            <td>2022-12-18</td>
+            <td class="home">阿根廷</td>
+            <td class="score">3-3 (点球4-2)</td>
+            <td class="away">法国</td>
+            <td class="winner">阿根廷</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">注：90分钟2-2，加时赛1-1，点球4-2，阿根廷夺冠。</p>
+    </section>
+
+    <section id="standings" aria-labelledby="standings-title">
+      <h2 id="standings-title">最终名次</h2>
+      <table>
+        <thead>
+          <tr><th>名次</th><th>球队</th><th>成绩</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>阿根廷</td><td>冠军</td></tr>
+          <tr><td>2</td><td>法国</td><td>亚军</td></tr>
+          <tr><td>3</td><td>克罗地亚</td><td>季军</td></tr>
+          <tr><td>4</td><td>摩洛哥</td><td>第四名</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <footer>
+    <p>2022卡塔尔世界杯晋级图 · 数据来源：T001 确认的淘汰赛比赛数据（静态内嵌，无外部依赖）</p>
+  </footer>
+</body>
+</html>

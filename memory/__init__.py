@@ -1,0 +1,1 @@
+"""Memory module — project-level persistent knowledge for V5."""

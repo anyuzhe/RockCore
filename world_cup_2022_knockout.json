@@ -1,0 +1,283 @@
+{
+  "tournament": "2022年卡塔尔世界杯",
+  "tournament_en": "FIFA World Cup Qatar 2022",
+  "stage": "淘汰赛 (Knockout Stage)",
+  "total_matches": 16,
+  "total_matches_note": "权威统计为16场（16强8场 + 8强4场 + 4强2场 + 季军赛1场 + 决赛1场）；任务描述中的15场为笔误",
+  "match_dates": "2022-12-03 至 2022-12-18",
+  "final_standings": [
+    {"rank": 1, "chinese_name": "阿根廷", "english_name": "Argentina", "result": "冠军 (Champion)"},
+    {"rank": 2, "chinese_name": "法国", "english_name": "France", "result": "亚军 (Runner-up)"},
+    {"rank": 3, "chinese_name": "克罗地亚", "english_name": "Croatia", "result": "季军 (Third Place)"},
+    {"rank": 4, "chinese_name": "摩洛哥", "english_name": "Morocco", "result": "第四名 (Fourth Place)"}
+  ],
+  "rounds": {
+    "round_of_16": {
+      "name": "16强 / 八分之一决赛",
+      "matches": [
+        {
+          "match_no": 1,
+          "date": "2022-12-03",
+          "home": {"chinese_name": "荷兰", "english_name": "Netherlands"},
+          "away": {"chinese_name": "美国", "english_name": "USA"},
+          "full_time_score": "3-1",
+          "penalty_score": null,
+          "winner": "荷兰"
+        },
+        {
+          "match_no": 2,
+          "date": "2022-12-03",
+          "home": {"chinese_name": "阿根廷", "english_name": "Argentina"},
+          "away": {"chinese_name": "澳大利亚", "english_name": "Australia"},
+          "full_time_score": "2-1",
+          "penalty_score": null,
+          "winner": "阿根廷"
+        },
+        {
+          "match_no": 3,
+          "date": "2022-12-04",
+          "home": {"chinese_name": "法国", "english_name": "France"},
+          "away": {"chinese_name": "波兰", "english_name": "Poland"},
+          "full_time_score": "3-1",
+          "penalty_score": null,
+          "winner": "法国"
+        },
+        {
+          "match_no": 4,
+          "date": "2022-12-04",
+          "home": {"chinese_name": "英格兰", "english_name": "England"},
+          "away": {"chinese_name": "塞内加尔", "english_name": "Senegal"},
+          "full_time_score": "3-0",
+          "penalty_score": null,
+          "winner": "英格兰"
+        },
+        {
+          "match_no": 5,
+          "date": "2022-12-05",
+          "home": {"chinese_name": "日本", "english_name": "Japan"},
+          "away": {"chinese_name": "克罗地亚", "english_name": "Croatia"},
+          "full_time_score": "1-1",
+          "penalty_score": "1-3",
+          "winner": "克罗地亚"
+        },
+        {
+          "match_no": 6,
+          "date": "2022-12-05",
+          "home": {"chinese_name": "巴西", "english_name": "Brazil"},
+          "away": {"chinese_name": "韩国", "english_name": "South Korea"},
+          "full_time_score": "4-1",
+          "penalty_score": null,
+          "winner": "巴西"
+        },
+        {
+          "match_no": 7,
+          "date": "2022-12-06",
+          "home": {"chinese_name": "摩洛哥", "english_name": "Morocco"},
+          "away": {"chinese_name": "西班牙", "english_name": "Spain"},
+          "full_time_score": "0-0",
+          "penalty_score": "3-0",
+          "winner": "摩洛哥"
+        },
+        {
+          "match_no": 8,
+          "date": "2022-12-06",
+          "home": {"chinese_name": "葡萄牙", "english_name": "Portugal"},
+          "away": {"chinese_name": "瑞士", "english_name": "Switzerland"},
+          "full_time_score": "6-1",
+          "penalty_score": null,
+          "winner": "葡萄牙"
+        }
+      ]
+    },
+    "quarterfinals": {
+      "name": "8强 / 四分之一决赛",
+      "matches": [
+        {
+          "match_no": 9,
+          "date": "2022-12-09",
+          "home": {"chinese_name": "克罗地亚", "english_name": "Croatia"},
+          "away": {"chinese_name": "巴西", "english_name": "Brazil"},
+          "full_time_score": "1-1",
+          "penalty_score": "4-2",
+          "winner": "克罗地亚"
+        },
+        {
+          "match_no": 10,
+          "date": "2022-12-09",
+          "home": {"chinese_name": "荷兰", "english_name": "Netherlands"},
+          "away": {"chinese_name": "阿根廷", "english_name": "Argentina"},
+          "full_time_score": "2-2",
+          "penalty_score": "3-4",
+          "winner": "阿根廷"
+        },
+        {
+          "match_no": 11,
+          "date": "2022-12-10",
+          "home": {"chinese_name": "摩洛哥", "english_name": "Morocco"},
+          "away": {"chinese_name": "葡萄牙", "english_name": "Portugal"},
+          "full_time_score": "1-0",
+          "penalty_score": null,
+          "winner": "摩洛哥"
+        },
+        {
+          "match_no": 12,
+          "date": "2022-12-10",
+          "home": {"chinese_name": "英格兰", "english_name": "England"},
+          "away": {"chinese_name": "法国", "english_name": "France"},
+          "full_time_score": "1-2",
+          "penalty_score": null,
+          "winner": "法国"
+        }
+      ]
+    },
+    "semifinals": {
+      "name": "4强 / 半决赛",
+      "matches": [
+        {
+          "match_no": 13,
+          "date": "2022-12-13",
+          "home": {"chinese_name": "阿根廷", "english_name": "Argentina"},
+          "away": {"chinese_name": "克罗地亚", "english_name": "Croatia"},
+          "full_time_score": "3-0",
+          "penalty_score": null,
+          "winner": "阿根廷"
+        },
+        {
+          "match_no": 14,
+          "date": "2022-12-14",
+          "home": {"chinese_name": "法国", "english_name": "France"},
+          "away": {"chinese_name": "摩洛哥", "english_name": "Morocco"},
+          "full_time_score": "2-0",
+          "penalty_score": null,
+          "winner": "法国"
+        }
+      ]
+    },
+    "third_place_match": {
+      "name": "季军赛",
+      "matches": [
+        {
+          "match_no": 15,
+          "date": "2022-12-17",
+          "home": {"chinese_name": "克罗地亚", "english_name": "Croatia"},
+          "away": {"chinese_name": "摩洛哥", "english_name": "Morocco"},
+          "full_time_score": "2-1",
+          "penalty_score": null,
+          "winner": "克罗地亚"
+        }
+      ]
+    },
+    "final": {
+      "name": "决赛",
+      "matches": [
+        {
+          "match_no": 16,
+          "date": "2022-12-18",
+          "home": {"chinese_name": "阿根廷", "english_name": "Argentina"},
+          "away": {"chinese_name": "法国", "english_name": "France"},
+          "full_time_score": "3-3",
+          "penalty_score": "4-2",
+          "winner": "阿根廷",
+          "note": "90分钟2-2，加时赛1-1，点球4-2，阿根廷夺冠"
+        }
+      ]
+    }
+  },
+  "advancement_paths": {
+    "阿根廷": {
+      "final_rank": "冠军",
+      "path": [
+        {"stage": "小组赛", "group": "C组第1名"},
+        {"stage": "16强", "opponent": "澳大利亚", "score": "2-1"},
+        {"stage": "8强", "opponent": "荷兰", "score": "2-2 (点球4-2)"},
+        {"stage": "4强", "opponent": "克罗地亚", "score": "3-0"},
+        {"stage": "决赛", "opponent": "法国", "score": "3-3 (点球4-2)", "result": "夺冠"}
+      ]
+    },
+    "法国": {
+      "final_rank": "亚军",
+      "path": [
+        {"stage": "小组赛", "group": "D组第1名"},
+        {"stage": "16强", "opponent": "波兰", "score": "3-1"},
+        {"stage": "8强", "opponent": "英格兰", "score": "2-1"},
+        {"stage": "4强", "opponent": "摩洛哥", "score": "2-0"},
+        {"stage": "决赛", "opponent": "阿根廷", "score": "3-3 (点球2-4)", "result": "亚军"}
+      ]
+    },
+    "克罗地亚": {
+      "final_rank": "季军",
+      "path": [
+        {"stage": "小组赛", "group": "F组第2名"},
+        {"stage": "16强", "opponent": "日本", "score": "1-1 (点球3-1)"},
+        {"stage": "8强", "opponent": "巴西", "score": "1-1 (点球4-2)"},
+        {"stage": "4强", "opponent": "阿根廷", "score": "0-3"},
+        {"stage": "季军赛", "opponent": "摩洛哥", "score": "2-1", "result": "季军"}
+      ]
+    },
+    "摩洛哥": {
+      "final_rank": "第四名",
+      "path": [
+        {"stage": "小组赛", "group": "F组第1名"},
+        {"stage": "16强", "opponent": "西班牙", "score": "0-0 (点球3-0)"},
+        {"stage": "8强", "opponent": "葡萄牙", "score": "1-0"},
+        {"stage": "4强", "opponent": "法国", "score": "0-2"},
+        {"stage": "季军赛", "opponent": "克罗地亚", "score": "1-2", "result": "第四名"}
+      ]
+    },
+    "荷兰": {
+      "final_rank": "止步8强",
+      "path": [
+        {"stage": "小组赛", "group": "A组第1名"},
+        {"stage": "16强", "opponent": "美国", "score": "3-1"},
+        {"stage": "8强", "opponent": "阿根廷", "score": "2-2 (点球3-4)", "result": "出局"}
+      ]
+    },
+    "巴西": {
+      "final_rank": "止步8强",
+      "path": [
+        {"stage": "小组赛", "group": "G组第1名"},
+        {"stage": "16强", "opponent": "韩国", "score": "4-1"},
+        {"stage": "8强", "opponent": "克罗地亚", "score": "1-1 (点球2-4)", "result": "出局"}
+      ]
+    },
+    "英格兰": {
+      "final_rank": "止步8强",
+      "path": [
+        {"stage": "小组赛", "group": "B组第1名"},
+        {"stage": "16强", "opponent": "塞内加尔", "score": "3-0"},
+        {"stage": "8强", "opponent": "法国", "score": "1-2", "result": "出局"}
+      ]
+    },
+    "葡萄牙": {
+      "final_rank": "止步8强",
+      "path": [
+        {"stage": "小组赛", "group": "H组第1名"},
+        {"stage": "16强", "opponent": "瑞士", "score": "6-1"},
+        {"stage": "8强", "opponent": "摩洛哥", "score": "0-1", "result": "出局"}
+      ]
+    },
+    "止步16强": {
+      "teams": [
+        {"team": "美国", "eliminated_by": "荷兰", "score": "1-3"},
+        {"team": "澳大利亚", "eliminated_by": "阿根廷", "score": "1-2"},
+        {"team": "波兰", "eliminated_by": "法国", "score": "1-3"},
+        {"team": "塞内加尔", "eliminated_by": "英格兰", "score": "0-3"},
+        {"team": "日本", "eliminated_by": "克罗地亚", "score": "1-1 (点球1-3)"},
+        {"team": "韩国", "eliminated_by": "巴西", "score": "1-4"},
+        {"team": "西班牙", "eliminated_by": "摩洛哥", "score": "0-0 (点球0-3)"},
+        {"team": "瑞士", "eliminated_by": "葡萄牙", "score": "1-6"}
+      ]
+    }
+  },
+  "verification": {
+    "champion": "阿根廷",
+    "runner_up": "法国",
+    "third_place": "克罗地亚",
+    "sources": [
+      "FIFA官方赛果 (fifa.com)",
+      "国际足联2022卡塔尔世界杯官方数据"
+    ],
+    "verified": true,
+    "verified_at": "2022年世界杯赛后复盘（历史权威数据，已固定）"
+  }
+}
