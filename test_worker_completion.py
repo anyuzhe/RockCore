@@ -242,6 +242,34 @@ def test_coding_worker_corrects_premature_no_tool_completion():
     asyncio.run(scenario())
 
 
+def test_conditional_coding_worker_can_complete_without_changes():
+    async def scenario():
+        class NoChangeRouter:
+            calls = 0
+
+            async def chat_with_tools(self, *_args, **_kwargs):
+                self.calls += 1
+                return {
+                    "content": "检查完成，未发现需要修复的问题。",
+                    "tool_calls": [],
+                    "usage": {},
+                }
+
+        router = NoChangeRouter()
+        task = _task()
+        task.description = "仅当发现影响验收的问题时修复；若未发现则跳过。"
+        worker = WorkerAgent(router, _RecordingBroker(), max_turns=4)
+
+        result = await worker.run(task, project_root=".")
+
+        assert result["status"] == "completed"
+        assert result["no_changes"] is True
+        assert result["content"] == "检查完成，未发现需要修复的问题。"
+        assert router.calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_read_only_review_stops_after_evidence_and_returns_report():
     async def scenario():
         router = _ReviewSequenceRouter()

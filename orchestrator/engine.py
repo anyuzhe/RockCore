@@ -52,6 +52,7 @@ class Engine:
         self._session_factory = create_session_factory(self._engine)
 
         self.event_bus = EventBus()
+        self.event_bus.subscribe("model_chat", self._record_model_usage)
         self.state_machine = StateMachine()
         self.scheduler = Scheduler(max_concurrent=3)
         self.policy_engine = PolicyEngine()
@@ -88,6 +89,43 @@ class Engine:
 
     def register_agent(self, agent_type: str, agent: Any):
         self._agents[agent_type] = agent
+
+    async def _record_model_usage(self, _event_type: str, **data):
+        """Persist model usage for jobs and task-level cost reporting."""
+        job_id = data.get("job_id")
+        if not job_id:
+            return
+        input_tokens = max(0, int(data.get("input_tokens") or 0))
+        output_tokens = max(0, int(data.get("output_tokens") or 0))
+        estimated_cost = max(0.0, float(data.get("estimated_cost") or 0.0))
+        repos = self._get_repos()
+        try:
+            repos["job"].add_usage(
+                job_id, input_tokens, output_tokens, estimated_cost
+            )
+            task_id = data.get("task_id")
+            if not task_id:
+                return
+            task = repos["task"].get_by_id(task_id)
+            if not task:
+                return
+            run = repos["agent_run"].create(
+                task_id=task.id,
+                agent_type=data.get("agent_type", "unknown"),
+                model_name=data.get("model_name") or data.get("provider", ""),
+            )
+            repos["agent_run"].update_status(
+                run.id,
+                "failed" if data.get("error") else "completed",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost=estimated_cost,
+                error_message=str(data.get("error") or ""),
+            )
+        except Exception as error:
+            logger.warning("Could not persist model usage for %s: %s", job_id, error)
+        finally:
+            self._close_repos(repos)
 
     def get_agent(self, agent_type: str):
         return self._agents.get(agent_type)
@@ -774,8 +812,11 @@ class Engine:
                     or worker_result.get("output")
                     or ""
                 ).strip()
+                declared_no_changes = bool(worker_result.get("no_changes"))
                 missing_required_output = (
-                    t.task_type == "coding" and not has_file_changes
+                    t.task_type == "coding"
+                    and not has_file_changes
+                    and not declared_no_changes
                 ) or (
                     t.task_type in {"analysis", "review"}
                     and not has_file_changes
@@ -834,6 +875,8 @@ class Engine:
                     repos["task"].update_status_by_pk(t.id, "done")
                     result_payload = dict(result)
                     result_payload["changes"] = task_changes
+                    if declared_no_changes:
+                        result_payload["no_changes"] = True
                     if task_output:
                         result_payload["output"] = task_output
                     await self.event_bus.publish(

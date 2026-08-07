@@ -268,6 +268,7 @@ class TaskPanel(QWidget):
         self._current_job: dict | None = None
         self._tasks: list[dict] = []
         self._worker_outputs: list[str] = []
+        self._usage = self._empty_usage()
         self._setup_ui()
 
     def _setup_ui(self):
@@ -288,6 +289,10 @@ class TaskPanel(QWidget):
         names.addWidget(self.workflow_title)
         names.addWidget(self.job_meta_label)
         header_layout.addLayout(names, 1)
+        self.usage_label = QLabel("")
+        self.usage_label.setObjectName("mutedLabel")
+        self.usage_label.setToolTip("本需求的模型用量为估算值")
+        header_layout.addWidget(self.usage_label)
         self.job_status_indicator = StatusIndicator()
         self.job_status_indicator.clear()
         header_layout.addWidget(self.job_status_indicator)
@@ -407,6 +412,27 @@ class TaskPanel(QWidget):
             self.job_meta_label.setText("尚未选择项目")
             self.empty_subtitle.setText("先从左侧添加或选择一个本地项目。")
 
+    @staticmethod
+    def _empty_usage() -> dict:
+        return {"input_tokens": 0, "output_tokens": 0, "calls": 0, "cost": 0.0}
+
+    @staticmethod
+    def _format_usage(usage: dict, prefix: str = "用量") -> str:
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        calls = int(usage.get("calls", 0) or 0)
+        cost = float(usage.get("cost", 0.0) or 0.0)
+        if not calls and not input_tokens and not output_tokens:
+            return ""
+        return (
+            f"{prefix}：输入 {input_tokens:,} · 输出 {output_tokens:,} tokens"
+            f" · ${cost:.4f} 估算 · {calls} 次调用"
+        )
+
+    def _set_usage(self, usage: dict | None):
+        self._usage = {**self._empty_usage(), **(usage or {})}
+        self.usage_label.setText(self._format_usage(self._usage, "总用量"))
+
     def begin_new_request(self, project_name: str = "", root_path: str = ""):
         self.clear_workflow()
         self.set_project_context(project_name, root_path)
@@ -422,6 +448,7 @@ class TaskPanel(QWidget):
         self._current_job = job
         self._tasks = tasks or []
         self._worker_outputs = worker_outputs
+        self._set_usage(job.get("usage"))
         self.empty_state.hide()
         self.user_row_widget.show()
         self.agent_frame.show()
@@ -528,6 +555,7 @@ class TaskPanel(QWidget):
         self._current_job = None
         self._tasks = []
         self._worker_outputs = []
+        self._set_usage(self._empty_usage())
         self.workflow_title.setText("新需求")
         self.job_meta_label.setText("选择项目后即可开始")
         self.job_status_indicator.clear()
@@ -561,7 +589,21 @@ class TaskPanel(QWidget):
 
     def add_model_output(self, agent_type: str, provider: str, response: str,
                          error: str | None, duration_ms: int,
-                         input_tokens: int = 0, output_tokens: int = 0):
+                         input_tokens: int = 0, output_tokens: int = 0,
+                         task_id: str = "", estimated_cost: float = 0.0):
+        self._usage["input_tokens"] += max(0, int(input_tokens or 0))
+        self._usage["output_tokens"] += max(0, int(output_tokens or 0))
+        self._usage["calls"] += 1
+        self._usage["cost"] += max(0.0, float(estimated_cost or 0.0))
+        self.usage_label.setText(self._format_usage(self._usage, "总用量"))
+        if task_id:
+            task = next((item for item in self._tasks if item.get("task_id") == task_id), None)
+            if task is not None:
+                task_usage = task.setdefault("usage", self._empty_usage())
+                task_usage["input_tokens"] += max(0, int(input_tokens or 0))
+                task_usage["output_tokens"] += max(0, int(output_tokens or 0))
+                task_usage["calls"] += 1
+                task_usage["cost"] += max(0.0, float(estimated_cost or 0.0))
         key = "worker" if agent_type.startswith("worker") else agent_type
         stage = self.stages.get(key)
         if not stage:
@@ -574,7 +616,11 @@ class TaskPanel(QWidget):
             content = self._normalize_model_output(response)
             if not content:
                 return
-            text = f"{provider.upper()} · {duration} · {input_tokens}+{output_tokens} tokens\n{content}"
+            text = (
+                f"{provider.upper()} · {duration} · "
+                f"{input_tokens}+{output_tokens} tokens · ${estimated_cost:.4f} 估算\n"
+                f"{content}"
+            )
         if key == "worker":
             self._worker_outputs.append(text)
             self._refresh_worker_stage()
@@ -684,6 +730,9 @@ class TaskPanel(QWidget):
             paths = task.get("allowed_paths") or []
             if paths and paths != ["*"]:
                 lines.append(f"    文件：{', '.join(paths[:8])}")
+            usage_text = self._format_usage(task.get("usage") or {}, "    模型用量")
+            if usage_text:
+                lines.append(usage_text)
             for result in (task.get("test_results") or [])[:3]:
                 result_style = STATUS_STYLE.get(result.get("status", "pending"), STATUS_STYLE["pending"])
                 lines.append(

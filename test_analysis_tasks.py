@@ -29,6 +29,19 @@ class _NoChangeCodingWorker:
         return {"status": "completed", "content": "No changes made.", "turns": 0}
 
 
+class _ConditionalNoChangeCodingWorker:
+    def scoped_to(self, _project_root):
+        return self
+
+    async def run(self, _task, **_kwargs):
+        return {
+            "status": "completed",
+            "content": "检查完成，未发现需要修复的问题。",
+            "no_changes": True,
+            "turns": 1,
+        }
+
+
 def test_analysis_report_succeeds_without_file_changes(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
@@ -60,6 +73,43 @@ def test_analysis_report_succeeds_without_file_changes(tmp_path):
             assert done_events[-1]["data"]["result"]["output"].startswith(
                 "The project is empty"
             )
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_conditional_coding_task_succeeds_without_file_changes(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        try:
+            project = repos["project"].create("Empty", str(project_root))
+            job = repos["job"].create("JOB-CONDITIONAL", project.id, "Audit project")
+            task = repos["task"].create(
+                "T001",
+                job.id,
+                "修复现有问题（如有问题）",
+                description="仅当发现问题时修复；若未发现则跳过。",
+                task_type="coding",
+                allowed_paths=["*"],
+            )
+            engine.register_agent("worker", _ConditionalNoChangeCodingWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job,
+                repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            assert task.status == "done"
+            assert not engine.event_bus.get_history("task_failed")
+            done_result = engine.event_bus.get_history("task_done")[-1]["data"]["result"]
+            assert done_result["no_changes"] is True
         finally:
             repos["_session"].close()
 

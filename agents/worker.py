@@ -3,6 +3,7 @@
 import json
 import logging
 import math
+import re
 from typing import Any
 
 from orchestrator.model_router import ModelRouter
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 
 WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
 REPORT_TASK_TYPES = {"analysis", "review", "testing"}
+# Some review-oriented coding tasks intentionally edit files only when a defect
+# is found. Keep this narrow so a worker that forgot to edit a normal coding
+# task is still caught as a failure.
+NO_CHANGE_MARKERS = (
+    "仅当发现", "如有问题", "若未发现", "无问题时", "无需修改",
+    "没有问题则跳过", "若无问题", "没有缺陷则跳过",
+    "only if", "if needed", "skip if no", "no changes required",
+    "if no issues", "if there are no issues", "skip when no",
+)
 EXPLORATION_TOOLS = {
     "list_files", "read_file", "search_in_file", "search_code",
     "git_status", "git_diff", "read_log",
@@ -136,6 +146,7 @@ Type: {task.task_type}
         total_output = 0
         tool_calls_made = []
         final_content = ""
+        no_changes_declared = False
         exploration_calls = 0
         has_written = False
         seen_exploration_calls: set[tuple[str, str, bool]] = set()
@@ -144,6 +155,7 @@ Type: {task.task_type}
         premature_completion_count = 0
         empty_report_count = 0
         force_tool_call = False
+        allow_no_change = self._allows_no_change(task)
         progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
         finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
 
@@ -241,6 +253,18 @@ Type: {task.task_type}
 
                 if not tool_calls:
                     if task.task_type == "coding" and not has_written:
+                        if allow_no_change and (content or "").strip():
+                            logger.info(
+                                "Worker: task %s completed without changes "
+                                "because it is conditional",
+                                task.task_id,
+                            )
+                            final_content = content.strip()
+                            no_changes_declared = True
+                            messages.append({
+                                "role": "assistant", "content": final_content,
+                            })
+                            break
                         premature_completion_count += 1
                         messages.append({
                             "role": "assistant",
@@ -435,7 +459,7 @@ Type: {task.task_type}
                     "output_tokens": total_output,
                 }
 
-            return {
+            result = {
                 "status": "completed",
                 "content": final_content,
                 "turns": len(tool_calls_made),
@@ -443,6 +467,9 @@ Type: {task.task_type}
                 "input_tokens": total_input,
                 "output_tokens": total_output,
             }
+            if no_changes_declared:
+                result["no_changes"] = True
+            return result
 
         except Exception as e:
             logger.error(f"Worker: task {task.task_id} failed: {e}")
@@ -464,3 +491,16 @@ Type: {task.task_type}
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
+
+    @staticmethod
+    def _allows_no_change(task) -> bool:
+        """Return whether the task explicitly permits a successful no-op."""
+        text = f"{getattr(task, 'title', '')} {getattr(task, 'description', '')}".lower()
+        if any(marker.lower() in text for marker in NO_CHANGE_MARKERS):
+            return True
+        # Common generated wording uses "如 ... 存在" instead of an explicit
+        # "如有问题". Limit the match to defect-oriented terms to avoid
+        # treating ordinary examples ("如 React") as conditional tasks.
+        return bool(re.search(
+            r"如.{0,100}(?:存在|问题|缺陷|不一致|错误|需要修复)", text,
+        ))

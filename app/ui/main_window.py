@@ -263,6 +263,9 @@ class MainWindow(QMainWindow):
                             "acceptance_command": t.acceptance_command or "",
                             "description": t.description or "",
                             "allowed_paths": t.allowed_paths or [],
+                            "usage": self._task_usage(
+                                repos["agent_run"].list_by_task(t.id)
+                            ),
                             "test_results": [
                                 {
                                     "command": test.command,
@@ -280,6 +283,7 @@ class MainWindow(QMainWindow):
                         "status": job.status,
                         "source_job_id": job.source_job_id,
                         "created_at": job.created_at.isoformat() if job.created_at else "",
+                        "usage": self._job_usage(job),
                     }
                     constitution_dict = None
                     if constitution:
@@ -614,6 +618,11 @@ class MainWindow(QMainWindow):
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
         elif event_type == "task_done" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "done")
+            result = data.get("result") or {}
+            if result.get("no_changes"):
+                self.task_panel.append_stage_output(
+                    "worker", "检查完成：未发现需要修改的问题。"
+                )
             self._capture_diff(data.get("result"))
         elif event_type == "task_failed" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "failed")
@@ -701,6 +710,8 @@ class MainWindow(QMainWindow):
                 duration_ms=data.get("duration_ms", 0),
                 input_tokens=data.get("input_tokens", 0),
                 output_tokens=data.get("output_tokens", 0),
+                task_id=data.get("task_id", ""),
+                estimated_cost=data.get("estimated_cost", 0.0),
             )
         elif event_type == "test_result":
             self.task_panel.log_test_result(
@@ -841,7 +852,7 @@ class MainWindow(QMainWindow):
         from storage.repositories import (
             ProjectRepository, JobRepository, TaskRepository,
             ConstitutionRepository, PlanRepository, ReviewRepository,
-            TestRunRepository,
+            TestRunRepository, AgentRunRepository,
         )
         return {
             "project": ProjectRepository(session),
@@ -851,7 +862,26 @@ class MainWindow(QMainWindow):
             "plan": PlanRepository(session),
             "review": ReviewRepository(session),
             "test_run": TestRunRepository(session),
+            "agent_run": AgentRunRepository(session),
             "_session": session,
+        }
+
+    @staticmethod
+    def _task_usage(runs: list) -> dict:
+        return {
+            "input_tokens": sum(int(run.input_tokens or 0) for run in runs),
+            "output_tokens": sum(int(run.output_tokens or 0) for run in runs),
+            "calls": len(runs),
+            "cost": round(sum(float(run.cost or 0.0) for run in runs), 6),
+        }
+
+    @staticmethod
+    def _job_usage(job) -> dict:
+        return {
+            "input_tokens": int(getattr(job, "usage_input_tokens", 0) or 0),
+            "output_tokens": int(getattr(job, "usage_output_tokens", 0) or 0),
+            "calls": int(getattr(job, "usage_calls", 0) or 0),
+            "cost": float(getattr(job, "usage_cost", 0.0) or 0.0),
         }
 
     def _close_repos(self, repos):
