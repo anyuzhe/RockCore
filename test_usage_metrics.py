@@ -3,7 +3,9 @@
 import asyncio
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
+from providers.base import BaseProvider
 from orchestrator.cost_engine import CostEngine, JobBudget
 from orchestrator.event_bus import EventBus
 from orchestrator.model_router import ModelRouter
@@ -11,17 +13,87 @@ from storage.database import init_database
 from orchestrator.engine import Engine
 
 
-def test_cost_estimate_uses_provider_rate():
-    deepseek = CostEngine.estimate_cost("worker", 1000, 1000, provider="deepseek")
-    kimi = CostEngine.estimate_cost("worker", 1000, 1000, provider="kimi")
+def test_cost_estimate_uses_model_specific_rmb_rate():
+    assert CostEngine.estimate_cost(
+        "worker", 1_000_000, 1_000_000,
+        provider="deepseek", model_name="deepseek-v4-flash",
+    ) == 3.0
+    assert CostEngine.estimate_cost(
+        "worker", 1_000_000, 1_000_000,
+        provider="deepseek", model_name="deepseek-v4-pro",
+    ) == 9.0
+    assert CostEngine.estimate_cost(
+        "planner", 1_000_000, 1_000_000,
+        provider="kimi", model_name="kimi-k2.6",
+    ) == 33.5
+    assert CostEngine.estimate_cost(
+        "planner", 1_000_000, 1_000_000,
+        provider="kimi", model_name="kimi-k2.7",
+    ) == 33.5
+    assert CostEngine.estimate_cost(
+        "planner", 1_000_000, 1_000_000,
+        provider="kimi", model_name="kimi-k3",
+    ) == 120.0
 
-    assert deepseek == 0.0025
-    assert kimi == 0.01
+
+def test_cached_input_uses_the_discounted_rmb_rate():
+    flash = CostEngine.estimate_cost(
+        "worker", 1_000_000, 0,
+        provider="deepseek", model_name="deepseek-v4-flash-0731",
+        cached_input_tokens=1_000_000,
+    )
+    pro = CostEngine.estimate_cost(
+        "worker", 1_000_000, 0,
+        provider="deepseek", model_name="deepseek-v4-pro",
+        cached_input_tokens=1_000_000,
+    )
+    k27 = CostEngine.estimate_cost(
+        "worker", 1_000_000, 0,
+        provider="kimi", model_name="kimi-k2.7-code",
+        cached_input_tokens=1_000_000,
+    )
+    k3 = CostEngine.estimate_cost(
+        "planner", 1_000_000, 0,
+        provider="kimi", model_name="kimi-k3",
+        cached_input_tokens=1_000_000,
+    )
+
+    assert flash == 0.02
+    assert pro == 0.025
+    assert k27 == 1.30
+    assert k3 == 2.0
+
+
+def test_provider_usage_normalization_reads_cache_hit_tokens():
+    standard = BaseProvider.normalize_usage(SimpleNamespace(
+        prompt_tokens=1_000,
+        completion_tokens=20,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+    ))
+    deepseek = BaseProvider.normalize_usage(SimpleNamespace(
+        prompt_tokens=1_000,
+        completion_tokens=20,
+        prompt_cache_hit_tokens=750,
+        prompt_cache_miss_tokens=250,
+    ))
+
+    assert standard == {
+        "input_tokens": 1_000,
+        "cached_input_tokens": 800,
+        "output_tokens": 20,
+    }
+    assert deepseek["cached_input_tokens"] == 750
+
+
+def test_legacy_usd_budget_limit_is_converted_to_rmb():
+    budget = CostEngine.budget_from_config({"max_cost_usd": 0.50})
+
+    assert budget.max_cost_cny == 3.60
 
 
 def test_chatgpt_login_has_equivalent_cost_but_no_billable_api_cost():
     async def scenario():
-        engine = CostEngine(JobBudget(max_cost_usd=0.01))
+        engine = CostEngine(JobBudget(max_cost_cny=0.10))
         await engine.record_usage(
             "JOB-CHATGPT",
             "reviewer",
@@ -34,15 +106,16 @@ def test_chatgpt_login_has_equivalent_cost_but_no_billable_api_cost():
         usage = engine.get_usage_summary("JOB-CHATGPT")
 
         assert ok, message
-        assert usage["equivalent_cost"] == 0.5
+        assert usage["equivalent_cost"] == 3.6
         assert usage["billable_cost"] == 0.0
+        assert usage["currency"] == "CNY"
 
     asyncio.run(scenario())
 
 
-def test_platform_api_cost_still_enforces_dollar_budget():
+def test_platform_api_cost_still_enforces_rmb_budget():
     async def scenario():
-        engine = CostEngine(JobBudget(max_cost_usd=0.01))
+        engine = CostEngine(JobBudget(max_cost_cny=0.10))
         await engine.record_usage(
             "JOB-PLATFORM",
             "reviewer",
@@ -73,7 +146,7 @@ def test_router_propagates_chatgpt_billing_mode_to_usage_events():
     async def scenario():
         event_bus = EventBus()
         router = ModelRouter(
-            cost_engine=CostEngine(JobBudget(max_cost_usd=0.01)),
+            cost_engine=CostEngine(JobBudget(max_cost_cny=0.10)),
             provider_map={"reviewer": "codex"},
             event_bus=event_bus,
         )
@@ -90,6 +163,36 @@ def test_router_propagates_chatgpt_billing_mode_to_usage_events():
         assert events[-1]["data"]["billing_mode"] == "chatgpt_cli"
         assert events[-1]["data"]["estimated_cost"] > 0.5
         assert events[-1]["data"]["billable_cost"] == 0.0
+
+    asyncio.run(scenario())
+
+
+def test_router_prices_the_requested_fallback_model_not_provider_default():
+    class KimiProvider:
+        model = "kimi-k3"
+        authentication_mode = "api"
+
+        async def chat(self, *_args, **_kwargs):
+            return {
+                "content": "ok",
+                "usage": {"input_tokens": 1_000_000, "output_tokens": 0},
+            }
+
+    async def scenario():
+        event_bus = EventBus()
+        router = ModelRouter(event_bus=event_bus)
+        router.register_provider("kimi", KimiProvider())
+        router.set_job_id("JOB-K27")
+
+        await router.chat(
+            "worker", "system", [], provider_override="kimi",
+            model="kimi-k2.7",
+        )
+
+        event = event_bus.get_history("model_chat")[-1]["data"]
+        assert event["model_name"] == "kimi-k2.7"
+        assert event["estimated_cost"] == 6.5
+        assert event["cost_currency"] == "CNY"
 
     asyncio.run(scenario())
 
@@ -111,6 +214,7 @@ def test_model_chat_usage_is_persisted_for_job_and_task(tmp_path: Path):
             provider="deepseek",
             model_name="deepseek-v4-flash",
             input_tokens=1200,
+            cached_input_tokens=200,
             output_tokens=300,
             estimated_cost=0.0012,
             billable_cost=0.0012,
@@ -123,17 +227,21 @@ def test_model_chat_usage_is_persisted_for_job_and_task(tmp_path: Path):
         runs = repos["agent_run"].list_by_task(task.id)
         try:
             assert stored_job.usage_input_tokens == 1200
+            assert stored_job.usage_cached_input_tokens == 200
             assert stored_job.usage_output_tokens == 300
             assert stored_job.usage_calls == 1
             assert stored_job.usage_cost == 0.0012
             assert stored_job.usage_billable_cost == 0.0012
+            assert stored_job.usage_cost_currency == "CNY"
             assert len(runs) == 1
             assert runs[0].model_name == "deepseek-v4-flash"
             assert runs[0].input_tokens == 1200
+            assert runs[0].cached_input_tokens == 200
             assert runs[0].output_tokens == 300
             assert runs[0].cost == 0.0012
             assert runs[0].billable_cost == 0.0012
             assert runs[0].billing_mode == "api"
+            assert runs[0].cost_currency == "CNY"
         finally:
             repos["_session"].close()
 
@@ -195,15 +303,58 @@ def test_legacy_database_keeps_old_cost_classification_unknown(tmp_path: Path):
     migrated = init_database(str(database))
     with migrated.connect() as connection:
         job_row = connection.exec_driver_sql(
-            "SELECT usage_billable_cost FROM jobs WHERE id = 1"
+            "SELECT usage_billable_cost, usage_cost_currency, "
+            "usage_cached_input_tokens FROM jobs WHERE id = 1"
         ).one()
         run_row = connection.exec_driver_sql(
-            "SELECT billable_cost, billing_mode FROM agent_runs WHERE id = 1"
+            "SELECT billable_cost, billing_mode, cost_currency, "
+            "cached_input_tokens FROM agent_runs WHERE id = 1"
         ).one()
 
     assert job_row.usage_billable_cost is None
+    assert job_row.usage_cost_currency == "CNY"
+    assert job_row.usage_cached_input_tokens == 0
     assert run_row.billable_cost is None
     assert run_row.billing_mode == "unclassified"
+    assert run_row.cost_currency == "CNY"
+    assert run_row.cached_input_tokens == 0
+
+
+def test_legacy_usd_cost_rows_are_converted_to_rmb_once(tmp_path: Path):
+    database = tmp_path / "legacy-cost.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE jobs ("
+            "id INTEGER PRIMARY KEY, job_id VARCHAR(64), "
+            "project_id INTEGER, user_request TEXT, "
+            "usage_cost FLOAT, usage_billable_cost FLOAT)"
+        )
+        connection.execute(
+            "INSERT INTO jobs VALUES "
+            "(1, 'JOB-LEGACY-COST', 1, 'demo', 2.0, 0.5)"
+        )
+        connection.execute(
+            "CREATE TABLE agent_runs ("
+            "id INTEGER PRIMARY KEY, task_id INTEGER, agent_type VARCHAR(32), "
+            "cost FLOAT, billable_cost FLOAT)"
+        )
+        connection.execute(
+            "INSERT INTO agent_runs VALUES (1, 1, 'worker', 1.0, 0.25)"
+        )
+
+    migrated = init_database(str(database))
+    with migrated.connect() as connection:
+        job_row = connection.exec_driver_sql(
+            "SELECT usage_cost, usage_billable_cost, usage_cost_currency "
+            "FROM jobs WHERE id = 1"
+        ).one()
+        run_row = connection.exec_driver_sql(
+            "SELECT cost, billable_cost, cost_currency "
+            "FROM agent_runs WHERE id = 1"
+        ).one()
+
+    assert job_row == (14.4, 3.6, "CNY")
+    assert run_row == (7.2, 1.8, "CNY")
 
 
 def test_usage_event_uses_a_separate_session_from_job_lifecycle(tmp_path: Path):
@@ -278,4 +429,4 @@ def test_review_and_repair_budget_reservations_are_idempotent():
     assert repair.max_input_tokens == 950_000
     assert repair.max_output_tokens == 250_000
     assert repair.max_api_calls == 155
-    assert repair.max_cost_usd == 1.25
+    assert repair.max_cost_cny == 9.0

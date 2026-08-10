@@ -49,6 +49,7 @@ def _migrate_schema(engine):
 
     usage_columns = {
         "usage_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "usage_cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
         "usage_output_tokens": "INTEGER NOT NULL DEFAULT 0",
         "usage_calls": "INTEGER NOT NULL DEFAULT 0",
         "usage_cost": "FLOAT NOT NULL DEFAULT 0.0",
@@ -64,6 +65,22 @@ def _migrate_schema(engine):
                 connection.exec_driver_sql(
                     f"ALTER TABLE jobs ADD COLUMN {name} {usage_columns[name]}"
                 )
+
+    # The previous release stored USD-equivalent values. Convert those rows
+    # once when introducing the explicit CNY currency marker.
+    if "usage_cost_currency" not in columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE jobs ADD COLUMN usage_cost_currency VARCHAR(8)"
+            )
+            connection.exec_driver_sql(
+                "UPDATE jobs SET "
+                "usage_cost = COALESCE(usage_cost, 0) * 7.2, "
+                "usage_billable_cost = CASE "
+                "WHEN usage_billable_cost IS NULL THEN NULL "
+                "ELSE usage_billable_cost * 7.2 END, "
+                "usage_cost_currency = 'CNY'"
+            )
 
     job_failure_columns = {
         "failure_code": "VARCHAR(64) NOT NULL DEFAULT ''",
@@ -87,6 +104,10 @@ def _migrate_schema(engine):
         for column in inspect(engine).get_columns("agent_runs")
     }
     agent_run_usage_columns = {
+        "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cost": "FLOAT NOT NULL DEFAULT 0.0",
         "billable_cost": "FLOAT DEFAULT NULL",
         "billing_mode": "VARCHAR(32) NOT NULL DEFAULT 'unclassified'",
     }
@@ -101,6 +122,20 @@ def _migrate_schema(engine):
                     f"ALTER TABLE agent_runs ADD COLUMN {name} "
                     f"{agent_run_usage_columns[name]}"
                 )
+
+    if "cost_currency" not in agent_run_columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE agent_runs ADD COLUMN cost_currency VARCHAR(8)"
+            )
+            connection.exec_driver_sql(
+                "UPDATE agent_runs SET "
+                "cost = COALESCE(cost, 0) * 7.2, "
+                "billable_cost = CASE "
+                "WHEN billable_cost IS NULL THEN NULL "
+                "ELSE billable_cost * 7.2 END, "
+                "cost_currency = 'CNY'"
+            )
 
     task_columns = {
         column["name"] for column in inspect(engine).get_columns("tasks")

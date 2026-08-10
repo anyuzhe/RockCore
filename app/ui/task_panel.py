@@ -300,7 +300,7 @@ class TaskPanel(QWidget):
         self.usage_label = QLabel("")
         self.usage_label.setObjectName("mutedLabel")
         self.usage_label.setToolTip(
-            "等价估算用于比较模型用量；可计费 API 估算才参与美元预算。"
+            "等价估算用于比较模型用量；可计费 API 估算才参与人民币预算。"
             "ChatGPT 登录调用不计入可计费 API 成本。"
         )
         header_layout.addWidget(self.usage_label)
@@ -432,6 +432,7 @@ class TaskPanel(QWidget):
     def _empty_usage() -> dict:
         return {
             "input_tokens": 0,
+            "cached_input_tokens": 0,
             "output_tokens": 0,
             "calls": 0,
             "cost": 0.0,
@@ -441,6 +442,10 @@ class TaskPanel(QWidget):
     @staticmethod
     def _format_usage(usage: dict, prefix: str = "用量") -> str:
         input_tokens = int(usage.get("input_tokens", 0) or 0)
+        cached_input_tokens = min(
+            input_tokens,
+            int(usage.get("cached_input_tokens", 0) or 0),
+        )
         output_tokens = int(usage.get("output_tokens", 0) or 0)
         calls = int(usage.get("calls", 0) or 0)
         cost = float(usage.get("cost", 0.0) or 0.0)
@@ -449,15 +454,20 @@ class TaskPanel(QWidget):
             return ""
         if raw_billable_cost is None:
             cost_text = (
-                f"等价估算 ${cost:.4f} · 可计费 API：历史记录未区分"
+                f"等价估算 ¥{cost:.4f} · 可计费 API：历史记录未区分"
             )
         else:
             billable_cost = float(raw_billable_cost or 0.0)
             cost_text = (
-                f"等价估算 ${cost:.4f} · 可计费 API ${billable_cost:.4f}"
+                f"等价估算 ¥{cost:.4f} · 可计费 API ¥{billable_cost:.4f}"
             )
+        cache_text = (
+            f"（其中缓存 {cached_input_tokens:,}）"
+            if cached_input_tokens else ""
+        )
         return (
-            f"{prefix}：输入 {input_tokens:,} · 输出 {output_tokens:,} tokens"
+            f"{prefix}：输入 {input_tokens:,}{cache_text} · "
+            f"输出 {output_tokens:,} tokens"
             f" · {cost_text} · {calls} 次调用"
         )
 
@@ -832,6 +842,7 @@ class TaskPanel(QWidget):
     def add_model_output(self, agent_type: str, provider: str, response: str,
                          error: str | None, duration_ms: int,
                          input_tokens: int = 0, output_tokens: int = 0,
+                         cached_input_tokens: int = 0,
                          task_id: str = "", estimated_cost: float = 0.0,
                          billable_cost: float | None = None,
                          billing_mode: str = "api"):
@@ -844,6 +855,11 @@ class TaskPanel(QWidget):
             else max(0.0, float(billable_cost or 0.0))
         )
         self._usage["input_tokens"] += max(0, int(input_tokens or 0))
+        cached_input_tokens = min(
+            max(0, int(input_tokens or 0)),
+            max(0, int(cached_input_tokens or 0)),
+        )
+        self._usage["cached_input_tokens"] += cached_input_tokens
         self._usage["output_tokens"] += max(0, int(output_tokens or 0))
         self._usage["calls"] += 1
         self._usage["cost"] += equivalent_cost
@@ -855,6 +871,7 @@ class TaskPanel(QWidget):
             if task is not None:
                 task_usage = task.setdefault("usage", self._empty_usage())
                 task_usage["input_tokens"] += max(0, int(input_tokens or 0))
+                task_usage["cached_input_tokens"] += cached_input_tokens
                 task_usage["output_tokens"] += max(0, int(output_tokens or 0))
                 task_usage["calls"] += 1
                 task_usage["cost"] += equivalent_cost
@@ -877,17 +894,22 @@ class TaskPanel(QWidget):
                 return
             if billing_mode == "chatgpt_cli":
                 cost_text = (
-                    f"等价估算 ${equivalent_cost:.4f} · "
+                    f"等价估算 ¥{equivalent_cost:.4f} · "
                     "ChatGPT 登录不计入 API 成本"
                 )
             else:
                 cost_text = (
-                    f"等价估算 ${equivalent_cost:.4f} · "
-                    f"可计费 API ${api_cost:.4f}"
+                    f"等价估算 ¥{equivalent_cost:.4f} · "
+                    f"可计费 API ¥{api_cost:.4f}"
                 )
+            cache_detail = (
+                f"（缓存输入 {cached_input_tokens}）"
+                if cached_input_tokens else ""
+            )
             text = (
                 f"{provider.upper()} · {duration} · "
-                f"{input_tokens}+{output_tokens} tokens · {cost_text}\n"
+                f"{input_tokens}{cache_detail}+{output_tokens} tokens · "
+                f"{cost_text}\n"
                 f"{content}"
             )
         if key == "worker" and not repair_round:

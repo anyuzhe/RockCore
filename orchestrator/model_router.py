@@ -185,8 +185,15 @@ class ModelRouter:
         usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
         response["usage"] = {
             "input_tokens": ModelRouter._normalize_token_count(usage.get("input_tokens", 0)),
+            "cached_input_tokens": ModelRouter._normalize_token_count(
+                usage.get("cached_input_tokens", 0)
+            ),
             "output_tokens": ModelRouter._normalize_token_count(usage.get("output_tokens", 0)),
         }
+        response["usage"]["cached_input_tokens"] = min(
+            response["usage"]["cached_input_tokens"],
+            response["usage"]["input_tokens"],
+        )
         content = response.get("content")
         if content is None:
             response["content"] = ""
@@ -275,10 +282,13 @@ class ModelRouter:
             and (not configured_provider or route == configured_provider)
         ):
             kwargs.setdefault("reasoning_effort", configured_reasoning)
-        model_name = (
-            configured_model
-            if configured_model and route == configured_provider
-            else getattr(provider, "model", "") or route
+        model_name = str(
+            kwargs.get("model")
+            or (
+                configured_model
+                if configured_model and route == configured_provider
+                else getattr(provider, "model", "") or route
+            )
         )
 
         # Snapshot messages for chat log before the call
@@ -299,17 +309,26 @@ class ModelRouter:
             # Record usage
             usage = response.get("usage", {})
             input_tokens = usage.get("input_tokens", 0)
+            cached_input_tokens = usage.get("cached_input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             await self.cost_engine.record_usage(
-                job_id, agent_type, input_tokens, output_tokens,
-                provider=route, task_id=task_id, billing_mode=billing_mode,
+                job_id, agent_type,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                output_tokens=output_tokens,
+                provider=route, model_name=model_name,
+                task_id=task_id, billing_mode=billing_mode,
             )
             estimated_cost = self.cost_engine.estimate_cost(
-                agent_type, input_tokens, output_tokens, provider=route
+                agent_type, input_tokens, output_tokens, provider=route,
+                cached_input_tokens=cached_input_tokens,
+                model_name=model_name,
             )
             billable_cost = self.cost_engine.estimate_billable_cost(
                 agent_type, input_tokens, output_tokens, provider=route,
                 billing_mode=billing_mode,
+                cached_input_tokens=cached_input_tokens,
+                model_name=model_name,
             )
 
             task_type = getattr(task, "task_type", "unknown") if task else "unknown"
@@ -328,10 +347,12 @@ class ModelRouter:
                     messages=chat_messages,
                     response=response.get("content", ""),
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
                     output_tokens=output_tokens,
                     estimated_cost=estimated_cost,
                     billable_cost=billable_cost,
                     billing_mode=billing_mode,
+                    cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=None,
                 )
@@ -359,10 +380,12 @@ class ModelRouter:
                     messages=chat_messages,
                     response="",
                     input_tokens=0,
+                    cached_input_tokens=0,
                     output_tokens=0,
                     estimated_cost=0.0,
                     billable_cost=0.0,
                     billing_mode=billing_mode,
+                    cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),
                 )
@@ -446,10 +469,13 @@ class ModelRouter:
             and (not configured_provider or route == configured_provider)
         ):
             kwargs.setdefault("reasoning_effort", configured_reasoning)
-        model_name = (
-            configured_model
-            if configured_model and route == configured_provider
-            else getattr(provider, "model", "") or route
+        model_name = str(
+            kwargs.get("model")
+            or (
+                configured_model
+                if configured_model and route == configured_provider
+                else getattr(provider, "model", "") or route
+            )
         )
 
         chat_prompt = system_prompt
@@ -468,17 +494,26 @@ class ModelRouter:
 
             usage = response.get("usage", {})
             input_tokens = usage.get("input_tokens", 0)
+            cached_input_tokens = usage.get("cached_input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             await self.cost_engine.record_usage(
-                job_id, agent_type, input_tokens, output_tokens,
-                provider=route, task_id=task_id, billing_mode=billing_mode,
+                job_id, agent_type,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                output_tokens=output_tokens,
+                provider=route, model_name=model_name,
+                task_id=task_id, billing_mode=billing_mode,
             )
             estimated_cost = self.cost_engine.estimate_cost(
-                agent_type, input_tokens, output_tokens, provider=route
+                agent_type, input_tokens, output_tokens, provider=route,
+                cached_input_tokens=cached_input_tokens,
+                model_name=model_name,
             )
             billable_cost = self.cost_engine.estimate_billable_cost(
                 agent_type, input_tokens, output_tokens, provider=route,
                 billing_mode=billing_mode,
+                cached_input_tokens=cached_input_tokens,
+                model_name=model_name,
             )
 
             task_type = getattr(task, "task_type", "unknown") if task else "unknown"
@@ -496,10 +531,12 @@ class ModelRouter:
                     messages=chat_messages,
                     response=response.get("content", ""),
                     input_tokens=input_tokens,
+                    cached_input_tokens=cached_input_tokens,
                     output_tokens=output_tokens,
                     estimated_cost=estimated_cost,
                     billable_cost=billable_cost,
                     billing_mode=billing_mode,
+                    cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=None,
                 )
@@ -527,10 +564,12 @@ class ModelRouter:
                     messages=chat_messages,
                     response="",
                     input_tokens=0,
+                    cached_input_tokens=0,
                     output_tokens=0,
                     estimated_cost=0.0,
                     billable_cost=0.0,
                     billing_mode=billing_mode,
+                    cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),
                 )

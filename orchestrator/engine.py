@@ -126,6 +126,10 @@ class Engine:
         if not job_id:
             return
         input_tokens = max(0, int(data.get("input_tokens") or 0))
+        cached_input_tokens = min(
+            input_tokens,
+            max(0, int(data.get("cached_input_tokens") or 0)),
+        )
         output_tokens = max(0, int(data.get("output_tokens") or 0))
         estimated_cost = max(0.0, float(data.get("estimated_cost") or 0.0))
         billing_mode = str(data.get("billing_mode") or "api")
@@ -140,7 +144,7 @@ class Engine:
         repos = self._get_repos()
         try:
             job = repos["job"].add_usage(
-                job_id, input_tokens, output_tokens,
+                job_id, input_tokens, cached_input_tokens, output_tokens,
                 estimated_cost, billable_cost,
             )
             task_id = data.get("task_id")
@@ -158,9 +162,11 @@ class Engine:
                 run.id,
                 "failed" if data.get("error") else "completed",
                 input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
                 output_tokens=output_tokens,
                 cost=estimated_cost,
                 billable_cost=billable_cost,
+                cost_currency="CNY",
                 billing_mode=billing_mode,
                 error_message=str(data.get("error") or ""),
             )
@@ -1840,7 +1846,7 @@ class Engine:
                 phase="review",
                 round=repair_round,
                 max_input_tokens=review_budget.max_input_tokens,
-                max_cost_usd=review_budget.max_cost_usd,
+                max_cost_cny=review_budget.max_cost_cny,
             )
             if self._is_cancelled(job.job_id, job, repos):
                 return
@@ -2065,7 +2071,7 @@ class Engine:
             phase="review_repair",
             round=round_number,
             max_input_tokens=repair_budget.max_input_tokens,
-            max_cost_usd=repair_budget.max_cost_usd,
+                max_cost_cny=repair_budget.max_cost_cny,
         )
 
         constitution = repos["constitution"].get_by_job(job.id)
@@ -2330,7 +2336,7 @@ class Engine:
             return (
                 "budget_exceeded",
                 "已保留完成步骤；检查 Token、调用次数或可计费 API 成本上限。"
-                "ChatGPT 登录的等价估算成本不会触发美元预算。",
+                "ChatGPT 登录的等价估算成本不会触发人民币 API 预算。",
             )
         if cls._is_provider_capability_error(error):
             return (

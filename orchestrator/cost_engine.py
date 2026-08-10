@@ -15,7 +15,7 @@ class JobBudget:
     max_input_tokens: int = 500_000
     max_output_tokens: int = 100_000
     max_api_calls: int = 100
-    max_cost_usd: float = 0.50
+    max_cost_cny: float = 3.60
 
 
 class BudgetExceededError(RuntimeError):
@@ -30,8 +30,10 @@ class BudgetExceededError(RuntimeError):
 class UsageRecord:
     agent_type: str
     input_tokens: int
+    cached_input_tokens: int
     output_tokens: int
     provider: str = ""
+    model_name: str = ""
     billing_mode: str = "api"
     task_id: str = ""
     timestamp: str = ""
@@ -40,28 +42,61 @@ class UsageRecord:
 class CostEngine:
     """Tracks token usage and enforces budget limits per job.
 
-    API-price-equivalent costs (approximate per 1K tokens):
-    - Codex (GPT-5.6 Sol): $0.005 input / $0.03 output
-    - Kimi planner equivalent: $0.002 input / $0.008 output
-    - DeepSeek V4 Flash: $0.0005 input / $0.002 output
+    Prices are CNY per one million tokens and distinguish cached input,
+    ordinary input, and output. Kimi and DeepSeek prices follow the user-
+    supplied RMB price table. Codex is a RMB equivalent converted from its
+    USD reference price; ChatGPT-authenticated calls remain non-billable.
 
     The equivalent estimate is shown for all calls. Only usage whose
     ``billing_mode`` represents a separately billed API is enforced against
-    ``max_cost_usd``.
+    ``max_cost_cny``.
     """
 
-    MODEL_COSTS = {
-        "governor": {"input": 0.005, "output": 0.030},
-        "reviewer": {"input": 0.005, "output": 0.030},
-        "emergency_coder": {"input": 0.005, "output": 0.030},
-        "planner": {"input": 0.002, "output": 0.008},
-        "worker": {"input": 0.0005, "output": 0.002},
+    CURRENCY = "CNY"
+    LEGACY_USD_TO_CNY = 7.20
+    DEFAULT_MAX_COST_CNY = 3.60
+    MODEL_PRICES_CNY_PER_MILLION = {
+        "deepseek-v4-flash-0731": {
+            "cached_input": 0.02, "input": 1.00, "output": 2.00,
+        },
+        "deepseek-v4-flash": {
+            "cached_input": 0.02, "input": 1.00, "output": 2.00,
+        },
+        "deepseek-v4-pro": {
+            "cached_input": 0.025, "input": 3.00, "output": 6.00,
+        },
+        "kimi-k2.6": {
+            "cached_input": 1.10, "input": 6.50, "output": 27.00,
+        },
+        "kimi-k2.7-code": {
+            "cached_input": 1.30, "input": 6.50, "output": 27.00,
+        },
+        "kimi-k2.7": {
+            "cached_input": 1.30, "input": 6.50, "output": 27.00,
+        },
+        "kimi-k3": {
+            "cached_input": 2.00, "input": 20.00, "output": 100.00,
+        },
+        # GPT-5.6 Sol reference ($0.50/$5/$30) converted at ¥7.20/USD.
+        "gpt-5.6-sol": {
+            "cached_input": 3.60, "input": 36.00, "output": 216.00,
+        },
+        "codex-sdk": {
+            "cached_input": 3.60, "input": 36.00, "output": 216.00,
+        },
     }
-    PROVIDER_COSTS = {
-        "codex": {"input": 0.005, "output": 0.030},
-        "openai": {"input": 0.005, "output": 0.030},
-        "kimi": {"input": 0.002, "output": 0.008},
-        "deepseek": {"input": 0.0005, "output": 0.002},
+    DEFAULT_MODEL_BY_PROVIDER = {
+        "codex": "gpt-5.6-sol",
+        "openai": "gpt-5.6-sol",
+        "kimi": "kimi-k3",
+        "deepseek": "deepseek-v4-flash",
+    }
+    DEFAULT_MODEL_BY_AGENT = {
+        "governor": "gpt-5.6-sol",
+        "reviewer": "gpt-5.6-sol",
+        "emergency_coder": "gpt-5.6-sol",
+        "planner": "kimi-k3",
+        "worker": "deepseek-v4-flash",
     }
 
     def __init__(self, default_budget: JobBudget | None = None):
@@ -75,8 +110,8 @@ class CostEngine:
         """Apply the user-visible default to future jobs."""
         self._default_budget = replace(budget)
 
-    @staticmethod
-    def budget_from_config(config: dict | None) -> JobBudget:
+    @classmethod
+    def budget_from_config(cls, config: dict | None) -> JobBudget:
         """Build one coherent budget without hidden input/output ceilings."""
         values = config or {}
         total = max(10_000, int(values.get("max_total_tokens", 1_000_000)))
@@ -91,8 +126,20 @@ class CostEngine:
                 10_000, int(values.get("max_output_tokens", total))
             ),
             max_api_calls=max(1, int(values.get("max_api_calls", 100))),
-            max_cost_usd=max(0.01, float(values.get("max_cost_usd", 0.50))),
+            max_cost_cny=max(0.10, cls._configured_cost_limit(values)),
         )
+
+    @classmethod
+    def _configured_cost_limit(cls, values: dict) -> float:
+        if "max_cost_cny" in values:
+            return float(values.get("max_cost_cny") or cls.DEFAULT_MAX_COST_CNY)
+        if "max_cost_usd" in values:
+            return round(
+                float(values.get("max_cost_usd") or 0.50)
+                * cls.LEGACY_USD_TO_CNY,
+                2,
+            )
+        return cls.DEFAULT_MAX_COST_CNY
 
     def set_budget(self, job_id: str, budget: JobBudget):
         self._budgets[job_id] = budget
@@ -115,7 +162,7 @@ class CostEngine:
             budget.max_input_tokens += 300_000
             budget.max_output_tokens += 100_000
             budget.max_api_calls += 40
-            budget.max_cost_usd += 0.50
+            budget.max_cost_cny += 3.60
             self._repair_reservations.add(reservation_key)
         return budget
 
@@ -128,7 +175,7 @@ class CostEngine:
             budget.max_input_tokens += 150_000
             budget.max_output_tokens += 50_000
             budget.max_api_calls += 15
-            budget.max_cost_usd += 0.25
+            budget.max_cost_cny += 1.80
             self._review_reservations.add(reservation_key)
         return budget
 
@@ -143,8 +190,11 @@ class CostEngine:
         return self._budgets.get(job_id, self._default_budget)
 
     async def record_usage(self, job_id: str, agent_type: str,
-                           input_tokens: int = 0, output_tokens: int = 0,
-                           provider: str = "", task_id: str = "",
+                           input_tokens: int = 0,
+                           cached_input_tokens: int = 0,
+                           output_tokens: int = 0,
+                           provider: str = "", model_name: str = "",
+                           task_id: str = "",
                            billing_mode: str = "api"):
         """Record token usage for a job."""
         if job_id not in self._usage:
@@ -152,8 +202,13 @@ class CostEngine:
         self._usage[job_id].append(UsageRecord(
             agent_type=agent_type,
             input_tokens=input_tokens,
+            cached_input_tokens=min(
+                max(0, int(cached_input_tokens or 0)),
+                max(0, int(input_tokens or 0)),
+            ),
             output_tokens=output_tokens,
             provider=provider or "",
+            model_name=model_name or "",
             billing_mode=billing_mode or "api",
             task_id=task_id or "",
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -169,7 +224,7 @@ class CostEngine:
         total_output = sum(r.output_tokens for r in usage)
         total_api = len(usage)
 
-        # Dollar limits apply only to calls that can be billed through a
+        # RMB limits apply only to calls that can be billed through a
         # provider API. ChatGPT-authenticated ``codex exec`` calls still count
         # towards token/call limits and equivalent-cost reporting, but they do
         # not consume the Platform API cost budget.
@@ -180,6 +235,8 @@ class CostEngine:
                 record.output_tokens,
                 record.provider,
                 record.billing_mode,
+                record.cached_input_tokens,
+                record.model_name,
             )
             for record in usage
         )
@@ -195,15 +252,15 @@ class CostEngine:
             return False, f"Output tokens exceeded: {total_output}/{budget.max_output_tokens}"
         if total_api > budget.max_api_calls:
             return False, f"API calls exceeded: {total_api}/{budget.max_api_calls}"
-        if billable_cost > budget.max_cost_usd:
+        if billable_cost > budget.max_cost_cny:
             return False, (
                 "Billable API cost exceeded: "
-                f"${billable_cost:.4f}/${budget.max_cost_usd:.4f}"
+                f"¥{billable_cost:.4f}/¥{budget.max_cost_cny:.4f}"
             )
 
         return True, (
             f"OK: {total_input}i/{total_output}o, "
-            f"${billable_cost:.4f} billable API estimate"
+            f"¥{billable_cost:.4f} billable API estimate"
         )
 
     async def check_task_budget(self, job_id: str, task_id: str,
@@ -226,8 +283,13 @@ class CostEngine:
         by_agent: dict[str, dict] = {}
         for record in usage:
             if record.agent_type not in by_agent:
-                by_agent[record.agent_type] = {"input": 0, "output": 0, "calls": 0}
+                by_agent[record.agent_type] = {
+                    "input": 0, "cached_input": 0, "output": 0, "calls": 0,
+                }
             by_agent[record.agent_type]["input"] += record.input_tokens
+            by_agent[record.agent_type]["cached_input"] += (
+                record.cached_input_tokens
+            )
             by_agent[record.agent_type]["output"] += record.output_tokens
             by_agent[record.agent_type]["calls"] += 1
 
@@ -237,6 +299,8 @@ class CostEngine:
                 record.input_tokens,
                 record.output_tokens,
                 record.provider,
+                record.cached_input_tokens,
+                record.model_name,
             )
             for record in usage
         )
@@ -247,6 +311,8 @@ class CostEngine:
                 record.output_tokens,
                 record.provider,
                 record.billing_mode,
+                record.cached_input_tokens,
+                record.model_name,
             )
             for record in usage
         )
@@ -254,6 +320,7 @@ class CostEngine:
         return {
             "by_agent": by_agent,
             "total_input": sum(r.input_tokens for r in usage),
+            "total_cached_input": sum(r.cached_input_tokens for r in usage),
             "total_output": sum(r.output_tokens for r in usage),
             "total_calls": len(usage),
             # Keep total_cost as a backwards-compatible alias for the
@@ -261,23 +328,43 @@ class CostEngine:
             "total_cost": round(equivalent_cost, 4),
             "equivalent_cost": round(equivalent_cost, 4),
             "billable_cost": round(billable_cost, 4),
+            "currency": self.CURRENCY,
         }
 
     @classmethod
-    def _cost_rates(cls, agent_type: str, provider: str = "") -> dict:
-        return cls.PROVIDER_COSTS.get(
-            (provider or "").lower(),
-            cls.MODEL_COSTS.get(agent_type, {"input": 0.01, "output": 0.03}),
-        )
+    def _cost_rates(cls, agent_type: str, provider: str = "",
+                    model_name: str = "") -> dict:
+        normalized = str(model_name or "").strip().lower()
+        if normalized not in cls.MODEL_PRICES_CNY_PER_MILLION:
+            for candidate in sorted(
+                cls.MODEL_PRICES_CNY_PER_MILLION, key=len, reverse=True
+            ):
+                if normalized.startswith(candidate + "-"):
+                    normalized = candidate
+                    break
+        if normalized not in cls.MODEL_PRICES_CNY_PER_MILLION:
+            normalized = cls.DEFAULT_MODEL_BY_PROVIDER.get(
+                (provider or "").lower(),
+                cls.DEFAULT_MODEL_BY_AGENT.get(agent_type, "deepseek-v4-flash"),
+            )
+        return cls.MODEL_PRICES_CNY_PER_MILLION[normalized]
 
     @classmethod
     def estimate_cost(cls, agent_type: str, input_tokens: int = 0,
-                      output_tokens: int = 0, provider: str = "") -> float:
-        """Estimate an API-price-equivalent USD value for model usage."""
-        rates = cls._cost_rates(agent_type, provider)
+                      output_tokens: int = 0, provider: str = "",
+                      cached_input_tokens: int = 0,
+                      model_name: str = "") -> float:
+        """Estimate an API-price-equivalent RMB value for model usage."""
+        rates = cls._cost_rates(agent_type, provider, model_name)
+        input_count = max(0, int(input_tokens or 0))
+        cached_count = min(
+            input_count, max(0, int(cached_input_tokens or 0))
+        )
+        ordinary_count = input_count - cached_count
         return round(
-            (max(0, input_tokens) / 1000) * rates["input"]
-            + (max(0, output_tokens) / 1000) * rates["output"],
+            (cached_count / 1_000_000) * rates["cached_input"]
+            + (ordinary_count / 1_000_000) * rates["input"]
+            + (max(0, output_tokens) / 1_000_000) * rates["output"],
             6,
         )
 
@@ -291,10 +378,13 @@ class CostEngine:
                                input_tokens: int = 0,
                                output_tokens: int = 0,
                                provider: str = "",
-                               billing_mode: str = "api") -> float:
+                               billing_mode: str = "api",
+                               cached_input_tokens: int = 0,
+                               model_name: str = "") -> float:
         """Estimate cost that should count against the paid-API budget."""
         if not cls.is_billable_api_mode(billing_mode):
             return 0.0
         return cls.estimate_cost(
-            agent_type, input_tokens, output_tokens, provider
+            agent_type, input_tokens, output_tokens, provider,
+            cached_input_tokens, model_name,
         )

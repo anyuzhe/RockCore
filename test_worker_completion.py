@@ -726,7 +726,11 @@ def test_model_router_normalizes_sync_and_malformed_provider_output():
         response = await router.chat_with_tools("worker", "system", [], [])
         assert response["content"] == ""
         assert response["tool_calls"] == []
-        assert response["usage"] == {"input_tokens": 0, "output_tokens": 0}
+        assert response["usage"] == {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+        }
 
     asyncio.run(scenario())
 

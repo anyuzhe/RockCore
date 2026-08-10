@@ -335,8 +335,8 @@ def test_usage_header_separates_equivalent_and_billable_api_cost():
         "billable_cost": 0.0213,
     }, "总用量")
 
-    assert "等价估算 $1.6269" in text
-    assert "可计费 API $0.0213" in text
+    assert "等价估算 ¥1.6269" in text
+    assert "可计费 API ¥0.0213" in text
 
 
 def test_historical_usage_does_not_guess_billable_cost():
@@ -358,6 +358,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
 
     assert settings.kimi_model.findData("kimi-k2.7") >= 0
     assert settings.ds_model.findData("deepseek-v4-pro") >= 0
+    assert settings.max_cost.prefix() == "¥"
     assert project._agent_widgets["planner"]["model"].findData(
         "kimi-k2.7"
     ) >= 0

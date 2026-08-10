@@ -16,7 +16,7 @@ def test_visible_total_token_budget_has_no_hidden_component_cap():
     budget = CostEngine.budget_from_config({
         "max_total_tokens": 1_000_000,
         "max_api_calls": 250,
-        "max_cost_usd": 5,
+        "max_cost_cny": 36,
     })
 
     assert budget.max_total_tokens == 1_000_000
@@ -33,7 +33,7 @@ def test_runtime_settings_update_scheduler_and_default_budget(tmp_path):
         "budget": {
             "max_total_tokens": 800_000,
             "max_api_calls": 77,
-            "max_cost_usd": 3,
+            "max_cost_cny": 21.6,
         },
         "agent_provider_map": {"worker": "kimi"},
     })

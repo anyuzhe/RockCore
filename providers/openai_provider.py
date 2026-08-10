@@ -48,10 +48,7 @@ class OpenAIProvider(BaseProvider):
         return {
             "content": choice.message.content or "",
             "finish_reason": choice.finish_reason or "stop",
-            "usage": {
-                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "output_tokens": response.usage.completion_tokens if response.usage else 0,
-            },
+            "usage": self.normalize_usage(response.usage),
             "raw": response,
         }
 
@@ -88,9 +85,6 @@ class OpenAIProvider(BaseProvider):
             "content": msg.content or "",
             "tool_calls": tool_calls,
             "finish_reason": choice.finish_reason or "stop",
-            "usage": {
-                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "output_tokens": response.usage.completion_tokens if response.usage else 0,
-            },
+            "usage": self.normalize_usage(response.usage),
             "raw": response,
         }

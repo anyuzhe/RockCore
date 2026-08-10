@@ -120,7 +120,11 @@ def test_provider_uses_codex_exec_for_chatgpt_login(tmp_path):
     assert provider.authentication_mode == "chatgpt_cli"
     assert provider.api_key == ""
     assert response["content"] == '{"result":"pass"}'
-    assert response["usage"] == {"input_tokens": 12, "output_tokens": 4}
+    assert response["usage"] == {
+        "input_tokens": 12,
+        "cached_input_tokens": 0,
+        "output_tokens": 4,
+    }
     assert captured["sandbox_mode"] == "read-only"
     assert captured["cwd"] == str(tmp_path)
     assert captured["model"] == "gpt-5.6-sol"

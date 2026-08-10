@@ -13,6 +13,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QPainter, QPainterPath, QPen
 
 from orchestrator.agent_config import PROVIDER_MODELS
+from orchestrator.cost_engine import CostEngine
 from app.paths import config_path
 
 
@@ -39,6 +40,16 @@ def load_config() -> dict:
                 if kimi.get("model") in {None, "", "kimi-k2.6"}:
                     kimi["model"] = "kimi-k3"
                 config["workflow_defaults_version"] = 2
+            if int(config.get("pricing_currency_version", 0) or 0) < 1:
+                budget = config.setdefault("budget", {})
+                if "max_cost_cny" not in budget:
+                    legacy_limit = budget.pop("max_cost_usd", 0.50)
+                    budget["max_cost_cny"] = round(
+                        float(legacy_limit or 0.50)
+                        * CostEngine.LEGACY_USD_TO_CNY,
+                        2,
+                    )
+                config["pricing_currency_version"] = 1
             return config
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return {}
@@ -292,16 +303,24 @@ class SettingsDialog(QDialog):
         budget_layout.addRow("最大 API 调用：", self.max_api_calls)
 
         self.max_cost = QDoubleSpinBox()
-        self.max_cost.setRange(0.01, 100.0)
-        self.max_cost.setSingleStep(0.10)
+        self.max_cost.setRange(0.10, 10000.0)
+        self.max_cost.setSingleStep(1.00)
         self.max_cost.setDecimals(2)
-        self.max_cost.setPrefix("$")
-        self.max_cost.setValue(self._config.get("budget", {}).get("max_cost_usd", 0.50))
+        self.max_cost.setPrefix("¥")
+        self.max_cost.setValue(
+            self._config.get("budget", {}).get(
+                "max_cost_cny", CostEngine.DEFAULT_MAX_COST_CNY
+            )
+        )
         budget_layout.addRow("可计费 API 成本上限：", self.max_cost)
 
         budget_note = QLabel(
             "仅限制通过 API Key 单独计费的调用。ChatGPT 登录下的 Codex "
-            "调用仍统计 Token 和等价估算成本，但不会消耗此美元预算。"
+            "调用仍统计 Token 和人民币等价估算成本，但不会消耗此人民币预算。\n"
+            "价格单位：人民币/百万 Token。DeepSeek Flash 缓存/输入/输出 "
+            "¥0.02/¥1/¥2，Pro ¥0.025/¥3/¥6；Kimi K2.6 "
+            "¥1.10/¥6.50/¥27，K2.7 Code ¥1.30/¥6.50/¥27，"
+            "K3 ¥2/¥20/¥100。"
         )
         budget_note.setWordWrap(True)
         budget_note.setStyleSheet("color: #888; padding: 4px 0;")
@@ -356,9 +375,10 @@ class SettingsDialog(QDialog):
         self._config["budget"] = {
             "max_total_tokens": self.max_tokens.value(),
             "max_api_calls": self.max_api_calls.value(),
-            "max_cost_usd": self.max_cost.value(),
+            "max_cost_cny": self.max_cost.value(),
         }
         self._config["workflow_defaults_version"] = 2
+        self._config["pricing_currency_version"] = 1
 
         save_config(self._config)
         QMessageBox.information(self, "设置", "设置已保存。")

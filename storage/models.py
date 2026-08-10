@@ -42,14 +42,16 @@ class Job(Base):
                         onupdate=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
     usage_input_tokens = Column(Integer, default=0)
+    usage_cached_input_tokens = Column(Integer, default=0)
     usage_output_tokens = Column(Integer, default=0)
     usage_calls = Column(Integer, default=0)
-    # API-price-equivalent estimate for every provider call, including calls
-    # made through a ChatGPT subscription.
+    # RMB API-price-equivalent estimate for every provider call, including
+    # calls made through a ChatGPT subscription.
     usage_cost = Column(Float, default=0.0)
     # Estimated cost only for separately billed API transports. Nullable keeps
     # migrated historical rows distinguishable from newly classified usage.
     usage_billable_cost = Column(Float, default=0.0, nullable=True)
+    usage_cost_currency = Column(String(8), default="CNY")
     failure_code = Column(String(64), default="")
     failure_reason = Column(Text, default="")
     recovery_hint = Column(Text, default="")
@@ -138,10 +140,12 @@ class AgentRun(Base):
     model_name = Column(String(64), default="")
     status = Column(String(32), default="pending")
     input_tokens = Column(Integer, default=0)
+    cached_input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
-    # ``cost`` is the equivalent estimate retained for compatibility.
+    # ``cost`` is the RMB equivalent estimate retained for compatibility.
     cost = Column(Float, default=0.0)
     billable_cost = Column(Float, default=0.0, nullable=True)
+    cost_currency = Column(String(8), default="CNY")
     billing_mode = Column(String(32), default="api")
     error_message = Column(Text, default="")
     started_at = Column(DateTime, nullable=True)

@@ -309,7 +309,11 @@ class CodexProvider(BaseProvider):
         """Extract the final agent message and usage from Codex JSONL events."""
         messages: list[str] = []
         errors: list[str] = []
-        usage = {"input_tokens": 0, "output_tokens": 0}
+        usage = {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+        }
         event_count = 0
         for line in (output or "").splitlines():
             line = line.strip()
@@ -345,6 +349,18 @@ class CodexProvider(BaseProvider):
                     usage["output_tokens"],
                     int(event_usage.get("output_tokens", 0) or 0),
                 )
+                usage["cached_input_tokens"] = max(
+                    usage["cached_input_tokens"],
+                    int(
+                        event_usage.get("cached_input_tokens", 0)
+                        or event_usage.get("cache_read_input_tokens", 0)
+                        or 0
+                    ),
+                )
+
+        usage["cached_input_tokens"] = min(
+            usage["cached_input_tokens"], usage["input_tokens"]
+        )
 
         if messages:
             return messages[-1], usage, event_count
@@ -480,16 +496,13 @@ class CodexProvider(BaseProvider):
             response = await client.responses.create(
                 **request_options,
             )
-            usage = getattr(response, "usage", None)
+            usage = self.normalize_usage(getattr(response, "usage", None))
             return {
                 "content": response.output_text or "",
                 "finish_reason": (
                     "stop" if response.status == "completed" else response.status
                 ),
-                "usage": {
-                    "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
-                    "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
-                },
+                "usage": usage,
                 "raw": response,
             }
 
@@ -512,10 +525,7 @@ class CodexProvider(BaseProvider):
         return {
             "content": choice.message.content or "",
             "finish_reason": choice.finish_reason or "stop",
-            "usage": {
-                "input_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "output_tokens": response.usage.completion_tokens if response.usage else 0,
-            },
+            "usage": self.normalize_usage(response.usage),
             "raw": response,
         }
 

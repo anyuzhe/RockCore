@@ -796,6 +796,7 @@ class MainWindow(QMainWindow):
                 error=data.get("error"),
                 duration_ms=data.get("duration_ms", 0),
                 input_tokens=data.get("input_tokens", 0),
+                cached_input_tokens=data.get("cached_input_tokens", 0),
                 output_tokens=data.get("output_tokens", 0),
                 task_id=data.get("task_id", ""),
                 estimated_cost=data.get("estimated_cost", 0.0),
@@ -968,6 +969,10 @@ class MainWindow(QMainWindow):
         ]
         return {
             "input_tokens": sum(int(run.input_tokens or 0) for run in runs),
+            "cached_input_tokens": sum(
+                int(getattr(run, "cached_input_tokens", 0) or 0)
+                for run in runs
+            ),
             "output_tokens": sum(int(run.output_tokens or 0) for run in runs),
             "calls": len(runs),
             "cost": round(sum(float(run.cost or 0.0) for run in runs), 6),
@@ -982,6 +987,9 @@ class MainWindow(QMainWindow):
     def _job_usage(job) -> dict:
         return {
             "input_tokens": int(getattr(job, "usage_input_tokens", 0) or 0),
+            "cached_input_tokens": int(
+                getattr(job, "usage_cached_input_tokens", 0) or 0
+            ),
             "output_tokens": int(getattr(job, "usage_output_tokens", 0) or 0),
             "calls": int(getattr(job, "usage_calls", 0) or 0),
             "cost": float(getattr(job, "usage_cost", 0.0) or 0.0),
