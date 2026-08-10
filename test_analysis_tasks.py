@@ -1,12 +1,34 @@
 """Regression tests for read-only analysis tasks and dependency failures."""
 
 import asyncio
+import subprocess
+import sys
 from types import SimpleNamespace
 
-from app.ui.task_panel import STATUS_STYLE
+from app.ui.status_constants import STATUS_STYLE
 from orchestrator.engine import Engine
 from orchestrator.scheduler import Scheduler
 from orchestrator.state_machine import JobState
+
+
+def test_status_metadata_can_load_without_qt_runtime():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from app.ui.status_constants import STATUS_STYLE; "
+                "assert STATUS_STYLE['blocked']['text'] == '已阻塞'; "
+                "assert 'PyQt6' not in sys.modules"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 class _AnalysisWorker:
