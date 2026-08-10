@@ -80,6 +80,134 @@ def test_simple_plan_collapses_analysis_and_overlapping_coding():
     assert plan["tasks"][1]["dependencies"] == ["T002"]
 
 
+def test_simple_plan_rewrites_removed_task_references_and_read_only_clause():
+    plan = {
+        "summary": "Update one page after T001",
+        "tasks": [
+            {
+                "id": "T001", "type": "analysis", "title": "Locate page",
+                "description": (
+                    "只读分析现有页面，产出书面分析报告，"
+                    "不创建或修改任何项目文件。"
+                ),
+                "allowed_paths": ["site/index.html"], "dependencies": [],
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Update content",
+                "description": "依据 T001 报告修改比分。",
+                "allowed_paths": ["site/index.html"], "dependencies": ["T001"],
+            },
+            {
+                "id": "T003", "type": "testing", "title": "Validate HTML",
+                "description": "验证 T002 的文件结果。",
+                "allowed_paths": ["site/index.html"], "dependencies": ["T002"],
+            },
+        ],
+    }
+
+    assert Engine._optimize_plan(plan, "simple")
+
+    assert [task["id"] for task in plan["tasks"]] == ["T002", "T003"]
+    coding = plan["tasks"][0]["description"]
+    assert "T001" not in coding
+    assert "不创建或修改任何项目文件" not in coding
+    assert "上述前置检查结论" in coding
+    assert PolicyEngine().check_task_plan(plan, {}) == []
+
+
+def test_broad_multi_feature_plan_is_promoted_and_not_collapsed():
+    tasks = [{
+        "id": "T001", "type": "analysis", "title": "Analyze project",
+        "description": "只读分析项目并形成报告，不创建或修改任何项目文件。",
+        "allowed_paths": ["**/*"], "dependencies": [],
+    }]
+    for number in range(2, 7):
+        tasks.append({
+            "id": f"T{number:03d}", "type": "coding",
+            "title": f"Feature {number}",
+            "description": (
+                "依据 T001 报告创建游戏功能。" if number == 2
+                else "继续实现一个独立游戏功能。"
+            ),
+            "allowed_paths": ["**/*.html", "**/*.css", "**/*.js"],
+            "dependencies": [f"T{number - 1:03d}"],
+        })
+    plan = {"summary": "Build browser game", "tasks": tasks}
+    original_ids = [task["id"] for task in tasks]
+
+    complexity = Engine._promote_complexity_from_plan("simple", plan)
+    collapsed = Engine._optimize_plan(plan, complexity)
+
+    assert complexity == "complex"
+    assert not collapsed
+    assert [task["id"] for task in plan["tasks"]] == original_ids
+    assert "依据 T001 报告" in plan["tasks"][1]["description"]
+
+
+def test_plan_policy_rejects_dangling_references_and_dependency_cycles():
+    dangling = {
+        "tasks": [{
+            "id": "T002", "type": "coding", "title": "Implement",
+            "description": "依据 T001 报告修改页面。",
+            "allowed_paths": ["index.html"], "dependencies": ["T001"],
+        }]
+    }
+    cyclic = {
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "One",
+                "description": "Modify one file.",
+                "allowed_paths": ["one.py"], "dependencies": ["T002"],
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Two",
+                "description": "Modify another file.",
+                "allowed_paths": ["two.py"], "dependencies": ["T001"],
+            },
+        ]
+    }
+
+    dangling_errors = PolicyEngine().check_task_plan(dangling, {})
+    cycle_errors = PolicyEngine().check_task_plan(cyclic, {})
+
+    assert any("dependency references missing task 'T001'" in error
+               for error in dangling_errors)
+    assert any("description references missing task 'T001'" in error
+               for error in dangling_errors)
+    assert any("dependency cycle" in error for error in cycle_errors)
+
+
+def test_repair_plan_renames_prose_references_but_not_command_paths():
+    plan = {
+        "summary": "Repair after T001 report",
+        "tasks": [
+            {
+                "id": "T001", "type": "analysis", "title": "Inspect issue",
+                "description": "Find the exact cause.",
+                "allowed_paths": ["src/app.py"], "dependencies": [],
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Fix issue",
+                "description": "依据 T001 报告修改实现。",
+                "allowed_paths": ["src/app.py"], "dependencies": ["T001"],
+                "acceptance_command": "pytest tests/test_T001_regression.py",
+            },
+        ],
+    }
+
+    namespaced = Engine._namespace_repair_plan(plan, 2)
+
+    assert [task["id"] for task in namespaced["tasks"]] == [
+        "R02T001", "R02T002",
+    ]
+    assert namespaced["tasks"][1]["dependencies"] == ["R02T001"]
+    assert "R02T001" in namespaced["tasks"][1]["description"]
+    assert namespaced["tasks"][1]["acceptance_command"] == (
+        "pytest tests/test_T001_regression.py"
+    )
+    assert PolicyEngine().check_task_plan(namespaced, {}) == []
+
+
 def test_validation_only_testing_task_stays_local(tmp_path):
     baseline = TestManager.capture_snapshot(tmp_path)
     (tmp_path / "index.html").write_text(

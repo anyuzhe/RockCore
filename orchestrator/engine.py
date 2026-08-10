@@ -1,10 +1,12 @@
 """Main orchestrator engine — the brain of the AI Engineering Studio."""
 
 import asyncio
+import copy
 import fnmatch
 import json
 import logging
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -631,6 +633,12 @@ class Engine:
                 else:
                     await self._skip_phase(job, repos, "planner")
                     self._create_direct_plan(job, repos, proj_config)
+                # The request classifier only sees the user's short prompt. The
+                # Planner has much better scope information, so let a broad plan
+                # promote the runtime budget before Worker execution starts.
+                complexity = getattr(job, "_rockcore_complexity", complexity)
+                if worker:
+                    worker.max_turns = proj_config.get_worker_turns(complexity)
                 if self._is_cancelled(job.job_id, job, repos):
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
@@ -877,9 +885,25 @@ class Engine:
             used_fallback = True
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
-        self._optimize_plan(
-            plan_data, getattr(job, "_rockcore_complexity", "normal")
+        initial_complexity = getattr(job, "_rockcore_complexity", "normal")
+        effective_complexity = self._promote_complexity_from_plan(
+            initial_complexity, plan_data
         )
+        job._rockcore_complexity = effective_complexity
+        if effective_complexity != initial_complexity:
+            logger.info(
+                "Job %s: planner promoted complexity %s -> %s",
+                job.job_id, initial_complexity, effective_complexity,
+            )
+            await self.event_bus.publish(
+                "plan_complexity_promoted",
+                job_id=job.job_id,
+                previous_complexity=initial_complexity,
+                complexity=effective_complexity,
+                reason="策划步骤数量或文件范围超过简单任务阈值",
+            )
+
+        self._optimize_plan(plan_data, effective_complexity)
         self._serialize_overlapping_tasks(plan_data)
         self._prune_transitive_dependencies(plan_data)
 
@@ -963,22 +987,63 @@ class Engine:
 
     @classmethod
     def _optimize_plan(cls, plan_data: dict, complexity: str = "normal"):
-        """Collapse model-heavy ceremony for small, targeted changes."""
-        if complexity != "simple":
-            return
-        tasks = [dict(task) for task in (plan_data.get("tasks") or [])]
+        """Collapse only small plans and keep task text referentially sound."""
+        if complexity != "simple" or not cls._can_collapse_simple_plan(plan_data):
+            return False
+
+        original = copy.deepcopy(plan_data)
+        tasks = copy.deepcopy(plan_data.get("tasks") or [])
         coding = [task for task in tasks if task.get("type", "coding") == "coding"]
         if not coding:
-            return
+            return False
 
         analysis = [task for task in tasks if task.get("type") == "analysis"]
         primary = coding[0]
-        descriptions = []
-        for task in analysis + coding:
-            text = str(task.get("description") or "").strip()
-            if text and text not in descriptions:
-                descriptions.append(text)
-        primary["description"] = "\n\n".join(descriptions)
+        collapsed_ids = {
+            str(task.get("id")) for task in analysis + coding if task.get("id")
+        }
+        replacement_id = str(primary.get("id") or "T001")
+        reference_map = {
+            task_id.upper(): replacement_id for task_id in collapsed_ids
+        }
+        analysis_ids = {
+            str(task.get("id")).upper() for task in analysis if task.get("id")
+        }
+
+        preflight = []
+        for task in analysis:
+            text = cls._analysis_as_preflight(task.get("description"))
+            text = cls._rewrite_task_references(
+                text, reference_map, replacement_id, analysis_ids
+            )
+            if text and text not in preflight:
+                preflight.append(text)
+
+        implementation = []
+        for task in coding:
+            text = cls._rewrite_task_references(
+                task.get("description"), reference_map,
+                replacement_id, analysis_ids,
+            )
+            if text and text not in implementation:
+                implementation.append(text)
+
+        description_sections = []
+        if preflight:
+            description_sections.append(
+                "【本任务前置检查】\n" + "\n".join(preflight)
+            )
+        if implementation:
+            if preflight:
+                implementation.insert(
+                    0,
+                    "完成前置检查后，必须继续执行以下实现要求并产生所需文件修改。",
+                )
+            description_sections.append(
+                "【实现要求】\n" + "\n".join(implementation)
+            )
+
+        primary["description"] = "\n\n".join(description_sections)
         primary["title"] = str(primary.get("title") or "完成目标修改")
         primary["allowed_paths"] = list(dict.fromkeys(
             path for task in analysis + coding
@@ -990,10 +1055,6 @@ class Engine:
             for task in coding if task.get("acceptance_command")
         ), "")
 
-        collapsed_ids = {
-            task.get("id") for task in analysis + coding if task.get("id")
-        }
-        replacement_id = primary.get("id") or "T001"
         retained = [primary]
         validation_kept = False
         for task in tasks:
@@ -1012,19 +1073,183 @@ class Engine:
                 validation_kept = validation_kept or not authoring
             dependencies = []
             for dependency in task.get("dependencies") or []:
-                mapped = replacement_id if dependency in collapsed_ids else dependency
+                mapped = (
+                    replacement_id
+                    if str(dependency) in collapsed_ids
+                    else dependency
+                )
                 if mapped != task.get("id") and mapped not in dependencies:
                     dependencies.append(mapped)
             if not dependencies and task.get("type") == "testing":
                 dependencies = [replacement_id]
             task["dependencies"] = dependencies
+            for field in ("title", "description"):
+                task[field] = cls._rewrite_task_references(
+                    task.get(field), reference_map,
+                    str(task.get("id") or ""), analysis_ids,
+                )
             retained.append(task)
 
         plan_data["tasks"] = retained
-        plan_data["summary"] = (
-            str(plan_data.get("summary") or "")
-            + f"（简单任务已收敛为 {len(retained)} 个步骤）"
+        plan_data["summary"] = cls._rewrite_task_references(
+            str(plan_data.get("summary") or ""),
+            reference_map, "", analysis_ids,
+        ) + f"（简单任务已收敛为 {len(retained)} 个步骤）"
+
+        # A deterministic optimizer must never make a model plan less valid.
+        # If an unusual text pattern still leaves a dangling/self reference,
+        # restore the original tasks instead of persisting a poisoned plan.
+        integrity_errors = PolicyEngine().check_task_plan(plan_data, {})
+        if integrity_errors:
+            logger.warning(
+                "Simple-plan optimization rolled back: %s",
+                integrity_errors[0],
+            )
+            plan_data.clear()
+            plan_data.update(original)
+            return False
+        return True
+
+    @staticmethod
+    def _is_broad_plan_path(path: str) -> bool:
+        normalized = str(path or "").replace("\\", "/").strip().lstrip("./")
+        return not normalized or any(marker in normalized for marker in ("*", "?", "["))
+
+    @classmethod
+    def _can_collapse_simple_plan(cls, plan_data: dict) -> bool:
+        """Return whether merging tasks is smaller and safer than preserving them."""
+        tasks = list(plan_data.get("tasks") or [])
+        coding = [task for task in tasks if task.get("type", "coding") == "coding"]
+        analysis = [task for task in tasks if task.get("type") == "analysis"]
+        if not coding or len(coding) > 2 or len(analysis) > 1 or len(tasks) > 5:
+            return False
+
+        collapsed = analysis + coding
+        collapsed_ids = {
+            str(task.get("id")) for task in collapsed if task.get("id")
+        }
+        if any(
+            str(dependency) not in collapsed_ids
+            for task in collapsed
+            for dependency in (task.get("dependencies") or [])
+        ):
+            return False
+
+        paths = list(dict.fromkeys(
+            str(path) for task in collapsed
+            for path in (task.get("allowed_paths") or []) if str(path).strip()
+        ))
+        if not paths or len(paths) > 3 or any(cls._is_broad_plan_path(path) for path in paths):
+            return False
+
+        description_size = sum(
+            len(str(task.get("description") or "")) for task in collapsed
         )
+        if description_size > 1800:
+            return False
+
+        commands = {
+            str(task.get("acceptance_command") or "").strip()
+            for task in coding if str(task.get("acceptance_command") or "").strip()
+        }
+        return len(commands) <= 1
+
+    @classmethod
+    def _promote_complexity_from_plan(cls, complexity: str,
+                                      plan_data: dict) -> str:
+        """Correct an optimistic prompt-only classification using plan scope."""
+        rank = {"simple": 0, "normal": 1, "complex": 2}
+        current = complexity if complexity in rank else "normal"
+        tasks = list(plan_data.get("tasks") or [])
+        coding = [task for task in tasks if task.get("type", "coding") == "coding"]
+        relevant = [
+            task for task in tasks
+            if task.get("type", "coding") in {"analysis", "coding", "testing"}
+        ]
+        description_size = sum(
+            len(str(task.get("description") or "")) for task in relevant
+        )
+        broad_paths = sum(
+            1 for task in relevant for path in (task.get("allowed_paths") or [])
+            if cls._is_broad_plan_path(path)
+        )
+
+        target = current
+        if (
+            len(coding) >= 5
+            or len(relevant) >= 8
+            or description_size >= 7000
+            or (len(coding) >= 4 and broad_paths)
+        ):
+            target = "complex"
+        elif (
+            len(coding) >= 3
+            or description_size >= 2200
+            or (len(coding) >= 2 and broad_paths)
+        ):
+            target = "normal"
+        return target if rank[target] > rank[current] else current
+
+    @staticmethod
+    def _analysis_as_preflight(description) -> str:
+        """Keep analysis useful without carrying a global no-edit prohibition."""
+        text = str(description or "").strip()
+        replacements = {
+            "只读分析": "检查",
+            "产出书面分析报告": "形成供本任务使用的检查结论",
+            "不创建或修改任何项目文件": "",
+            "不创建或修改项目文件": "",
+            "不创建或修改任何文件": "",
+            "不得创建或修改任何项目文件": "",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        text = re.sub(
+            r"(?i)\b(?:do not|don't|without)\s+"
+            r"(?:create|creating|modify|modifying|edit|editing|write|writing)"
+            r"[^.;。；]*(?:[.;。；]|$)",
+            "",
+            text,
+        )
+        return re.sub(r"[，,]\s*[。.]", "。", text).strip(" ，,;；")
+
+    @staticmethod
+    def _rewrite_task_references(text, reference_map: dict[str, str],
+                                 current_id: str,
+                                 analysis_ids: set[str]) -> str:
+        """Rewrite references to removed task IDs, including prose references."""
+        value = str(text or "")
+        for task_id in analysis_ids:
+            escaped = re.escape(task_id)
+            value = re.sub(
+                rf"(?:依据|根据)\s*[`*]*{escaped}[`*]*\s*"
+                rf"(?:的?\s*(?:报告|分析结果|分析结论|结论))?",
+                "依据上述前置检查结论",
+                value,
+                flags=re.IGNORECASE,
+            )
+            value = re.sub(
+                rf"(?i)\b(?:after|following|based\s+on)\s+[`*]*{escaped}[`*]*"
+                rf"(?:'s)?(?:\s+(?:report|analysis|findings))?",
+                "after the preflight checks above",
+                value,
+            )
+
+        task_ref = re.compile(
+            r"(?<![A-Za-z0-9_])(?:R\d{2}T\d{3,}|T\d{3,})(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+
+        def replace(match):
+            original = match.group(0)
+            replacement = reference_map.get(original.upper())
+            if not replacement:
+                return original
+            if current_id and replacement.upper() == current_id.upper():
+                return "本任务前置步骤"
+            return replacement
+
+        return task_ref.sub(replace, value)
 
     @classmethod
     def _serialize_overlapping_tasks(cls, plan_data: dict):
@@ -2730,8 +2955,8 @@ class Engine:
     @classmethod
     def _namespace_repair_plan(cls, plan_data: dict,
                                round_number: int) -> dict:
-        """Give repair tasks unique IDs and retain only internal dependencies."""
-        tasks = [dict(task) for task in (plan_data.get("tasks") or [])]
+        """Give repair tasks unique IDs and rewrite their prose references."""
+        tasks = copy.deepcopy(plan_data.get("tasks") or [])
         id_map = {}
         for index, task in enumerate(tasks):
             old_id = str(task.get("id") or f"T{index + 1:03d}")
@@ -2744,14 +2969,25 @@ class Engine:
             task.setdefault("allowed_paths", [])
             task.setdefault("acceptance_command", "")
 
+        reference_map = {
+            old_id.upper(): new_id for old_id, new_id in id_map.items()
+        }
         for task in tasks:
             task["dependencies"] = [
                 id_map[dependency]
                 for dependency in (task.get("dependencies") or [])
                 if dependency in id_map
             ]
+            for field in ("title", "description"):
+                task[field] = cls._rewrite_task_references(
+                    task.get(field), reference_map,
+                    str(task.get("id") or ""), set(),
+                )
         return {
-            "summary": plan_data.get("summary", "审核修复计划"),
+            "summary": cls._rewrite_task_references(
+                plan_data.get("summary", "审核修复计划"),
+                reference_map, "", set(),
+            ),
             "tasks": tasks,
         }
 

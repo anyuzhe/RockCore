@@ -48,6 +48,9 @@ Rules:
     same feature and files; one coding task should implement and verify them.
 19. A testing task must either author tests or name a real executable test
     command. Do not create a model task merely to restate local validation.
+20. Dependencies are authoritative. If a title or description mentions a task ID,
+    that ID must still exist in the final tasks array. Never refer to a removed,
+    merged, or renumbered task by its old ID.
 
 Output ONLY valid JSON with this structure:
 {

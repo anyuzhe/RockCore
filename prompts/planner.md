@@ -13,6 +13,8 @@ Create a detailed task plan that respects the **Constitution** defined by the Go
 3. Each task must be concrete, single-purpose, and executable
 4. Tasks have types: analysis, coding, testing, review
 5. Dependencies between tasks form a DAG (no cycles)
+6. If task prose mentions another task ID, that ID must exist in the final plan;
+   never leave references to removed, merged, or renumbered tasks
 
 ## Output
 

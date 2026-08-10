@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -121,8 +122,104 @@ class PolicyEngine:
         """Validate that a plan respects the constitution. Returns list of errors."""
         errors = []
         protected = constitution.get("protected_paths", [])
+        tasks = list(plan.get("tasks") or [])
+        task_ids = [str(task.get("id") or "").strip() for task in tasks]
+        known_ids = {task_id for task_id in task_ids if task_id}
 
-        for task in plan.get("tasks", []):
+        for index, task_id in enumerate(task_ids, start=1):
+            if not task_id:
+                errors.append(f"Task at position {index} has no id")
+            elif task_ids.count(task_id) > 1:
+                message = f"Duplicate task id: {task_id}"
+                if message not in errors:
+                    errors.append(message)
+
+        task_ref = re.compile(
+            r"(?<![A-Za-z0-9_])(?:R\d{2}T\d{3,}|T\d{3,})(?![A-Za-z0-9_])",
+            re.IGNORECASE,
+        )
+        dependency_graph = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "").strip()
+            dependencies = [
+                str(dependency).strip()
+                for dependency in (task.get("dependencies") or [])
+                if str(dependency).strip()
+            ]
+            dependency_graph[task_id] = dependencies
+            for dependency in dependencies:
+                if dependency == task_id:
+                    errors.append(f"Task {task_id}: cannot depend on itself")
+                elif dependency not in known_ids:
+                    errors.append(
+                        f"Task {task_id}: dependency references missing task "
+                        f"'{dependency}'"
+                    )
+
+            for field in ("title", "description"):
+                value = str(task.get(field) or "")
+                for match in task_ref.finditer(value):
+                    referenced = match.group(0)
+                    before = value[max(0, match.start() - 24):match.start()].lower()
+                    after = value[match.end():match.end() + 24].lower()
+                    is_prerequisite_reference = any(
+                        marker in before for marker in (
+                            "依据", "根据", "依赖", "前置",
+                            "after", "following", "based on", "depends on",
+                        )
+                    ) or any(
+                        marker in after for marker in (
+                            "报告", "分析结果", "分析结论", "结论", "产出", "完成后",
+                            " report", " analysis", " result", " output",
+                        )
+                    )
+                    if not is_prerequisite_reference:
+                        continue
+                    canonical = next(
+                        (item for item in known_ids if item.upper() == referenced.upper()),
+                        None,
+                    )
+                    if canonical is None:
+                        errors.append(
+                            f"Task {task_id}: {field} references missing task "
+                            f"'{referenced}'"
+                        )
+                    elif canonical == task_id:
+                        errors.append(
+                            f"Task {task_id}: {field} contains a self-reference "
+                            f"'{referenced}'"
+                        )
+
+            if task.get("type", "coding") == "coding":
+                description = str(task.get("description") or "").lower()
+                absolute_read_only = any(marker in description for marker in (
+                    "不创建或修改任何项目文件",
+                    "不创建或修改项目文件",
+                    "不创建或修改任何文件",
+                    "不得创建或修改任何项目文件",
+                    "do not create or modify any project files",
+                    "without creating or modifying any project files",
+                ))
+                positive_description = description
+                for marker in (
+                    "不创建或修改任何项目文件",
+                    "不创建或修改项目文件",
+                    "不创建或修改任何文件",
+                    "不得创建或修改任何项目文件",
+                    "do not create or modify any project files",
+                    "without creating or modifying any project files",
+                ):
+                    positive_description = positive_description.replace(marker, "")
+                requires_edit = any(marker in positive_description for marker in (
+                    "创建", "修改", "实现", "写入", "编辑", "搭建",
+                    "create", "modify", "implement", "write", "edit", "build",
+                ))
+                if absolute_read_only and requires_edit:
+                    errors.append(
+                        f"Task {task_id}: coding instructions conflict between "
+                        "read-only and file modification requirements"
+                    )
+
             for path in task.get("allowed_paths", []):
                 normalized = str(path or "").replace("\\", "/")
                 if Path(normalized).is_absolute():
@@ -143,6 +240,29 @@ class PolicyEngine:
                             f"Task {task.get('id')}: allowed_path '{normalized}' "
                             f"intersects protected_path '{pp}'"
                         )
+
+        # A cycle leaves every involved task waiting forever. Report one clear
+        # error per cycle entry instead of allowing it into the scheduler.
+        visited: set[str] = set()
+        active: set[str] = set()
+
+        def visit(task_id: str) -> bool:
+            if task_id in active:
+                return True
+            if task_id in visited:
+                return False
+            active.add(task_id)
+            for dependency in dependency_graph.get(task_id, []):
+                if dependency in known_ids and visit(dependency):
+                    return True
+            active.remove(task_id)
+            visited.add(task_id)
+            return False
+
+        for task_id in known_ids:
+            if visit(task_id):
+                errors.append(f"Task dependency cycle detected at '{task_id}'")
+                break
         return errors
 
     def check_tool_call(self, task: Any, tool_name: str, args: dict) -> bool:
