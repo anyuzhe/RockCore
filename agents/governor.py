@@ -22,6 +22,8 @@ The Constitution and workflow risk assessment define:
 6. RISK_REASONS: Concrete reasons for the classification
 7. PROTECTED_PATHS: File paths that must NOT be modified
 8. REQUIRES_FINAL_REVIEW: Whether a final review is needed
+9. IMAGE_OBSERVATIONS: When images are attached, factual UI/content details that
+   the Planner and Worker must preserve or implement
 
 Output ONLY valid JSON with this exact structure:
 {
@@ -31,6 +33,7 @@ Output ONLY valid JSON with this exact structure:
   "risk": "low|medium|high",
   "risk_score": 0,
   "risk_reasons": ["string", ...],
+  "image_observations": ["string", ...],
   "protected_paths": ["string", ...],
   "requires_final_review": true|false
 }
@@ -55,7 +58,8 @@ class GovernorAgent:
         self.model_router = model_router
         self.agent_type = "governor"
 
-    async def run(self, user_request: str, project=None) -> dict:
+    async def run(self, user_request: str, project=None,
+                  attachments: list[dict] | None = None) -> dict:
         """Run the Governor to produce a Constitution."""
         logger.info(f"Governor (Codex): analyzing request: {user_request[:100]}...")
 
@@ -94,6 +98,7 @@ Output ONLY valid JSON."""
                 GOVERNOR_SYSTEM_PROMPT,
                 messages,
                 project_root=project.root_path if project else ".",
+                attachments=attachments or [],
             )
 
             content = response.get("content", "{}")
@@ -112,6 +117,7 @@ Output ONLY valid JSON."""
             constitution.setdefault("risk_reasons", [
                 "未提供明确风险说明，按中风险处理"
             ])
+            constitution.setdefault("image_observations", [])
             constitution.setdefault("protected_paths", [])
             constitution.setdefault("requires_final_review", True)
             self._normalize_risk_assessment(constitution)

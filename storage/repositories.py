@@ -48,10 +48,12 @@ class JobRepository:
 
     def create(self, job_id: str, project_id: int, user_request: str,
                risk_level: str = "medium",
-               source_job_id: str | None = None) -> Job:
+               source_job_id: str | None = None,
+               attachments: list[dict] | None = None) -> Job:
         job = Job(job_id=job_id, project_id=project_id,
                   user_request=user_request, risk_level=risk_level,
-                  source_job_id=source_job_id)
+                  source_job_id=source_job_id,
+                  attachments=list(attachments or []))
         self.session.add(job)
         self.session.commit()
         return job

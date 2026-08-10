@@ -412,7 +412,10 @@ class Engine:
 
     async def create_job(self, project_id: int, user_request: str,
                          project_root: str, risk_level: str = "medium",
-                         source_job_id: str | None = None) -> dict:
+                         source_job_id: str | None = None,
+                         attachments: list[dict] | None = None) -> dict:
+        from app.image_attachments import normalize_attachments
+
         repos = self._get_repos()
         try:
             if source_job_id:
@@ -429,8 +432,10 @@ class Engine:
                 count += 1
                 job_id_str = f"JOB-{today}-{count:03d}"
 
+            safe_attachments = normalize_attachments(attachments)
             job = repos["job"].create(
-                job_id_str, project_id, user_request, risk_level, source_job_id
+                job_id_str, project_id, user_request, risk_level, source_job_id,
+                safe_attachments,
             )
             self._cancelled_job_ids.discard(job_id_str)
             self.state_machine.transition(job_id_str, JobState.CREATED)
@@ -756,7 +761,10 @@ class Engine:
         if governor:
             try:
                 effective_request = self._request_with_context(job, repos, proj_config)
-                constitution = await governor.run(effective_request, job.project)
+                constitution = await governor.run(
+                    effective_request, job.project,
+                    attachments=getattr(job, "attachments", None) or [],
+                )
                 risk = self._normalized_risk_level(
                     constitution.get("risk"), fallback_risk
                 )
@@ -793,6 +801,11 @@ class Engine:
                         "source": "governor",
                         "risk_score": risk_score,
                         "risk_reasons": risk_reasons,
+                        "image_observations": [
+                            str(value)[:500]
+                            for value in constitution.get("image_observations", [])
+                            if str(value).strip()
+                        ][:12],
                     },
                 )
                 assessment = {
@@ -3257,8 +3270,13 @@ Prefer these existing files when relevant:
         return False
 
     def _request_with_context(self, job, repos, proj_config=None) -> str:
+        from app.image_attachments import attachment_context
+
         context = self._continuation_context(job, repos, proj_config)
-        return job.user_request if not context else f"{job.user_request}\n{context}"
+        request = job.user_request + attachment_context(
+            getattr(job, "attachments", None)
+        )
+        return request if not context else f"{request}\n{context}"
 
     async def _run_simple(self, job, repos,
                           proj_config: ProjectAgentConfig | None = None,
@@ -3284,9 +3302,13 @@ Prefer these existing files when relevant:
 
         # Build continuation context (if enabled in config)
         cont_context = self._continuation_context(job, repos, proj_config)
-        description = job.user_request
+        from app.image_attachments import attachment_context
+
+        description = job.user_request + attachment_context(
+            getattr(job, "attachments", None)
+        )
         if cont_context:
-            description = job.user_request + "\n" + cont_context
+            description += "\n" + cont_context
 
         normalized_risk = (
             "high" if job.risk_level == "critical" else job.risk_level

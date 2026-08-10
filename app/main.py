@@ -193,6 +193,10 @@ async def main():
         QFrame#userMessage {
             background: #efede8; border: 1px solid #ded9d1; border-radius: 8px;
         }
+        QLabel#submittedImagePreview {
+            background: #ffffff; border: 1px solid #d8d3cb; border-radius: 6px;
+            color: #756f67; font-size: 10px;
+        }
         QFrame#agentMessage { background: transparent; }
         QFrame#workflowStage {
             background: transparent; border-bottom: 1px solid #e2ded7;
@@ -209,6 +213,16 @@ async def main():
         QFrame#queueBar {
             background: #fff8e6; border: 1px solid #e6cf91; border-radius: 6px;
         }
+        QScrollArea#attachmentScroll, QWidget#attachmentContent {
+            background: transparent; border: none;
+        }
+        QFrame#attachmentChip {
+            background: #f3f0eb; border: 1px solid #ded9d1; border-radius: 7px;
+        }
+        QLabel#attachmentPreview {
+            background: #ffffff; border: 1px solid #e2ded7; border-radius: 5px;
+        }
+        QLabel#attachmentName { color: #4d4842; font-size: 11px; }
         QLabel#queueLabel { color: #7a5a10; font-size: 11px; }
         QLabel#composerContext {
             color: #665f57; background: #f0ede8; border-radius: 5px; padding: 3px 7px;

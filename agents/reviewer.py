@@ -103,7 +103,8 @@ Output ONLY valid JSON."""
 
             try:
                 chunk_review = await self._request_review(
-                    messages, project_root=project_root
+                    messages, project_root=project_root,
+                    attachments=getattr(job, "attachments", None) or [],
                 )
                 reviews.append(self._suppress_false_syntax_issues(
                     chunk_review, validation
@@ -125,7 +126,8 @@ Output ONLY valid JSON."""
         return review
 
     async def _request_review(
-        self, messages: list[dict], project_root: str = "."
+        self, messages: list[dict], project_root: str = ".",
+        attachments: list[dict] | None = None,
     ) -> dict:
         """Retry malformed Codex output without falling back to the Planner stack."""
         attempts = [
@@ -150,6 +152,7 @@ Output ONLY valid JSON."""
                     allow_provider_fallback=False,
                     response_format={"type": "json_object"},
                     project_root=project_root,
+                    attachments=attachments or [],
                 )
                 content = response.get("content", "")
                 return self._parse_json(content)

@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .websocket import WebSocketManager
 from orchestrator.engine import Engine
@@ -30,6 +30,7 @@ class JobCreate(BaseModel):
     user_request: str
     risk_level: str = "medium"
     source_job_id: str | None = None
+    attachments: list[dict] = Field(default_factory=list)
 
 class JobAction(BaseModel):
     action: str  # pause, resume, cancel
@@ -136,6 +137,7 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             project_root="",
             risk_level=data.risk_level,
             source_job_id=data.source_job_id,
+            attachments=data.attachments,
         )
         return result
 

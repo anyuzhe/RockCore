@@ -71,6 +71,10 @@ Run the acceptance command to verify.
                 EMERGENCY_SYSTEM_PROMPT,
                 messages,
                 project_root=project_root,
+                attachments=(
+                    getattr(getattr(task, "job", None), "attachments", None)
+                    or []
+                ),
             )
 
             content = response.get("content", "{}")

@@ -263,6 +263,7 @@ def test_codex_uses_popen_instead_of_unsupported_asyncio_subprocess_on_windows(
         "你好，Codex",
         cwd=str(tmp_path),
         sandbox_mode="read-only",
+        image_paths=[r"C:\Users\测试\图片\界面截图.png"],
     ))
 
     assert returncode == 0
@@ -271,6 +272,9 @@ def test_codex_uses_popen_instead_of_unsupported_asyncio_subprocess_on_windows(
     assert captured["input"] == "你好，Codex".encode("utf-8")
     assert captured["timeout"] == 321
     assert captured["command"][0].lower().endswith("cmd.exe")
+    command_text = " ".join(captured["command"])
+    assert "--image" in command_text
+    assert "界面截图.png" in command_text
 
 
 def test_settings_file_is_saved_as_utf8(tmp_path, monkeypatch):

@@ -4,15 +4,25 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QPushButton, QLabel, QTextEdit, QMessageBox, QFrame
+    QPushButton, QLabel, QTextEdit, QMessageBox, QFrame, QFileDialog,
+    QScrollArea,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QByteArray, QBuffer, QIODevice
+from PyQt6.QtGui import (
+    QAction, QFont, QKeySequence, QShortcut, QImage, QImageReader, QPixmap,
+)
 
+from app.image_attachments import (
+    MAX_IMAGE_ATTACHMENTS,
+    SUPPORTED_IMAGE_SUFFIXES,
+    store_image_bytes,
+    store_image_file,
+)
 from .project_panel import ProjectPanel
 from .task_panel import TaskPanel
 from .settings_dialog import SettingsDialog, load_config
@@ -21,6 +31,31 @@ from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PR
 from app.subprocess_utils import run_process
 
 logger = logging.getLogger(__name__)
+
+
+class ComposerTextEdit(QTextEdit):
+    """Text editor that turns pasted images or image files into attachments."""
+
+    image_pasted = pyqtSignal(object)
+    image_files_pasted = pyqtSignal(list)
+
+    def canInsertFromMimeData(self, source):
+        return bool(source.hasImage() or super().canInsertFromMimeData(source))
+
+    def insertFromMimeData(self, source):
+        image_files = [
+            url.toLocalFile()
+            for url in source.urls()
+            if url.isLocalFile()
+            and Path(url.toLocalFile()).suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+        ] if source.hasUrls() else []
+        if image_files:
+            self.image_files_pasted.emit(image_files)
+            return
+        if source.hasImage():
+            self.image_pasted.emit(source.imageData())
+            return
+        super().insertFromMimeData(source)
 
 
 class SignalBridge(QObject):
@@ -48,6 +83,8 @@ class MainWindow(QMainWindow):
         self._followup_source_job_id = None
         self._queued_request = None
         self._queued_source_job_id = None
+        self._attachments: list[dict] = []
+        self._queued_attachments: list[dict] = []
         self._config = load_config()
         self._setup_ui()
         self._connect_signals()
@@ -113,7 +150,7 @@ class MainWindow(QMainWindow):
         self.queue_bar.hide()
         composer_layout.addWidget(self.queue_bar)
 
-        self.input_text = QTextEdit()
+        self.input_text = ComposerTextEdit()
         self.input_text.setObjectName("composerInput")
         self.input_text.setPlaceholderText(
             "描述你希望 RockCore 完成的工作"
@@ -121,10 +158,39 @@ class MainWindow(QMainWindow):
         self.input_text.setMinimumHeight(54)
         self.input_text.setMaximumHeight(130)
         self.input_text.textChanged.connect(self._update_send_state)
+        self.input_text.image_pasted.connect(self._add_clipboard_image)
+        self.input_text.image_files_pasted.connect(self._add_image_files)
         composer_layout.addWidget(self.input_text)
+
+        self.attachment_scroll = QScrollArea()
+        self.attachment_scroll.setObjectName("attachmentScroll")
+        self.attachment_scroll.setWidgetResizable(True)
+        self.attachment_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.attachment_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.attachment_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.attachment_scroll.setFixedHeight(70)
+        self.attachment_content = QWidget()
+        self.attachment_content.setObjectName("attachmentContent")
+        self.attachment_layout = QHBoxLayout(self.attachment_content)
+        self.attachment_layout.setContentsMargins(0, 2, 0, 2)
+        self.attachment_layout.setSpacing(6)
+        self.attachment_layout.addStretch(1)
+        self.attachment_scroll.setWidget(self.attachment_content)
+        self.attachment_scroll.hide()
+        composer_layout.addWidget(self.attachment_scroll)
 
         composer_actions = QHBoxLayout()
         composer_actions.setSpacing(6)
+        self.attach_image_btn = QPushButton("＋")
+        self.attach_image_btn.setObjectName("composerToolButton")
+        self.attach_image_btn.setFixedSize(30, 30)
+        self.attach_image_btn.setToolTip("添加图片（也可直接粘贴剪贴板图片）")
+        self.attach_image_btn.clicked.connect(self._choose_images)
+        composer_actions.addWidget(self.attach_image_btn)
         self.followup_source_label = QLabel("新需求")
         self.followup_source_label.setObjectName("composerContext")
         composer_actions.addWidget(self.followup_source_label)
@@ -282,6 +348,7 @@ class MainWindow(QMainWindow):
                     job_dict = {
                         "job_id": job.job_id,
                         "user_request": job.user_request,
+                        "attachments": list(getattr(job, "attachments", None) or []),
                         "status": job.status,
                         "source_job_id": job.source_job_id,
                         "failure_code": getattr(job, "failure_code", "") or "",
@@ -417,20 +484,159 @@ class MainWindow(QMainWindow):
             finally:
                 self._close_repos(repos)
 
+    def _choose_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择图片",
+            "",
+            "图片 (*.png *.jpg *.jpeg *.webp *.gif *.bmp)",
+        )
+        if paths:
+            self._add_image_files(paths)
+
+    def _add_image_files(self, paths: list[str]):
+        errors = []
+        for path_text in paths:
+            if len(self._attachments) >= MAX_IMAGE_ATTACHMENTS:
+                errors.append(f"一次最多附加 {MAX_IMAGE_ATTACHMENTS} 张图片")
+                break
+            reader = QImageReader(path_text)
+            if not reader.canRead():
+                errors.append(f"无法读取图片：{Path(path_text).name}")
+                continue
+            try:
+                record = store_image_file(path_text)
+            except (OSError, ValueError) as error:
+                errors.append(str(error))
+                continue
+            if any(
+                item.get("sha256") == record.get("sha256")
+                for item in self._attachments
+            ):
+                continue
+            self._attachments.append(record)
+        self._render_attachments()
+        self._update_send_state()
+        if errors:
+            QMessageBox.warning(self, "无法添加部分图片", "\n".join(errors[:4]))
+
+    def _add_clipboard_image(self, image_data):
+        if len(self._attachments) >= MAX_IMAGE_ATTACHMENTS:
+            QMessageBox.information(
+                self, "图片数量已满",
+                f"一次最多附加 {MAX_IMAGE_ATTACHMENTS} 张图片。",
+            )
+            return
+        if isinstance(image_data, QPixmap):
+            image = image_data.toImage()
+        elif isinstance(image_data, QImage):
+            image = image_data
+        else:
+            image = QImage(image_data)
+        if image.isNull():
+            QMessageBox.warning(self, "无法粘贴图片", "剪贴板中的图片无法读取。")
+            return
+        encoded = QByteArray()
+        buffer = QBuffer(encoded)
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not image.save(
+            buffer, "PNG"
+        ):
+            QMessageBox.warning(self, "无法粘贴图片", "图片转换为 PNG 失败。")
+            return
+        try:
+            record = store_image_bytes(bytes(encoded))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "无法粘贴图片", str(error))
+            return
+        if not any(
+            item.get("sha256") == record.get("sha256")
+            for item in self._attachments
+        ):
+            self._attachments.append(record)
+        self._render_attachments()
+        self._update_send_state()
+
+    def _set_attachments(self, attachments: list[dict] | None):
+        self._attachments = list(attachments or [])[:MAX_IMAGE_ATTACHMENTS]
+        self._render_attachments()
+        self._update_send_state()
+
+    def _clear_attachments(self):
+        self._attachments = []
+        self._render_attachments()
+
+    def _remove_attachment(self, attachment_id: str):
+        self._attachments = [
+            item for item in self._attachments
+            if str(item.get("id", "")) != attachment_id
+        ]
+        self._render_attachments()
+        self._update_send_state()
+
+    def _render_attachments(self):
+        while self.attachment_layout.count():
+            item = self.attachment_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        for attachment in self._attachments:
+            chip = QFrame()
+            chip.setObjectName("attachmentChip")
+            chip_layout = QHBoxLayout(chip)
+            chip_layout.setContentsMargins(4, 4, 4, 4)
+            chip_layout.setSpacing(5)
+
+            preview = QLabel()
+            preview.setObjectName("attachmentPreview")
+            preview.setFixedSize(48, 48)
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pixmap = QPixmap(str(attachment.get("path", "")))
+            if not pixmap.isNull():
+                preview.setPixmap(pixmap.scaled(
+                    48, 48,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                ))
+            chip_layout.addWidget(preview)
+
+            name = QLabel(str(attachment.get("name") or "图片"))
+            name.setObjectName("attachmentName")
+            name.setMaximumWidth(130)
+            name.setToolTip(str(attachment.get("name") or "图片"))
+            chip_layout.addWidget(name)
+
+            remove = QPushButton("×")
+            remove.setObjectName("quietIconButton")
+            remove.setFixedSize(22, 22)
+            attachment_id = str(attachment.get("id", ""))
+            remove.clicked.connect(
+                lambda _checked=False, value=attachment_id:
+                self._remove_attachment(value)
+            )
+            chip_layout.addWidget(remove)
+            self.attachment_layout.addWidget(chip)
+        self.attachment_layout.addStretch(1)
+        self.attachment_scroll.setVisible(bool(self._attachments))
+
     def _on_submit_request(self):
         if not self._current_project:
             QMessageBox.information(self, "选择项目", "请先从左侧选择一个项目。")
             return
         request = self.input_text.toPlainText().strip()
-        if not request:
+        attachments = list(self._attachments)
+        if not request and not attachments:
             return
+        if not request:
+            request = "请分析附加图片并完成图片中表达的需求。"
 
         if self._running_job_id or self._job_starting:
             self._queued_request = request
+            self._queued_attachments = attachments
             self._queued_source_job_id = (
                 self._followup_source_job_id or self._running_job_id
             )
             self.input_text.clear()
+            self._clear_attachments()
             preview = request.replace("\n", " ")[:80]
             self.queue_label.setText(f"下一轮已排队：{preview}")
             self.queue_bar.show()
@@ -444,6 +650,7 @@ class MainWindow(QMainWindow):
         self.task_panel.log(f"已提交需求：{request[:100]}", "log")
 
         self.input_text.clear()
+        self._clear_attachments()
         self.input_text.setPlaceholderText("当前任务运行中；可输入下一轮需求并排队")
 
         if self.engine:
@@ -452,12 +659,15 @@ class MainWindow(QMainWindow):
             self.followup_source_label.setText("正在创建任务")
             self.clear_followup_btn.setVisible(False)
             self._job_starting = True
-            asyncio.ensure_future(self._run_job_async(request, source_job_id))
+            asyncio.ensure_future(
+                self._run_job_async(request, source_job_id, attachments)
+            )
         else:
             self.status_label.setText("执行引擎尚未连接")
         self._update_send_state()
 
-    async def _run_job_async(self, request: str, source_job_id: str | None):
+    async def _run_job_async(self, request: str, source_job_id: str | None,
+                             attachments: list[dict] | None = None):
         try:
             repos = self._get_repos()
             try:
@@ -472,6 +682,7 @@ class MainWindow(QMainWindow):
                     user_request=request,
                     project_root=project.root_path,
                     source_job_id=source_job_id,
+                    attachments=attachments or [],
                 )
                 self._running_job_id = result["job_id"]
                 self._job_starting = False
@@ -524,12 +735,16 @@ class MainWindow(QMainWindow):
                 self._queued_request = None
                 self.queue_bar.hide()
                 self.input_text.setPlainText(request)
+                self._set_attachments(self._queued_attachments)
+                self._queued_attachments = []
 
     def _submit_queued_followup(self):
         request = self._queued_request
         if not request or self._running_job_id or self._job_starting:
             return
         self._queued_request = None
+        attachments = list(self._queued_attachments)
+        self._queued_attachments = []
         source_job_id = self._queued_source_job_id
         self._queued_source_job_id = None
         self.queue_bar.hide()
@@ -537,16 +752,18 @@ class MainWindow(QMainWindow):
         if source_job_id:
             self.followup_source_label.setText(f"继续 {source_job_id}")
         self.input_text.setPlainText(request)
+        self._set_attachments(attachments)
         self._on_submit_request()
 
     def _cancel_queued_request(self):
         self._queued_request = None
         self._queued_source_job_id = None
+        self._queued_attachments = []
         self.queue_bar.hide()
         self.status_label.setText("已取消排队的下一轮需求")
 
     def _update_send_state(self):
-        has_request = bool(self.input_text.toPlainText().strip())
+        has_request = bool(self.input_text.toPlainText().strip() or self._attachments)
         self.start_task_btn.setEnabled(bool(self._current_project) and has_request)
         self.start_task_btn.setToolTip(
             "排队为下一轮需求（⌘/Ctrl + Enter）"

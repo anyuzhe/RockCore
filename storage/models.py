@@ -32,6 +32,7 @@ class Job(Base):
     job_id = Column(String(64), nullable=False, unique=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     user_request = Column(Text, nullable=False)
+    attachments = Column(JSON, default=list, nullable=False)
     # The job whose result this request explicitly continues, if any.
     source_job_id = Column(String(64), nullable=True, index=True)
     status = Column(String(32), default="created", index=True)

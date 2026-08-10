@@ -137,15 +137,23 @@ Constraints: {json.dumps(constitution.constraints, indent=2)}
 Acceptance Criteria: {json.dumps(constitution.acceptance_criteria, indent=2)}
 Risk: {constitution.risk}
 Protected Paths: {json.dumps(constitution.protected_paths, indent=2)}
+Image Observations: {json.dumps(
+    (constitution.raw_output or {}).get("image_observations", []),
+    ensure_ascii=False,
+    indent=2,
+)}
 """
 
+        from app.image_attachments import attachment_context
+
+        image_context = attachment_context(getattr(job, "attachments", None))
         messages = [
             {
                 "role": "user",
                 "content": f"""Create a task plan for this job.
 
 Job: {job.job_id}
-User Request: {job.user_request}
+User Request: {job.user_request}{image_context}
 {continuation_context}
 
 Constitution:
@@ -167,6 +175,7 @@ Output ONLY valid JSON."""
                 PLANNER_SYSTEM_PROMPT,
                 messages,
                 response_format={"type": "json_object"},
+                attachments=getattr(job, "attachments", None) or [],
             )
 
             content = response.get("content", "{}")
@@ -197,7 +206,7 @@ Output ONLY valid JSON."""
                         "id": "T001",
                         "title": f"Implement: {job.user_request[:100]}",
                         "type": "coding",
-                        "description": job.user_request,
+                        "description": job.user_request + image_context,
                         "dependencies": [],
                         "allowed_paths": [],
                         "acceptance_command": "",
@@ -230,6 +239,7 @@ Output ONLY valid JSON with the same structure as a normal plan."""
                 PLANNER_SYSTEM_PROMPT,
                 messages,
                 response_format={"type": "json_object"},
+                attachments=getattr(job, "attachments", None) or [],
             )
             content = response.get("content", "{}")
             plan = self._parse_json(content)
@@ -290,6 +300,7 @@ Output ONLY valid JSON.""",
                 REVIEW_REPAIR_SYSTEM_PROMPT,
                 messages,
                 response_format={"type": "json_object"},
+                attachments=getattr(job, "attachments", None) or [],
             )
             decision = self._parse_json(response.get("content", "{}"))
             repairable_value = decision.get("repairable", False)

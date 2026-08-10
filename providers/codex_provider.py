@@ -1,6 +1,7 @@
 """Codex provider with separate ChatGPT and Platform API auth channels."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -447,6 +448,7 @@ class CodexProvider(BaseProvider):
         sandbox_mode: str,
         model: str = "",
         reasoning_effort: str = "",
+        image_paths: list[str] | None = None,
     ) -> tuple[str, str, int]:
         arguments = [
             "exec",
@@ -464,6 +466,8 @@ class CodexProvider(BaseProvider):
             arguments.extend([
                 "--config", f'model_reasoning_effort="{effort}"',
             ])
+        for image_path in image_paths or []:
+            arguments.extend(["--image", image_path])
         arguments.append("-")
         command = _prepare_codex_command(
             self.codex_binary,
@@ -545,6 +549,64 @@ class CodexProvider(BaseProvider):
             ),
         ))
 
+    @staticmethod
+    def _resolve_image_paths(kwargs: dict) -> list[str]:
+        """Resolve only prevalidated image attachment paths."""
+        records = kwargs.get("attachments")
+        if records is None:
+            task = kwargs.get("task")
+            job = getattr(task, "job", None) if task else None
+            records = getattr(job, "attachments", None) if job else None
+        paths: list[str] = []
+        for record in list(records or []):
+            if not isinstance(record, dict):
+                continue
+            path = Path(str(record.get("path", ""))).expanduser()
+            if path.is_file() and path.suffix.lower() in {
+                ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+            }:
+                paths.append(str(path.resolve()))
+        return paths[:8]
+
+    @staticmethod
+    def _messages_with_images(
+        messages: list[dict], image_paths: list[str], *, responses_api: bool
+    ) -> list[dict]:
+        """Attach local images to the final user message for Platform API calls."""
+        if not image_paths:
+            return list(messages)
+        enriched = [dict(message) for message in messages]
+        user_index = next(
+            (index for index in range(len(enriched) - 1, -1, -1)
+             if enriched[index].get("role") == "user"),
+            None,
+        )
+        if user_index is None:
+            enriched.append({"role": "user", "content": "Inspect the attached images."})
+            user_index = len(enriched) - 1
+        original = enriched[user_index].get("content", "")
+        text_type = "input_text" if responses_api else "text"
+        image_type = "input_image" if responses_api else "image_url"
+        content = [{"type": text_type, "text": str(original)}]
+        for path_text in image_paths:
+            path = Path(path_text)
+            mime_type = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif",
+                ".bmp": "image/bmp",
+            }.get(path.suffix.lower(), "image/png")
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            data_url = f"data:{mime_type};base64,{encoded}"
+            if responses_api:
+                content.append({"type": image_type, "image_url": data_url})
+            else:
+                content.append({
+                    "type": image_type,
+                    "image_url": {"url": data_url},
+                })
+        enriched[user_index]["content"] = content
+        return enriched
+
     async def _chat_via_codex_exec(
         self, system_prompt: str, messages: list[dict], **kwargs
     ) -> dict:
@@ -557,12 +619,18 @@ class CodexProvider(BaseProvider):
         reasoning_effort = self._reasoning_effort(
             kwargs.get("reasoning_effort")
         )
+        exec_options = {
+            "cwd": self._resolve_cwd(kwargs),
+            "sandbox_mode": self._get_sandbox_mode(kwargs.get("agent_type", "default")),
+            "model": requested_model,
+            "reasoning_effort": reasoning_effort,
+        }
+        image_paths = self._resolve_image_paths(kwargs)
+        if image_paths:
+            exec_options["image_paths"] = image_paths
         stdout, stderr, returncode = await self._run_codex_exec(
             prompt,
-            cwd=self._resolve_cwd(kwargs),
-            sandbox_mode=self._get_sandbox_mode(kwargs.get("agent_type", "default")),
-            model=requested_model,
-            reasoning_effort=reasoning_effort,
+            **exec_options,
         )
         if returncode != 0:
             detail = stderr.strip() or stdout.strip() or f"exit code {returncode}"
@@ -603,11 +671,14 @@ class CodexProvider(BaseProvider):
             if not requested_model or requested_model == "codex-sdk"
             else requested_model
         )
+        image_paths = self._resolve_image_paths(kwargs)
         if self.wire_api == "responses":
             request_options = {
                 "model": model,
                 "instructions": system_prompt,
-                "input": messages,
+                "input": self._messages_with_images(
+                    messages, image_paths, responses_api=True
+                ),
                 "max_output_tokens": kwargs.get("max_tokens", 4096),
             }
             if reasoning_effort:
@@ -625,7 +696,11 @@ class CodexProvider(BaseProvider):
                 "raw": response,
             }
 
-        full_messages = [{"role": "system", "content": system_prompt}] + messages
+        full_messages = [{"role": "system", "content": system_prompt}] + (
+            self._messages_with_images(
+                messages, image_paths, responses_api=False
+            )
+        )
         request_options = {
             "model": model,
             "messages": full_messages,

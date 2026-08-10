@@ -223,6 +223,10 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     tools=self._tool_definitions(task),
                     provider_override=provider_override,
                     task=task,
+                    attachments=(
+                        getattr(getattr(task, "job", None), "attachments", None)
+                        or []
+                    ),
                     max_tokens=4096,
                     tool_choice=(
                         "required"

@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -332,8 +332,14 @@ class TaskPanel(QWidget):
         self.user_output.setWordWrap(True)
         self.user_source_label = QLabel("")
         self.user_source_label.setObjectName("mutedLabel")
+        self.user_attachments_widget = QWidget()
+        self.user_attachments_layout = QHBoxLayout(self.user_attachments_widget)
+        self.user_attachments_layout.setContentsMargins(0, 3, 0, 1)
+        self.user_attachments_layout.setSpacing(6)
+        self.user_attachments_widget.hide()
         user_layout.addWidget(user_label)
         user_layout.addWidget(self.user_output)
+        user_layout.addWidget(self.user_attachments_widget)
         user_layout.addWidget(self.user_source_label)
         user_row = QHBoxLayout()
         user_row.addStretch(1)
@@ -636,6 +642,31 @@ class TaskPanel(QWidget):
             if repair_status not in terminal_repair_statuses:
                 self._active_repair_round = round_number
 
+    def _set_user_attachments(self, attachments: list[dict]):
+        while self.user_attachments_layout.count():
+            item = self.user_attachments_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        for attachment in attachments[:8]:
+            preview = QLabel()
+            preview.setObjectName("submittedImagePreview")
+            preview.setFixedSize(92, 68)
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview.setToolTip(str(attachment.get("name") or "图片"))
+            pixmap = QPixmap(str(attachment.get("path", "")))
+            if not pixmap.isNull():
+                preview.setPixmap(pixmap.scaled(
+                    92, 68,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                ))
+            else:
+                preview.setText(str(attachment.get("name") or "图片")[:12])
+            self.user_attachments_layout.addWidget(preview)
+        self.user_attachments_layout.addStretch(1)
+        self.user_attachments_widget.setVisible(bool(attachments))
+
     def set_workflow(self, job: dict, constitution: dict | None = None,
                      plan: dict | None = None, tasks: list[dict] | None = None,
                      reviews: list[dict] | None = None):
@@ -668,6 +699,7 @@ class TaskPanel(QWidget):
             "done", "failed", "cancelled", "interrupted", "needs_attention"
         })
         self.user_output.setText(request)
+        self._set_user_attachments(job.get("attachments") or [])
         self.user_source_label.setText(f"继续自 {source}" if source else "")
         self.user_source_label.setVisible(bool(source))
         self.stages["user"].set_status("success")

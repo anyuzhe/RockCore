@@ -47,6 +47,12 @@ def _migrate_schema(engine):
                 "ON jobs (source_job_id)"
             )
 
+    if "attachments" not in columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE jobs ADD COLUMN attachments JSON NOT NULL DEFAULT '[]'"
+            )
+
     usage_columns = {
         "usage_input_tokens": "INTEGER NOT NULL DEFAULT 0",
         "usage_cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
