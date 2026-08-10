@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -281,6 +282,17 @@ class Engine:
         normalized = str(text or "").lower()
         return any(marker in normalized for marker in DOCUMENT_KEYWORDS)
 
+    @staticmethod
+    def _pdf_page_count(path: Path) -> int:
+        """Read only PDF metadata needed for deterministic budget sizing."""
+        try:
+            from pypdf import PdfReader
+
+            return max(0, len(PdfReader(str(path)).pages))
+        except Exception as error:
+            logger.debug("Could not count PDF pages for %s: %s", path, error)
+            return 0
+
     @classmethod
     def _document_task_profile(cls, task, project_root: str,
                                user_request: str = "") -> dict | None:
@@ -331,29 +343,66 @@ class Engine:
                 pass
 
         total_bytes = 0
+        total_pages = 0
         for path in pdf_files:
             try:
                 total_bytes += path.stat().st_size
             except OSError:
                 continue
+            total_pages += cls._pdf_page_count(path)
 
         is_long = any(marker in text for marker in LONG_DOCUMENT_KEYWORDS)
-        if is_long or total_bytes >= 8 * 1024 * 1024:
-            level, input_budget, turns, exploration = "long", 1_000_000, 52, 36
+        if total_pages:
+            estimated_pages = total_pages
+        elif is_long:
+            # File size is a weak proxy for text density. A whole-book request
+            # must still receive a book-sized budget when metadata is damaged.
+            estimated_pages = max(160, math.ceil(total_bytes / 24_000))
         elif total_bytes >= 2 * 1024 * 1024:
-            level, input_budget, turns, exploration = "medium", 600_000, 40, 22
+            estimated_pages = max(80, math.ceil(total_bytes / 32_000))
         else:
-            level, input_budget, turns, exploration = "short", 300_000, 28, 10
+            estimated_pages = max(24, math.ceil(total_bytes / 40_000))
+
+        page_batches = max(1, math.ceil(estimated_pages / 8))
+        if estimated_pages > 120 or is_long:
+            level = "long"
+        elif estimated_pages > 40:
+            level = "medium"
+        else:
+            level = "short"
+
+        # Real runs repeatedly include conversation/tool context. Twelve
+        # thousand input tokens per source page plus a 300k workflow reserve is
+        # intentionally conservative; the RMB ceiling remains the hard spend
+        # protection. Four turns per eight-page batch leaves room for reading,
+        # condensation, incremental writing, and verification.
+        input_budget = min(
+            20_000_000,
+            max(400_000, estimated_pages * 12_000 + 300_000),
+        )
+        turns = min(240, max(32, 20 + page_batches * 4))
+        exploration = min(
+            max(12, page_batches + 12),
+            max(12, turns - 12),
+        )
+        api_call_budget = turns + 24
+        output_budget = max(200_000, estimated_pages * 1_500)
         return {
             "level": level,
             "input_budget": input_budget,
             "max_turns": turns,
             "exploration_turns": exploration,
+            "api_call_budget": api_call_budget,
+            "output_budget": output_budget,
             "pdf_count": len(pdf_files),
             "pdf_bytes": total_bytes,
+            "pdf_pages": total_pages,
+            "estimated_pages": estimated_pages,
+            "page_batches": page_batches,
             "reason": (
                 f"document={level}, pdfs={len(pdf_files)}, "
-                f"size={total_bytes} bytes"
+                f"pages={total_pages or f'~{estimated_pages}'}, "
+                f"batches={page_batches}, size={total_bytes} bytes"
             ),
         }
 
@@ -1196,9 +1245,18 @@ class Engine:
             combined_input_budget = sum(
                 profile["input_budget"] for profile in document_profiles
             )
+            combined_api_budget = sum(
+                profile["api_call_budget"] for profile in document_profiles
+            )
+            combined_output_budget = sum(
+                profile["output_budget"] for profile in document_profiles
+            )
             document_job_budget = (
                 self.model_router.cost_engine.reserve_document_budget(
-                    job.job_id, combined_input_budget
+                    job.job_id,
+                    combined_input_budget,
+                    required_api_calls=combined_api_budget,
+                    required_output_tokens=combined_output_budget,
                 )
             )
             await self.event_bus.publish(
@@ -1208,6 +1266,7 @@ class Engine:
                 task_input_budget=combined_input_budget,
                 job_input_budget=document_job_budget.max_input_tokens,
                 job_total_budget=document_job_budget.max_total_tokens,
+                job_api_call_budget=document_job_budget.max_api_calls,
             )
 
         task_dicts = []
@@ -1316,10 +1375,14 @@ class Engine:
                     document_profile["exploration_turns"],
                 )
                 t._rockcore_input_budget = document_profile["input_budget"]
+                t._rockcore_document_profile = dict(document_profile)
                 budget["reason"] += ", " + document_profile["reason"]
                 document_job_budget = (
                     self.model_router.cost_engine.reserve_document_budget(
-                        job.job_id, t._rockcore_input_budget
+                        job.job_id,
+                        t._rockcore_input_budget,
+                        required_api_calls=document_profile["api_call_budget"],
+                        required_output_tokens=document_profile["output_budget"],
                     )
                 )
                 await self.event_bus.publish(
@@ -1330,10 +1393,15 @@ class Engine:
                     task_input_budget=t._rockcore_input_budget,
                     job_input_budget=document_job_budget.max_input_tokens,
                     job_total_budget=document_job_budget.max_total_tokens,
+                    job_api_call_budget=document_job_budget.max_api_calls,
                     pdf_count=document_profile["pdf_count"],
                     pdf_bytes=document_profile["pdf_bytes"],
+                    pdf_pages=document_profile["pdf_pages"],
+                    estimated_pages=document_profile["estimated_pages"],
+                    page_batches=document_profile["page_batches"],
                 )
             else:
+                t._rockcore_document_profile = None
                 if complexity == "simple":
                     task_worker.max_turns = min(task_worker.max_turns, 18)
                 t._rockcore_input_budget = task_input_limits.get(
@@ -1762,7 +1830,13 @@ class Engine:
         last_error = ""
         repair_guidance = ""
         initial_turn_budget = getattr(worker, "max_turns", 16)
-        continuation_turn_budget = min(12, max(8, initial_turn_budget // 2))
+        document_profile = getattr(task, "_rockcore_document_profile", None)
+        continuation_turn_budget = (
+            min(96, max(24, initial_turn_budget // 2))
+            if document_profile else
+            min(12, max(8, initial_turn_budget // 2))
+        )
+        document_budget_extensions = 0
         configured_attempts = max(
             1, int(getattr(task, "_rockcore_retry_count", MAX_FLASH_RETRY)) + 1
         )
@@ -1801,6 +1875,21 @@ class Engine:
                     if self._is_user_input_required(last_error):
                         return {"status": "failed", "error": last_error}
                     if self._is_budget_error(last_error):
+                        if (
+                            document_budget_extensions < 2
+                            and attempt < primary_attempts
+                            and await self._extend_document_budget_for_retry(
+                                task, job, worker, last_error,
+                                document_budget_extensions + 1,
+                            )
+                        ):
+                            document_budget_extensions += 1
+                            repair_guidance = (
+                                "RockCore automatically enlarged the document "
+                                "Token/call safety budget. Continue from the next "
+                                "unread PDF page and finish the existing output."
+                            )
+                            continue
                         return {"status": "failed", "error": last_error}
                     if self._is_task_path_mismatch(last_error):
                         logger.warning(
@@ -1870,6 +1959,21 @@ class Engine:
                 if self._is_user_input_required(last_error):
                     return {"status": "failed", "error": last_error}
                 if self._is_budget_error(last_error):
+                    if (
+                        document_budget_extensions < 2
+                        and attempt < primary_attempts
+                        and await self._extend_document_budget_for_retry(
+                            task, job, worker, last_error,
+                            document_budget_extensions + 1,
+                        )
+                    ):
+                        document_budget_extensions += 1
+                        repair_guidance = (
+                            "RockCore automatically enlarged the document "
+                            "Token/call safety budget. Continue from the next "
+                            "unread PDF page and finish the existing output."
+                        )
+                        continue
                     return {"status": "failed", "error": last_error}
                 if self._is_provider_capability_error(last_error):
                     logger.warning(
@@ -1930,6 +2034,59 @@ class Engine:
             or "api calls exceeded" in normalized
             or "cost exceeded" in normalized
         )
+
+    async def _extend_document_budget_for_retry(
+        self, task, job, worker, error: str, extension_round: int
+    ) -> bool:
+        """Increase non-monetary document ceilings instead of wasting progress."""
+        normalized = str(error or "").lower()
+        profile = getattr(task, "_rockcore_document_profile", None)
+        if not profile or any(marker in normalized for marker in (
+            "billable api cost exceeded", "cost exceeded",
+        )):
+            return False
+
+        current = max(0, int(getattr(task, "_rockcore_input_budget", 0) or 0))
+        if current <= 0:
+            return False
+        extension = max(600_000, current // 2)
+        enlarged = min(20_000_000, current + extension)
+        if enlarged <= current:
+            return False
+
+        task._rockcore_input_budget = enlarged
+        continuation_turns = min(
+            96, max(24, int(profile.get("max_turns", 48)) // 2)
+        )
+        worker.max_turns = max(worker.max_turns, continuation_turns)
+        required_calls = (
+            int(profile.get("api_call_budget", 0) or 0)
+            + continuation_turns * extension_round
+        )
+        job_budget = self.model_router.cost_engine.reserve_document_budget(
+            job.job_id,
+            enlarged,
+            required_api_calls=required_calls,
+            required_output_tokens=int(profile.get("output_budget", 0) or 0),
+        )
+        await self.event_bus.publish(
+            "document_budget_extended",
+            job_id=job.job_id,
+            task_id=getattr(task, "task_id", ""),
+            extension_round=extension_round,
+            previous_task_input_budget=current,
+            task_input_budget=enlarged,
+            max_turns=worker.max_turns,
+            job_input_budget=job_budget.max_input_tokens,
+            job_total_budget=job_budget.max_total_tokens,
+            job_api_call_budget=job_budget.max_api_calls,
+            reason=str(error or "")[:300],
+        )
+        logger.warning(
+            "Extended document budget for %s after %s: input %s -> %s",
+            getattr(task, "task_id", ""), error, current, enlarged,
+        )
+        return True
 
     @staticmethod
     def _is_user_input_required(error: str) -> bool:
@@ -2639,7 +2796,8 @@ class Engine:
         if cls._is_budget_error(error):
             return (
                 "budget_exceeded",
-                "已保留完成步骤；检查 Token、调用次数或可计费 API 成本上限。"
+                "长文档 Token/调用次数预算会自动扩容两次；若仍失败，请检查"
+                "可计费 API 成本上限或异常超大输入。已保留完成步骤。"
                 "ChatGPT 登录的等价估算成本不会触发人民币 API 预算。",
             )
         if cls._is_provider_capability_error(error):

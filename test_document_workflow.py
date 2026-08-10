@@ -3,12 +3,15 @@
 import asyncio
 import json
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 from agents.worker import WorkerAgent
 from orchestrator.cost_engine import CostEngine
 from orchestrator.engine import Engine
+from orchestrator.merge_manager import MergeManager
 from orchestrator.policy_engine import PolicyEngine
+from git.repository import Repository
 from tools.file_tools import FileTools
 from tools.tool_broker import ToolBroker
 
@@ -34,9 +37,18 @@ def test_document_request_is_not_misclassified_by_generic_one_phrase(tmp_path):
     assert engine._classify_request("创建一个简单 HTML 页面") == "simple"
 
 
-def test_document_budget_scales_with_source_size(tmp_path):
+def test_document_budget_scales_with_actual_page_count(tmp_path, monkeypatch):
     source = tmp_path / "source.pdf"
     source.touch()
+    monkeypatch.setattr(
+        Engine,
+        "_pdf_page_count",
+        staticmethod(lambda path: (
+            24 if path.stat().st_size < 2 * 1024 * 1024
+            else 80 if path.stat().st_size < 8 * 1024 * 1024
+            else 151
+        )),
+    )
     short = Engine._document_task_profile(_task(), str(tmp_path))
 
     with source.open("r+b") as handle:
@@ -44,13 +56,19 @@ def test_document_budget_scales_with_source_size(tmp_path):
     medium = Engine._document_task_profile(
         _task(description="整理 PDF 内容"), str(tmp_path)
     )
+    with source.open("r+b") as handle:
+        handle.truncate(9 * 1024 * 1024)
     long = Engine._document_task_profile(
         _task(description="整理整本 PDF 书籍"), str(tmp_path)
     )
 
-    assert short["input_budget"] == 300_000
-    assert medium["input_budget"] == 600_000
-    assert long["input_budget"] == 1_000_000
+    assert short["input_budget"] == 588_000
+    assert medium["input_budget"] == 1_260_000
+    assert long["input_budget"] == 2_112_000
+    assert long["pdf_pages"] == 151
+    assert long["page_batches"] == 19
+    assert long["max_turns"] == 96
+    assert long["api_call_budget"] == 120
     assert long["exploration_turns"] > medium["exploration_turns"]
 
 
@@ -58,12 +76,169 @@ def test_document_reservation_keeps_paid_api_cost_limit_unchanged():
     engine = CostEngine()
     before = engine.get_budget("JOB-DOC").max_cost_cny
 
-    budget = engine.reserve_document_budget("JOB-DOC", 1_000_000)
+    budget = engine.reserve_document_budget(
+        "JOB-DOC", 2_112_000,
+        required_api_calls=120,
+        required_output_tokens=226_500,
+    )
 
-    assert budget.max_input_tokens >= 1_250_000
-    assert budget.max_total_tokens >= 1_450_000
-    assert budget.max_api_calls >= 160
+    assert budget.max_input_tokens >= 2_462_000
+    assert budget.max_total_tokens >= 2_914_000
+    assert budget.max_api_calls >= 180
     assert budget.max_cost_cny == before
+
+
+def test_worker_cannot_finish_while_pdf_reports_unread_pages():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+            self.messages = []
+
+        async def chat_with_tools(self, *_args, **kwargs):
+            self.calls += 1
+            self.messages.append(kwargs.get("messages") or _args[2])
+            if self.calls == 1:
+                name = "read_pdf"
+                arguments = {"path": "source.pdf", "start_page": 1}
+            elif self.calls == 2:
+                name = "write_file"
+                arguments = {"path": "summary.md", "content": "pages 1-8"}
+            elif self.calls == 3:
+                return {
+                    "content": "Everything is complete.",
+                    "tool_calls": [], "usage": {},
+                }
+            elif self.calls == 4:
+                name = "read_pdf"
+                arguments = {"path": "source.pdf", "start_page": 9}
+            else:
+                return {
+                    "content": "All pages are now complete.",
+                    "tool_calls": [], "usage": {},
+                }
+            return {
+                "content": "Continuing document work.",
+                "tool_calls": [{
+                    "id": f"call-{self.calls}",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments),
+                    },
+                }],
+                "usage": {},
+            }
+
+    class Broker:
+        policy = None
+
+        @staticmethod
+        def get_tool_definitions(*_args, **_kwargs):
+            return []
+
+        @staticmethod
+        async def execute(_task_value, name, args):
+            if name == "read_pdf" and args.get("start_page") == 1:
+                return {
+                    "status": "success", "path": "source.pdf",
+                    "page_start": 1, "page_end": 8, "page_count": 16,
+                    "has_more": True, "next_page": 9,
+                }
+            if name == "read_pdf":
+                return {
+                    "status": "success", "path": "source.pdf",
+                    "page_start": 9, "page_end": 16, "page_count": 16,
+                    "has_more": False, "next_page": None,
+                }
+            return {"status": "written"}
+
+    async def scenario():
+        router = Router()
+        worker = WorkerAgent(router, Broker(), max_turns=8)
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert router.calls == 5
+        assert any(
+            "start_page=9" in str(message)
+            for message in router.messages[3]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_document_token_budget_auto_expands_before_retry(tmp_path):
+    class Worker:
+        max_turns = 64
+        calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "status": "failed",
+                    "error": (
+                        "RockCore job budget exceeded: Task input tokens "
+                        "exceeded: 600001/600000"
+                    ),
+                }
+            return {"status": "completed", "content": "finished"}
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        task = _task()
+        task._rockcore_input_budget = 600_000
+        task._rockcore_document_profile = {
+            "max_turns": 64,
+            "api_call_budget": 88,
+            "output_budget": 200_000,
+        }
+        worker = Worker()
+        job = SimpleNamespace(job_id="JOB-DOC-EXTEND", project=None)
+
+        result = await engine._execute_single_task_with_escalation(
+            task, job, {}, worker, str(tmp_path)
+        )
+
+        assert result["status"] == "completed"
+        assert worker.calls == 2
+        assert task._rockcore_input_budget == 1_200_000
+        assert engine.model_router.cost_engine.get_budget(
+            job.job_id
+        ).max_cost_cny == 3.60
+        assert engine.event_bus.get_history("document_budget_extended")
+
+    asyncio.run(scenario())
+
+
+def test_untracked_pdf_input_is_not_committed_or_merged_as_output(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    repository = Repository(str(project))
+    assert repository.ensure_initialized()["status"] == "initialized"
+    source = project / "原始书籍.pdf"
+    source.write_bytes(b"source-pdf")
+    manager = MergeManager(str(project))
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-DOC")
+        assert created["status"] == "created"
+        worktree = Path(created["path"])
+        assert (worktree / source.name).read_bytes() == b"source-pdf"
+        (worktree / "精简版.md").write_text("complete", encoding="utf-8")
+
+        merged = await manager.commit_and_merge("T001", "document output")
+
+        assert merged["status"] == "merged"
+
+    asyncio.run(scenario())
+
+    assert source.read_bytes() == b"source-pdf"
+    assert repository._run(
+        "ls-files", "--error-unmatch", "精简版.md"
+    ).returncode == 0
+    assert repository._run(
+        "ls-files", "--error-unmatch", source.name
+    ).returncode != 0
 
 
 def test_pdf_tool_is_available_without_shell_commands(tmp_path):

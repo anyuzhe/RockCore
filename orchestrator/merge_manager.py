@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-import os
-import tempfile
+import shutil
 from pathlib import Path
-from typing import Any
 
 from app.subprocess_utils import run_process
 from tools.git_tools import GitTools
@@ -20,6 +18,12 @@ class MergeManager:
     auto-merges back to main, and handles conflicts.
     """
 
+    INPUT_ASSET_SUFFIXES = {
+        ".pdf", ".epub", ".mobi", ".doc", ".docx", ".ppt", ".pptx",
+        ".xls", ".xlsx", ".jpg", ".jpeg", ".png", ".gif", ".webp",
+        ".mp3", ".wav", ".mp4", ".mov", ".zip", ".7z", ".rar",
+    }
+
     def __init__(self, project_root: str, worktrees_dir: str | None = None):
         self.project_root = Path(project_root).resolve()
         self.worktrees_base = Path(worktrees_dir or self.project_root / ".ai" / "worktrees")
@@ -33,8 +37,69 @@ class MergeManager:
             self.target_branch = current.stdout.strip() if current.returncode == 0 else "main"
         except OSError:
             self.target_branch = "main"
+        self._untracked_input_assets = self._find_untracked_input_assets()
         self._active_worktrees: dict[str, dict] = {}
         self._merge_lock = asyncio.Lock()
+
+    def _find_untracked_input_assets(self) -> set[str]:
+        """Remember user source assets that must not become task outputs."""
+        try:
+            result = run_process(
+                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                capture_output=True, text=True, cwd=self.project_root,
+            )
+            if result.returncode != 0:
+                return set()
+            return {
+                path for path in result.stdout.split("\0") if path
+                and Path(path).suffix.lower() in self.INPUT_ASSET_SUFFIXES
+            }
+        except (OSError, ValueError):
+            return set()
+
+    def _unstage_input_assets(self, worktree_path: str) -> None:
+        """Keep pre-existing untracked PDFs/media out of Worker commits."""
+        present_assets = [
+            path for path in sorted(self._untracked_input_assets)
+            if (Path(worktree_path) / path).is_file()
+        ]
+        if not present_assets:
+            return
+        result = run_process(
+            [
+                "git", "reset", "-q", "HEAD", "--",
+                *present_assets,
+            ],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Could not unstage source assets in %s: %s",
+                worktree_path, result.stderr.strip(),
+            )
+
+    def _copy_untracked_input_assets(self, worktree_path: str) -> None:
+        """Make local source documents readable inside an isolated worktree."""
+        worktree = Path(worktree_path).resolve()
+        for relative in sorted(self._untracked_input_assets):
+            source = (self.project_root / relative).resolve()
+            destination = (worktree / relative).resolve()
+            try:
+                source.relative_to(self.project_root)
+                destination.relative_to(worktree)
+            except ValueError:
+                logger.warning("Skipped unsafe input asset path: %s", relative)
+                continue
+            if not source.is_file() or source.is_symlink():
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            except OSError as error:
+                logger.warning(
+                    "Could not copy input asset %s into worktree: %s",
+                    relative, error,
+                )
 
     async def create_task_worktree(self, task_id: str, job_id: str) -> dict:
         """Create an isolated worktree for a task."""
@@ -43,6 +108,7 @@ class MergeManager:
 
         result = await self.git_tools.create_worktree(branch, wt_path)
         if result.get("status") == "created":
+            self._copy_untracked_input_assets(wt_path)
             self._active_worktrees[task_id] = {
                 "branch": branch,
                 "path": wt_path,
@@ -73,6 +139,7 @@ class MergeManager:
                 ["git", "add", "-A"],
                 capture_output=True, text=True, cwd=wt_path,
             )
+            self._unstage_input_assets(wt_path)
             commit_result = run_process(
                 ["git", "commit", "-m", commit_message],
                 capture_output=True, text=True, cwd=wt_path,
@@ -87,8 +154,8 @@ class MergeManager:
                 return await self._handle_conflict(task_id, merge_result)
 
             # Clean up worktree
-            await self.git_tools.delete_branch(branch)
             await self.git_tools.remove_worktree(wt_path)
+            await self.git_tools.delete_branch(branch)
             wt_info["status"] = "merged"
             self._active_worktrees.pop(task_id, None)
 
@@ -128,8 +195,8 @@ class MergeManager:
         except Exception:
             pass
 
-        await self.git_tools.delete_branch(wt_info["branch"])
         await self.git_tools.remove_worktree(wt_info["path"])
+        await self.git_tools.delete_branch(wt_info["branch"])
         self._active_worktrees.pop(task_id, None)
         return {"status": "aborted", "task_id": task_id}
 

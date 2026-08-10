@@ -180,7 +180,9 @@ class CostEngine:
         return budget
 
     def reserve_document_budget(self, job_id: str,
-                                task_input_tokens: int) -> JobBudget:
+                                task_input_tokens: int,
+                                required_api_calls: int = 0,
+                                required_output_tokens: int = 0) -> JobBudget:
         """Ensure a document task has token headroom without raising cost limits.
 
         Long-document reading legitimately repeats a sizeable context across
@@ -189,14 +191,29 @@ class CostEngine:
         """
         budget = self._ensure_job_budget(job_id)
         task_input_tokens = max(0, int(task_input_tokens or 0))
+        # ``task_input_tokens`` is an absolute per-task allowance. Add job
+        # headroom for Governor/Planner/Reviewer rather than relying on the
+        # generic one-million-token ceiling.
         budget.max_input_tokens = max(
-            budget.max_input_tokens, task_input_tokens + 250_000
+            budget.max_input_tokens, task_input_tokens + 350_000
+        )
+        output_headroom = max(
+            200_000,
+            int(required_output_tokens or 0),
+            task_input_tokens // 6,
+        )
+        budget.max_output_tokens = max(
+            budget.max_output_tokens, output_headroom
         )
         budget.max_total_tokens = max(
-            budget.max_total_tokens, budget.max_input_tokens + 200_000
+            budget.max_total_tokens,
+            budget.max_input_tokens + budget.max_output_tokens + 100_000,
         )
-        budget.max_output_tokens = max(budget.max_output_tokens, 150_000)
-        budget.max_api_calls = max(budget.max_api_calls, 160)
+        # Leave enough calls for the document batches plus the surrounding
+        # workflow. This is a safety ceiling, not a billable-cost allowance.
+        budget.max_api_calls = max(
+            budget.max_api_calls, int(required_api_calls or 0) + 30, 180
+        )
         return budget
 
     def _ensure_job_budget(self, job_id: str) -> JobBudget:

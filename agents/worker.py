@@ -178,6 +178,7 @@ Acceptance Command: {task.acceptance_command or 'none'}
         empty_report_count = 0
         force_tool_call = False
         verified_existing_state = False
+        pending_document_pages: dict[str, int] = {}
         allow_no_change = self._allows_no_change(task)
         progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
         finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
@@ -283,6 +284,27 @@ Acceptance Command: {task.acceptance_command or 'none'}
                         continue
 
                 if not tool_calls:
+                    if is_document_task and pending_document_pages:
+                        unread = ", ".join(
+                            f"{path}: start_page={page}"
+                            for path, page in sorted(
+                                pending_document_pages.items()
+                            )
+                        )
+                        messages.append({
+                            "role": "assistant",
+                            "content": (content or "")[-1600:],
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "The document is not fully read yet. read_pdf "
+                                "reported remaining pages. Do not declare the "
+                                "task complete. Continue from: " + unread
+                                + ". Preserve the existing incremental output."
+                            ),
+                        })
+                        continue
                     if task.task_type == "coding" and not has_written:
                         already_satisfied = (
                             ALREADY_SATISFIED_MARKER in (content or "")
@@ -452,6 +474,22 @@ Acceptance Command: {task.acceptance_command or 'none'}
                                     "expected a JSON object"
                                 ),
                             }
+                        if (
+                            func_name == "read_pdf"
+                            and result.get("status") in {
+                                "success", "empty_page_range",
+                            }
+                        ):
+                            source_path = str(
+                                result.get("path")
+                                or args.get("path")
+                                or "PDF"
+                            )
+                            next_page = int(result.get("next_page") or 0)
+                            if result.get("has_more") and next_page > 0:
+                                pending_document_pages[source_path] = next_page
+                            else:
+                                pending_document_pages.pop(source_path, None)
                         if result.get("status") in {
                             "password_required", "no_extractable_text",
                         }:
@@ -543,9 +581,17 @@ Acceptance Command: {task.acceptance_command or 'none'}
 
             else:
                 logger.warning(f"Worker: task {task.task_id} reached max turns ({self.max_turns})")
+                unread_detail = ""
+                if pending_document_pages:
+                    unread_detail = "; document still has unread pages: " + ", ".join(
+                        f"{path} start_page={page}"
+                        for path, page in sorted(pending_document_pages.items())
+                    )
                 return {
                     "status": "failed",
-                    "error": f"Max turns ({self.max_turns}) reached",
+                    "error": (
+                        f"Max turns ({self.max_turns}) reached{unread_detail}"
+                    ),
                     "turns": len(tool_calls_made),
                     "tool_calls": tool_calls_made,
                     "input_tokens": total_input,

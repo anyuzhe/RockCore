@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-10 09:45:40.010304+00:00",
+  "generated_at": "2026-08-10 10:01:00.035733+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -44,7 +44,7 @@
     {
       "path": "test_document_workflow.py",
       "category": "source",
-      "symbols": 25
+      "symbols": 33
     },
     {
       "path": "test_windows_compatibility.py",
@@ -509,7 +509,7 @@
     {
       "path": "orchestrator/engine.py",
       "category": "source",
-      "symbols": 42
+      "symbols": 43
     },
     {
       "path": "orchestrator/scheduler.py",
@@ -529,7 +529,7 @@
     {
       "path": "orchestrator/merge_manager.py",
       "category": "source",
-      "symbols": 4
+      "symbols": 7
     },
     {
       "path": "orchestrator/cost_engine.py",
@@ -1243,151 +1243,199 @@
     {
       "name": "_task",
       "type": "function",
-      "line": 16,
+      "line": 19,
       "file": "test_document_workflow.py"
     },
     {
       "name": "test_document_request_is_not_misclassified_by_generic_one_phrase",
       "type": "function",
-      "line": 28,
+      "line": 31,
       "file": "test_document_workflow.py"
     },
     {
-      "name": "test_document_budget_scales_with_source_size",
+      "name": "test_document_budget_scales_with_actual_page_count",
       "type": "function",
-      "line": 37,
+      "line": 40,
       "file": "test_document_workflow.py"
     },
     {
       "name": "test_document_reservation_keeps_paid_api_cost_limit_unchanged",
       "type": "function",
-      "line": 57,
+      "line": 75,
       "file": "test_document_workflow.py"
     },
     {
-      "name": "test_pdf_tool_is_available_without_shell_commands",
+      "name": "test_worker_cannot_finish_while_pdf_reports_unread_pages",
       "type": "function",
-      "line": 69,
+      "line": 91,
       "file": "test_document_workflow.py"
     },
     {
-      "name": "test_read_pdf_extracts_a_bounded_page_range",
-      "type": "function",
-      "line": 85,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "test_read_pdf_reports_encryption_without_repeated_attempts",
-      "type": "function",
-      "line": 115,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "test_read_pdf_distinguishes_blank_front_matter_from_scanned_pdf",
-      "type": "function",
-      "line": 136,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "test_worker_stops_immediately_when_pdf_needs_user_action",
+      "name": "test_document_token_budget_auto_expands_before_retry",
       "type": "function",
       "line": 169,
       "file": "test_document_workflow.py"
     },
     {
+      "name": "test_untracked_pdf_input_is_not_committed_or_merged_as_output",
+      "type": "function",
+      "line": 213,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_pdf_tool_is_available_without_shell_commands",
+      "type": "function",
+      "line": 244,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_extracts_a_bounded_page_range",
+      "type": "function",
+      "line": 260,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_reports_encryption_without_repeated_attempts",
+      "type": "function",
+      "line": 290,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_distinguishes_blank_front_matter_from_scanned_pdf",
+      "type": "function",
+      "line": 311,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_worker_stops_immediately_when_pdf_needs_user_action",
+      "type": "function",
+      "line": 344,
+      "file": "test_document_workflow.py"
+    },
+    {
       "name": "test_pdf_user_action_has_a_specific_recovery_hint",
       "type": "function",
-      "line": 214,
+      "line": 389,
       "file": "test_document_workflow.py"
     },
     {
       "name": "test_escalation_does_not_retry_a_user_input_requirement",
       "type": "function",
-      "line": 223,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "Page",
-      "type": "class",
-      "line": 88,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "Reader",
-      "type": "class",
-      "line": 95,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "Reader",
-      "type": "class",
-      "line": 118,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "Page",
-      "type": "class",
-      "line": 141,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "Reader",
-      "type": "class",
-      "line": 148,
+      "line": 398,
       "file": "test_document_workflow.py"
     },
     {
       "name": "Router",
       "type": "class",
-      "line": 170,
+      "line": 92,
       "file": "test_document_workflow.py"
     },
     {
       "name": "Broker",
       "type": "class",
-      "line": 187,
+      "line": 131,
       "file": "test_document_workflow.py"
     },
     {
       "name": "Worker",
       "type": "class",
-      "line": 224,
+      "line": 170,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Page",
+      "type": "class",
+      "line": 263,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 270,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 293,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Page",
+      "type": "class",
+      "line": 316,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 323,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Router",
+      "type": "class",
+      "line": 345,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Broker",
+      "type": "class",
+      "line": 362,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Worker",
+      "type": "class",
+      "line": 399,
       "file": "test_document_workflow.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 89,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "extract_text",
-      "type": "function",
-      "line": 92,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "decrypt",
-      "type": "function",
-      "line": 122,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "__init__",
-      "type": "function",
-      "line": 142,
-      "file": "test_document_workflow.py"
-    },
-    {
-      "name": "extract_text",
-      "type": "function",
-      "line": 145,
+      "line": 93,
       "file": "test_document_workflow.py"
     },
     {
       "name": "get_tool_definitions",
       "type": "function",
-      "line": 191,
+      "line": 135,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 264,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "extract_text",
+      "type": "function",
+      "line": 267,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "decrypt",
+      "type": "function",
+      "line": 297,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 317,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "extract_text",
+      "type": "function",
+      "line": 320,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "get_tool_definitions",
+      "type": "function",
+      "line": 366,
       "file": "test_document_workflow.py"
     },
     {
@@ -2899,13 +2947,13 @@
     {
       "name": "_save",
       "type": "function",
-      "line": 365,
+      "line": 366,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "get_config",
       "type": "function",
-      "line": 418,
+      "line": 419,
       "file": "app/ui/settings_dialog.py"
     },
     {
@@ -3277,85 +3325,85 @@
     {
       "name": "log_test_result",
       "type": "function",
-      "line": 978,
+      "line": 980,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_diff",
       "type": "function",
-      "line": 984,
+      "line": 986,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "expand_detail",
       "type": "function",
-      "line": 987,
+      "line": 989,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_request_followup",
       "type": "function",
-      "line": 998,
+      "line": 1000,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_set_header_status",
       "type": "function",
-      "line": 1002,
+      "line": 1004,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_refresh_worker_stage",
       "type": "function",
-      "line": 1008,
+      "line": 1010,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_populate_test_details",
       "type": "function",
-      "line": 1057,
+      "line": 1059,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_bottom",
       "type": "function",
-      "line": 1071,
+      "line": 1073,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_top",
       "type": "function",
-      "line": 1075,
+      "line": 1077,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 1079,
+      "line": 1081,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_issue_text",
       "type": "function",
-      "line": 1083,
+      "line": 1085,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_friendly_provider_error",
       "type": "function",
-      "line": 1089,
+      "line": 1091,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_details",
       "type": "function",
-      "line": 1108,
+      "line": 1110,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_normalize_model_output",
       "type": "function",
-      "line": 1121,
+      "line": 1123,
       "file": "app/ui/task_panel.py"
     },
     {
@@ -3739,43 +3787,43 @@
     {
       "name": "_compact_messages",
       "type": "function",
-      "line": 577,
+      "line": 623,
       "file": "agents/worker.py"
     },
     {
       "name": "_tool_definitions",
       "type": "function",
-      "line": 667,
+      "line": 713,
       "file": "agents/worker.py"
     },
     {
       "name": "_failure",
       "type": "function",
-      "line": 680,
+      "line": 726,
       "file": "agents/worker.py"
     },
     {
       "name": "_allows_no_change",
       "type": "function",
-      "line": 692,
+      "line": 738,
       "file": "agents/worker.py"
     },
     {
       "name": "size",
       "type": "function",
-      "line": 580,
+      "line": 626,
       "file": "agents/worker.py"
     },
     {
       "name": "trim_text",
       "type": "function",
-      "line": 583,
+      "line": 629,
       "file": "agents/worker.py"
     },
     {
       "name": "compact_history_message",
       "type": "function",
-      "line": 593,
+      "line": 639,
       "file": "agents/worker.py"
     },
     {
@@ -4837,253 +4885,259 @@
     {
       "name": "Engine",
       "type": "class",
-      "line": 58,
+      "line": 59,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 61,
+      "line": 62,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "apply_runtime_config",
       "type": "function",
-      "line": 87,
+      "line": 88,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 111,
+      "line": 112,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 126,
+      "line": 127,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "register_agent",
       "type": "function",
-      "line": 129,
+      "line": 130,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "get_agent",
       "type": "function",
-      "line": 187,
+      "line": 188,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_on_state_change_sync",
       "type": "function",
-      "line": 198,
+      "line": 199,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_classify_request",
       "type": "function",
-      "line": 260,
+      "line": 261,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_document_request",
       "type": "function",
-      "line": 280,
+      "line": 281,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_pdf_page_count",
+      "type": "function",
+      "line": 286,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_document_task_profile",
       "type": "function",
-      "line": 285,
+      "line": 297,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_precheck_constitution",
       "type": "function",
-      "line": 645,
+      "line": 694,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalized_risk_level",
       "type": "function",
-      "line": 662,
+      "line": 711,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_risk_route",
       "type": "function",
-      "line": 676,
+      "line": 725,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_direct_plan_data",
       "type": "function",
-      "line": 881,
+      "line": 930,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_tasks_from_plan",
       "type": "function",
-      "line": 897,
+      "line": 946,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_optimize_plan",
       "type": "function",
-      "line": 916,
+      "line": 965,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_serialize_overlapping_tasks",
       "type": "function",
-      "line": 981,
+      "line": 1030,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_prune_transitive_dependencies",
       "type": "function",
-      "line": 1001,
+      "line": 1050,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_path_patterns_overlap",
       "type": "function",
-      "line": 1033,
+      "line": 1082,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_estimate_task_budget",
       "type": "function",
-      "line": 1057,
+      "line": 1106,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_direct_plan",
       "type": "function",
-      "line": 1146,
+      "line": 1195,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_collect_analysis_dependency_reports",
       "type": "function",
-      "line": 1632,
+      "line": 1700,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_budget_error",
       "type": "function",
-      "line": 1923,
+      "line": 2027,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_user_input_required",
       "type": "function",
-      "line": 1935,
+      "line": 2092,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_task_path_mismatch",
       "type": "function",
-      "line": 1939,
+      "line": 2096,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_capability_error",
       "type": "function",
-      "line": 1947,
+      "line": 2104,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 1958,
+      "line": 2115,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_update_latest_repair_round",
       "type": "function",
-      "line": 2564,
+      "line": 2721,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_namespace_repair_plan",
       "type": "function",
-      "line": 2574,
+      "line": 2731,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_friendly_provider_error",
       "type": "function",
-      "line": 2602,
+      "line": 2759,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_failure_details",
       "type": "function",
-      "line": 2622,
+      "line": 2779,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_store_job_failure",
       "type": "function",
-      "line": 2683,
+      "line": 2841,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_checkpoint_task",
       "type": "function",
-      "line": 2687,
+      "line": 2845,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 2752,
+      "line": 2910,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 2767,
+      "line": 2925,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 2852,
+      "line": 3010,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 2857,
+      "line": 3015,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 2865,
+      "line": 3023,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_project_output_files",
       "type": "function",
-      "line": 2952,
+      "line": 3110,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "reaches",
       "type": "function",
-      "line": 1009,
+      "line": 1058,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "visit",
       "type": "function",
-      "line": 1641,
+      "line": 1709,
       "file": "orchestrator/engine.py"
     },
     {
@@ -5371,25 +5425,43 @@
     {
       "name": "MergeManager",
       "type": "class",
-      "line": 16,
+      "line": 14,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 23,
+      "line": 27,
+      "file": "orchestrator/merge_manager.py"
+    },
+    {
+      "name": "_find_untracked_input_assets",
+      "type": "function",
+      "line": 44,
+      "file": "orchestrator/merge_manager.py"
+    },
+    {
+      "name": "_unstage_input_assets",
+      "type": "function",
+      "line": 60,
+      "file": "orchestrator/merge_manager.py"
+    },
+    {
+      "name": "_copy_untracked_input_assets",
+      "type": "function",
+      "line": 81,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "get_active_worktrees",
       "type": "function",
-      "line": 136,
+      "line": 203,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "active_count",
       "type": "function",
-      "line": 140,
+      "line": 207,
       "file": "orchestrator/merge_manager.py"
     },
     {
@@ -5473,43 +5545,43 @@
     {
       "name": "_ensure_job_budget",
       "type": "function",
-      "line": 202,
+      "line": 219,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "get_budget",
       "type": "function",
-      "line": 209,
+      "line": 226,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "get_usage_summary",
       "type": "function",
-      "line": 300,
+      "line": 317,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "_cost_rates",
       "type": "function",
-      "line": 355,
+      "line": 372,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "estimate_cost",
       "type": "function",
-      "line": 373,
+      "line": 390,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "is_billable_api_mode",
       "type": "function",
-      "line": 392,
+      "line": 409,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "estimate_billable_cost",
       "type": "function",
-      "line": 397,
+      "line": 414,
       "file": "orchestrator/cost_engine.py"
     }
   ],
