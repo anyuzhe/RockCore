@@ -55,7 +55,7 @@ class ProjectAgentConfig:
 
     # ── Mode ──
     config_version: int = 2
-    # Auto uses deterministic risk routing; named modes keep explicit topology.
+    # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
     # ── Agent profiles ──

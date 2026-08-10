@@ -1,7 +1,9 @@
 """Regression tests for explicit workflow routing."""
 
 import asyncio
+import json
 
+from agents.governor import GovernorAgent
 from orchestrator.agent_config import (
     ProjectAgentConfig,
     load_project_config,
@@ -9,6 +11,27 @@ from orchestrator.agent_config import (
 )
 from orchestrator.engine import Engine
 from orchestrator.state_machine import JobState
+
+
+def test_governor_returns_structured_risk_score_and_reasons():
+    class Router:
+        async def chat(self, *_args, **_kwargs):
+            return {"content": json.dumps({
+                "goal": "修正文案",
+                "constraints": [],
+                "acceptance_criteria": ["文字正确"],
+                "risk": "low",
+                "risk_score": 12,
+                "risk_reasons": ["只修改静态文案，不影响程序行为"],
+                "protected_paths": [],
+                "requires_final_review": False,
+            })}
+
+    result = asyncio.run(GovernorAgent(Router()).run("删除页面中的错别字"))
+
+    assert result["risk"] == "low"
+    assert result["risk_score"] == 12
+    assert result["risk_reasons"] == ["只修改静态文案，不影响程序行为"]
 
 
 def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
@@ -26,8 +49,12 @@ def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
         async def record(name):
             calls.append(name)
 
-        async def governor(job, repos, config=None):
+        async def governor(*_args, **_kwargs):
             await record("governor")
+            return {
+                "risk": "low", "risk_score": 20,
+                "risk_reasons": ["仅修改静态页面"], "source": "governor",
+            }
 
         async def planner(job, repos, config=None):
             await record("planner")
@@ -38,7 +65,7 @@ def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
         async def reviewer(job, repos, **_kwargs):
             await record("reviewer")
 
-        async def simple(job, repos, config=None):
+        async def simple(*_args, **_kwargs):
             await record("simple")
 
         async def finalize(job, repos):
@@ -54,7 +81,7 @@ def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
         assert engine._classify_request("创建一个简单 HTML 页面") == "simple"
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["simple"]
+        assert calls == ["governor", "simple"]
 
     asyncio.run(scenario())
 
@@ -72,8 +99,12 @@ def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path)
         )
         calls = []
 
-        async def skipped(_job, _repos, phase, reason=""):
-            calls.append(f"skip-{phase}")
+        async def governor(*_args, **_kwargs):
+            calls.append("governor")
+            return {
+                "risk": "medium", "risk_score": 45,
+                "risk_reasons": ["局部功能修复"], "source": "governor",
+            }
 
         async def planner(*_args, **_kwargs):
             calls.append("planner")
@@ -87,14 +118,14 @@ def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path)
         async def finalize(*_args, **_kwargs):
             pass
 
-        engine._skip_phase = skipped
+        engine._run_governor = governor
         engine._run_planner = planner
         engine._run_execution = execution
         engine._skip_review = skip_review
         engine._finalize = finalize
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["skip-governor", "planner", "worker", "skip-reviewer"]
+        assert calls == ["governor", "planner", "worker", "skip-reviewer"]
 
     asyncio.run(scenario())
 
@@ -117,6 +148,10 @@ def test_auto_mode_routes_high_risk_request_through_full_pipeline(tmp_path):
 
         async def governor(*_args, **_kwargs):
             await record("governor")
+            return {
+                "risk": "high", "risk_score": 85,
+                "risk_reasons": ["认证和数据库迁移"], "source": "governor",
+            }
 
         async def planner(*_args, **_kwargs):
             await record("planner")
@@ -142,6 +177,88 @@ def test_auto_mode_routes_high_risk_request_through_full_pipeline(tmp_path):
     asyncio.run(scenario())
 
 
+def test_governor_assessment_overrides_the_rule_precheck_in_auto_mode(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id, "修改数据库认证迁移和登录安全策略", str(tmp_path)
+        )
+        calls = []
+
+        async def governor(*_args, **_kwargs):
+            calls.append("governor")
+            return {
+                "risk": "low", "risk_score": 25,
+                "risk_reasons": ["裁决者确认只改说明文本"],
+                "source": "governor",
+            }
+
+        async def simple(*_args, **_kwargs):
+            calls.append("simple")
+
+        async def finalize(*_args, **_kwargs):
+            pass
+
+        engine._run_governor = governor
+        engine._run_simple = simple
+        engine._finalize = finalize
+        await engine.run_job(result["job_id"], str(tmp_path))
+
+        assert calls == ["governor", "simple"]
+        repos = engine._get_repos()
+        try:
+            job = repos["job"].get_by_id(result["job_id"])
+            assert job.risk_level == "low"
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_rule_precheck_is_used_only_when_governor_is_unavailable(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id, "修改数据库认证迁移和登录安全策略", str(tmp_path)
+        )
+        calls = []
+
+        async def planner(*_args, **_kwargs):
+            calls.append("planner")
+
+        async def execution(*_args, **_kwargs):
+            calls.append("worker")
+
+        async def reviewer(*_args, **_kwargs):
+            calls.append("reviewer")
+
+        async def finalize(*_args, **_kwargs):
+            pass
+
+        engine._run_planner = planner
+        engine._run_execution = execution
+        engine._run_reviewer = reviewer
+        engine._finalize = finalize
+        await engine.run_job(result["job_id"], str(tmp_path))
+
+        assert calls == ["planner", "worker", "reviewer"]
+        event = engine.event_bus.get_history("governor_risk_assessed")[-1]["data"]
+        assert event["source"] == "rules_fallback"
+        assert event["risk_level"] == "high"
+
+    asyncio.run(scenario())
+
+
 def test_fast_mode_is_the_only_direct_worker_route(tmp_path):
     async def scenario():
         save_project_config(str(tmp_path), ProjectAgentConfig.fast_preset())
@@ -155,7 +272,7 @@ def test_fast_mode_is_the_only_direct_worker_route(tmp_path):
 
         calls = []
 
-        async def simple(job, repos, config=None):
+        async def simple(*_args, **_kwargs):
             calls.append("simple")
 
         async def unexpected(*args, **kwargs):

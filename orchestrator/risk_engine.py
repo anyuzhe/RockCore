@@ -48,7 +48,7 @@ class RiskEngine:
 
     def precheck_request(self, user_request: str,
                          project_root: str | Path) -> dict:
-        """Deterministically select the Auto-mode workflow before any LLM call."""
+        """Provide a deterministic fallback if Governor cannot assess risk."""
         request = str(user_request or "")
         normalized = request.lower()
         root = Path(project_root)

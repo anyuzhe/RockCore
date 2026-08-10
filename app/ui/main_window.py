@@ -607,7 +607,7 @@ class MainWindow(QMainWindow):
 
         if event_type == "job_governing" and is_selected:
             self.task_panel.update_stage("governor", "running", "正在分析需求目标与边界")
-        elif event_type == "deterministic_precheck" and is_selected:
+        elif event_type == "governor_risk_assessed" and is_selected:
             risk_name = {
                 "low": "低", "medium": "中", "high": "高", "critical": "关键",
             }.get(data.get("risk_level", "medium"), "中")
@@ -617,9 +617,14 @@ class MainWindow(QMainWindow):
                 "high": "完整治理与审核",
                 "configured": "按项目配置",
             }.get(data.get("workflow_route", "configured"), "按项目配置")
+            source_name = {
+                "governor": "裁决者风险评估",
+                "rules_fallback": "裁决者不可用，规则兜底",
+                "fast_mode_rules": "快速模式规则评估",
+            }.get(data.get("source", "governor"), "裁决者风险评估")
             self.task_panel.append_stage_output(
                 "governor",
-                f"确定性预检：{risk_name}风险（{data.get('risk_score', 0)} 分）"
+                f"{source_name}：{risk_name}风险（{data.get('risk_score', 0)} 分）"
                 f"，流程：{route_name}",
             )
         elif event_type == "job_governed" and is_selected:

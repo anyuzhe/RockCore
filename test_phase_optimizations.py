@@ -287,13 +287,17 @@ def test_early_pipeline_failure_still_emits_authoritative_finished_event(tmp_pat
             repos["_session"].close()
         created = await engine.create_job(project.id, "change page", str(tmp_path))
 
-        async def govern(job, repos, _config=None):
+        async def govern(job, repos, _config=None, **_kwargs):
             repos["constitution"].create(
                 job_id=job.id, goal=job.user_request, constraints=[],
                 acceptance_criteria=[], protected_paths=[],
             )
             engine.state_machine.transition(job.job_id, JobState.GOVERNING)
             engine.state_machine.transition(job.job_id, JobState.GOVERNED)
+            return {
+                "risk": "medium", "risk_score": 45,
+                "risk_reasons": ["局部代码修改"], "source": "governor",
+            }
 
         async def fail_plan(job, repos, _config=None):
             engine.state_machine.transition(job.job_id, JobState.PLANNING)

@@ -369,27 +369,6 @@ class Engine:
             precheck = self.model_router.risk_engine.precheck_request(
                 job.user_request, proj_root
             )
-            workflow_route = (
-                precheck["route"] if proj_config.mode == "auto"
-                else "low" if proj_config.mode == "fast"
-                else "configured"
-            )
-            job._rockcore_workflow_route = workflow_route
-            repos["job"].update_risk_level(job_id, precheck["level"])
-            job.risk_level = precheck["level"]
-            await self.event_bus.publish(
-                "deterministic_precheck",
-                job_id=job_id,
-                risk_level=precheck["level"],
-                risk_score=precheck["score"],
-                workflow_route=workflow_route,
-                reasons=precheck["reasons"],
-                has_tests=precheck["has_tests"],
-            )
-            logger.info(
-                "Job %s: deterministic risk=%s/%s route=%s",
-                job_id, precheck["level"], precheck["score"], workflow_route,
-            )
 
             profiles = {
                 "governor": proj_config.governor,
@@ -415,6 +394,67 @@ class Engine:
                 },
             )
 
+            governor_completed = False
+            if proj_config.mode == "fast":
+                # Fast mode explicitly opts out of model governance.
+                risk_assessment = {
+                    "risk": precheck["level"],
+                    "risk_score": precheck["score"],
+                    "risk_reasons": precheck["reasons"],
+                    "source": "fast_mode_rules",
+                }
+                workflow_route = "low"
+            else:
+                if proj_config.governor.enabled:
+                    risk_assessment = await self._run_governor(
+                        job, repos, proj_config, fallback_precheck=precheck
+                    )
+                    governor_completed = True
+                else:
+                    await self._skip_phase(
+                        job, repos, "governor", "已按项目配置禁用"
+                    )
+                    self._create_precheck_constitution(
+                        job, repos, precheck["level"]
+                    )
+                    risk_assessment = {
+                        "risk": precheck["level"],
+                        "risk_score": precheck["score"],
+                        "risk_reasons": precheck["reasons"],
+                        "source": "rules_fallback",
+                    }
+                    governor_completed = True
+
+                workflow_route = (
+                    self._risk_route(risk_assessment.get("risk"))
+                    if proj_config.mode == "auto"
+                    else "configured"
+                )
+
+            assessed_risk = self._normalized_risk_level(
+                risk_assessment.get("risk"), precheck["level"]
+            )
+            job._rockcore_workflow_route = workflow_route
+            repos["job"].update_risk_level(job_id, assessed_risk)
+            job.risk_level = assessed_risk
+            await self.event_bus.publish(
+                "governor_risk_assessed",
+                job_id=job_id,
+                risk_level=assessed_risk,
+                risk_score=risk_assessment.get("risk_score", precheck["score"]),
+                workflow_route=workflow_route,
+                reasons=risk_assessment.get("risk_reasons", []),
+                source=risk_assessment.get("source", "governor"),
+                fallback_score=precheck["score"],
+                fallback_reasons=precheck["reasons"],
+                has_tests=precheck["has_tests"],
+            )
+            logger.info(
+                "Job %s: risk source=%s level=%s route=%s",
+                job_id, risk_assessment.get("source", "governor"),
+                assessed_risk, workflow_route,
+            )
+
             # Apply config: set worker turn limits
             worker = self.get_agent("worker")
             if worker:
@@ -422,23 +462,14 @@ class Engine:
                 worker.max_turns = proj_config.get_worker_turns(complexity)
 
             if workflow_route == "low":
-                await self._run_simple(job, repos, proj_config)
+                await self._run_simple(
+                    job, repos, proj_config,
+                    governor_completed=governor_completed,
+                )
             else:
-                # ── Phase 1: Governor ──
                 auto_medium = (
                     proj_config.mode == "auto" and workflow_route == "medium"
                 )
-                if proj_config.governor.enabled and not auto_medium:
-                    await self._run_governor(job, repos, proj_config)
-                else:
-                    reason = (
-                        "已由确定性预检判定为中风险，使用保守约束"
-                        if auto_medium else "已按项目配置禁用"
-                    )
-                    await self._skip_phase(job, repos, "governor", reason)
-                    self._create_precheck_constitution(
-                        job, repos, precheck["level"]
-                    )
                 if self._is_cancelled(job.job_id, job, repos):
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
@@ -530,23 +561,100 @@ class Engine:
             raw_output={"source": "deterministic_precheck"},
         )
 
-    async def _run_governor(self, job, repos, proj_config=None):
+    @staticmethod
+    def _normalized_risk_level(value, fallback: str = "medium") -> str:
+        level = str(value or "").lower()
+        if level == "critical":
+            return "high"
+        if level in {"low", "medium", "high"}:
+            return level
+        fallback_level = str(fallback or "medium").lower()
+        return "high" if fallback_level == "critical" else (
+            fallback_level
+            if fallback_level in {"low", "medium", "high"}
+            else "medium"
+        )
+
+    @classmethod
+    def _risk_route(cls, risk_level) -> str:
+        return cls._normalized_risk_level(risk_level)
+
+    async def _run_governor(self, job, repos, proj_config=None,
+                            fallback_precheck: dict | None = None) -> dict:
+        """Have Governor classify risk and persist the resulting constitution."""
         repos["job"].update_status(job.job_id, "governing")
         self.state_machine.transition(job.job_id, JobState.GOVERNING)
         await self.event_bus.publish("job_governing", job_id=job.job_id)
 
+        precheck = fallback_precheck or {}
+        fallback_risk = self._normalized_risk_level(
+            precheck.get("level"), getattr(job, "risk_level", "medium")
+        )
+        assessment = {
+            "risk": fallback_risk,
+            "risk_score": int(precheck.get("score", 50) or 50),
+            "risk_reasons": list(precheck.get("reasons") or [
+                "裁决者不可用，使用规则兜底"
+            ]),
+            "source": "rules_fallback",
+        }
         governor = self.get_agent("governor")
         if governor:
             try:
                 effective_request = self._request_with_context(job, repos, proj_config)
                 constitution = await governor.run(effective_request, job.project)
-                repos["constitution"].create(
-                    job_id=job.id, **constitution
+                risk = self._normalized_risk_level(
+                    constitution.get("risk"), fallback_risk
                 )
-                risk_cn = {"low": "低", "medium": "中", "high": "高"}.get(constitution.get("risk", "low"), "低")
+                try:
+                    risk_score = max(
+                        0, min(100, int(constitution.get("risk_score", 50)))
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    risk_score = 50
+                risk_reasons = constitution.get("risk_reasons")
+                if not isinstance(risk_reasons, list):
+                    risk_reasons = [str(risk_reasons)] if risk_reasons else []
+                risk_reasons = [
+                    str(reason)[:300] for reason in risk_reasons
+                    if str(reason).strip()
+                ][:6] or ["裁决者按需求影响范围完成风险评估"]
+                repos["constitution"].create(
+                    job_id=job.id,
+                    goal=constitution.get("goal", job.user_request),
+                    constraints=list(constitution.get("constraints") or []),
+                    acceptance_criteria=list(
+                        constitution.get("acceptance_criteria")
+                        or ["All tests pass"]
+                    ),
+                    risk=risk,
+                    protected_paths=list(
+                        constitution.get("protected_paths") or []
+                    ),
+                    requires_final_review=bool(
+                        constitution.get("requires_final_review", True)
+                        or risk == "high"
+                    ),
+                    raw_output={
+                        "source": "governor",
+                        "risk_score": risk_score,
+                        "risk_reasons": risk_reasons,
+                    },
+                )
+                assessment = {
+                    "risk": risk,
+                    "risk_score": risk_score,
+                    "risk_reasons": risk_reasons,
+                    "source": "governor",
+                }
+                risk_cn = {"low": "低", "medium": "中", "high": "高"}[risk]
                 await self.event_bus.publish("phase_summary",
                     phase="governor", agent_type="governor", status="success",
-                    summary=f"分析了需求：{constitution.get('goal', job.user_request)}，风险等级：{risk_cn}",
+                    summary=(
+                        f"分析了需求：{constitution.get('goal', job.user_request)}，"
+                        f"风险等级：{risk_cn}（{risk_score} 分）"
+                    ),
+                    details={"risk_reasons": risk_reasons},
                 )
             except Exception as e:
                 logger.warning(f"Governor failed, using defaults: {e}")
@@ -556,16 +664,21 @@ class Engine:
                     goal=job.user_request,
                     constraints=[],
                     acceptance_criteria=["All tests pass"],
-                    risk=job.risk_level,
+                    risk=fallback_risk,
                     protected_paths=[],
                     requires_final_review=True,
-                    raw_output={"fallback": True, "error": str(e)},
+                    raw_output={
+                        "fallback": True, "error": str(e),
+                        "source": "rules_fallback",
+                        "risk_score": assessment["risk_score"],
+                        "risk_reasons": assessment["risk_reasons"],
+                    },
                 )
                 await self.event_bus.publish(
                     "phase_summary",
                     phase="governor", agent_type="governor", status="fallback",
                     summary=(
-                        "裁决者不可用，已使用保守的默认约束继续执行。"
+                        "裁决者不可用，已使用规则预检作为风险兜底继续执行。"
                         f"原因：{failure_reason}"
                     ),
                     details={"error": failure_reason},
@@ -576,19 +689,26 @@ class Engine:
                 goal=job.user_request,
                 constraints=[],
                 acceptance_criteria=["All tests pass"],
-                risk=job.risk_level,
+                risk=fallback_risk,
                 protected_paths=[],
                 requires_final_review=True,
-                raw_output={"fallback": True, "error": "Governor not registered"},
+                raw_output={
+                    "fallback": True,
+                    "error": "Governor not registered",
+                    "source": "rules_fallback",
+                    "risk_score": assessment["risk_score"],
+                    "risk_reasons": assessment["risk_reasons"],
+                },
             )
             await self.event_bus.publish(
                 "phase_summary",
                 phase="governor", agent_type="governor", status="fallback",
-                summary="未注册裁决者，已使用保守的默认约束继续执行",
+                summary="未注册裁决者，已使用规则预检作为风险兜底继续执行",
             )
 
         self.state_machine.transition(job.job_id, JobState.GOVERNED)
         await self.event_bus.publish("job_governed", job_id=job.job_id)
+        return assessment
 
     async def _run_planner(self, job, repos, proj_config=None):
         self.state_machine.transition(job.job_id, JobState.PLANNING)
@@ -2564,17 +2684,21 @@ Prefer these existing files when relevant:
         context = self._continuation_context(job, repos, proj_config)
         return job.user_request if not context else f"{job.user_request}\n{context}"
 
-    async def _run_simple(self, job, repos, proj_config: ProjectAgentConfig | None = None):
-        """Low-risk/fast path: skip model governance and execute directly."""
-        await self.event_bus.publish("phase_summary",
-            phase="governor", agent_type="governor", status="skipped",
-            summary="低风险或快速模式：确定性预检后直接执行")
+    async def _run_simple(self, job, repos,
+                          proj_config: ProjectAgentConfig | None = None,
+                          governor_completed: bool = False):
+        """Run one focused task after Governor classifies low risk."""
+        if not governor_completed:
+            await self.event_bus.publish("phase_summary",
+                phase="governor", agent_type="governor", status="skipped",
+                summary="快速模式：跳过裁决者并直接执行")
         await self.event_bus.publish("phase_summary",
             phase="planner", agent_type="planner", status="skipped",
             summary="无需模型策划，直接创建单个聚焦任务")
 
-        self.state_machine.transition(job.job_id, JobState.GOVERNING)
-        self.state_machine.transition(job.job_id, JobState.GOVERNED)
+        if not governor_completed:
+            self.state_machine.transition(job.job_id, JobState.GOVERNING)
+            self.state_machine.transition(job.job_id, JobState.GOVERNED)
         self.state_machine.transition(job.job_id, JobState.PLANNING)
         self.state_machine.transition(job.job_id, JobState.PLAN_CHECK)
         self.state_machine.transition(job.job_id, JobState.READY)
@@ -2591,12 +2715,14 @@ Prefer these existing files when relevant:
         normalized_risk = (
             "high" if job.risk_level == "critical" else job.risk_level
         )
-        repos["constitution"].create(
-            job_id=job.id, goal=job.user_request, constraints=[],
-            acceptance_criteria=["确定性验证通过"],
-            risk=normalized_risk or "low", protected_paths=[],
-            requires_final_review=False,
-        )
+        if not repos["constitution"].get_by_job(job.id):
+            repos["constitution"].create(
+                job_id=job.id, goal=job.user_request, constraints=[],
+                acceptance_criteria=["确定性验证通过"],
+                risk=normalized_risk or "low", protected_paths=[],
+                requires_final_review=False,
+                raw_output={"source": "fast_mode_rules"},
+            )
         repos["plan"].create(job_id=job.id, summary=job.user_request, raw_output={})
         repos["task"].create(
             task_id="T001", job_id=job.id, title=job.user_request[:60],
