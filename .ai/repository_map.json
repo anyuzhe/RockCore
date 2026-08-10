@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-10 09:15:49.146093+00:00",
+  "generated_at": "2026-08-10 09:45:40.010304+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -45,6 +45,11 @@
       "path": "test_document_workflow.py",
       "category": "source",
       "symbols": 25
+    },
+    {
+      "path": "test_windows_compatibility.py",
+      "category": "source",
+      "symbols": 22
     },
     {
       "path": "__init__.py",
@@ -202,6 +207,11 @@
       "symbols": 2
     },
     {
+      "path": "app/text_utils.py",
+      "category": "source",
+      "symbols": 3
+    },
+    {
       "path": "app/branding.py",
       "category": "source",
       "symbols": 3
@@ -209,7 +219,7 @@
     {
       "path": "app/paths.py",
       "category": "source",
-      "symbols": 6
+      "symbols": 14
     },
     {
       "path": "app/__init__.py",
@@ -220,6 +230,11 @@
       "path": "app/runtime.py",
       "category": "source",
       "symbols": 2
+    },
+    {
+      "path": "app/subprocess_utils.py",
+      "category": "source",
+      "symbols": 6
     },
     {
       "path": "app/main.py",
@@ -284,7 +299,7 @@
     {
       "path": "providers/codex_provider.py",
       "category": "source",
-      "symbols": 16
+      "symbols": 17
     },
     {
       "path": "providers/deepseek_provider.py",
@@ -1376,6 +1391,138 @@
       "file": "test_document_workflow.py"
     },
     {
+      "name": "test_stale_install_directory_is_migrated_to_user_workspace",
+      "type": "function",
+      "line": 28,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_unicode_user_workspace_remains_valid",
+      "type": "function",
+      "line": 45,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_windows_appdata_path_supports_chinese_user_names",
+      "type": "function",
+      "line": 53,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_read_only_project_metadata_falls_back_to_user_data",
+      "type": "function",
+      "line": 62,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_project_memory_round_trips_utf8_on_windows_style_paths",
+      "type": "function",
+      "line": 87,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_subprocess_output_decodes_utf8_and_windows_chinese_codepage",
+      "type": "function",
+      "line": 99,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_synchronous_windows_processes_do_not_flash_console",
+      "type": "function",
+      "line": 109,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_windows_executable_paths_are_recognized_as_allowed_commands",
+      "type": "function",
+      "line": 132,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_windows_command_arguments_quote_paths_with_spaces",
+      "type": "function",
+      "line": 139,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_gb18030_project_file_is_read_without_mojibake",
+      "type": "function",
+      "line": 147,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_patch_preserves_legacy_windows_file_encoding",
+      "type": "function",
+      "line": 158,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_failed_legacy_encoding_write_does_not_truncate_file",
+      "type": "function",
+      "line": 170,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_codex_finds_npm_cmd_launcher_without_gui_path",
+      "type": "function",
+      "line": 184,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_codex_cmd_launcher_is_wrapped_with_comspec",
+      "type": "function",
+      "line": 195,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_codex_uses_popen_instead_of_unsupported_asyncio_subprocess_on_windows",
+      "type": "function",
+      "line": 210,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "test_settings_file_is_saved_as_utf8",
+      "type": "function",
+      "line": 263,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "writable",
+      "type": "function",
+      "line": 71,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "fake_run",
+      "type": "function",
+      "line": 112,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "Process",
+      "type": "class",
+      "line": 215,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 218,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "communicate",
+      "type": "function",
+      "line": 222,
+      "file": "test_windows_compatibility.py"
+    },
+    {
+      "name": "kill",
+      "type": "function",
+      "line": 227,
+      "file": "test_windows_compatibility.py"
+    },
+    {
       "name": "test_tools_accept_pathlib_project_roots",
       "type": "function",
       "line": 11,
@@ -2056,49 +2203,49 @@
     {
       "name": "ShellTools",
       "type": "class",
-      "line": 11,
+      "line": 20,
       "file": "tools/shell_tools.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 14,
+      "line": 23,
       "file": "tools/shell_tools.py"
     },
     {
       "name": "GitTools",
       "type": "class",
-      "line": 8,
+      "line": 10,
       "file": "tools/git_tools.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 11,
+      "line": 13,
       "file": "tools/git_tools.py"
     },
     {
       "name": "_detect_conflicts",
       "type": "function",
-      "line": 167,
+      "line": 160,
       "file": "tools/git_tools.py"
     },
     {
       "name": "SearchTools",
       "type": "class",
-      "line": 9,
+      "line": 11,
       "file": "tools/search_tools.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 12,
+      "line": 14,
       "file": "tools/search_tools.py"
     },
     {
       "name": "_resolve_path",
       "type": "function",
-      "line": 15,
+      "line": 17,
       "file": "tools/search_tools.py"
     },
     {
@@ -2122,31 +2269,31 @@
     {
       "name": "set_project_root",
       "type": "function",
-      "line": 341,
+      "line": 352,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "get_available_tools",
       "type": "function",
-      "line": 370,
+      "line": 381,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "FileTools",
       "type": "class",
-      "line": 12,
+      "line": 18,
       "file": "tools/file_tools.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 15,
+      "line": 21,
       "file": "tools/file_tools.py"
     },
     {
       "name": "_resolve_path",
       "type": "function",
-      "line": 24,
+      "line": 30,
       "file": "tools/file_tools.py"
     },
     {
@@ -2160,6 +2307,24 @@
       "type": "function",
       "line": 15,
       "file": "tools/test_tools.py"
+    },
+    {
+      "name": "read_text_compatible",
+      "type": "function",
+      "line": 7,
+      "file": "app/text_utils.py"
+    },
+    {
+      "name": "encode_text_compatible",
+      "type": "function",
+      "line": 35,
+      "file": "app/text_utils.py"
+    },
+    {
+      "name": "write_text_compatible",
+      "type": "function",
+      "line": 46,
+      "file": "app/text_utils.py"
     },
     {
       "name": "resource_root",
@@ -2180,183 +2345,267 @@
       "file": "app/branding.py"
     },
     {
+      "name": "application_dir",
+      "type": "function",
+      "line": 12,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "is_writable_directory",
+      "type": "function",
+      "line": 19,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "_first_writable_directory",
+      "type": "function",
+      "line": 43,
+      "file": "app/paths.py"
+    },
+    {
       "name": "app_data_dir",
       "type": "function",
-      "line": 9,
+      "line": 55,
       "file": "app/paths.py"
     },
     {
       "name": "_legacy_data_dir",
       "type": "function",
-      "line": 21,
+      "line": 83,
       "file": "app/paths.py"
     },
     {
       "name": "_migrate_legacy_file",
       "type": "function",
-      "line": 25,
+      "line": 87,
       "file": "app/paths.py"
     },
     {
       "name": "config_path",
       "type": "function",
-      "line": 38,
+      "line": 100,
       "file": "app/paths.py"
     },
     {
       "name": "database_path",
       "type": "function",
-      "line": 44,
+      "line": 106,
       "file": "app/paths.py"
     },
     {
       "name": "default_workspace_dir",
       "type": "function",
-      "line": 50,
+      "line": 112,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "_is_within",
+      "type": "function",
+      "line": 121,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "_is_protected_windows_location",
+      "type": "function",
+      "line": 129,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "resolve_working_dir",
+      "type": "function",
+      "line": 143,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "is_usable_project_dir",
+      "type": "function",
+      "line": 167,
+      "file": "app/paths.py"
+    },
+    {
+      "name": "project_state_dir",
+      "type": "function",
+      "line": 181,
       "file": "app/paths.py"
     },
     {
       "name": "configure_runtime_logging",
       "type": "function",
-      "line": 9,
+      "line": 10,
       "file": "app/runtime.py"
     },
     {
       "name": "configure_windows_identity",
       "type": "function",
-      "line": 21,
+      "line": 34,
       "file": "app/runtime.py"
+    },
+    {
+      "name": "utf8_environment",
+      "type": "function",
+      "line": 13,
+      "file": "app/subprocess_utils.py"
+    },
+    {
+      "name": "decode_process_output",
+      "type": "function",
+      "line": 22,
+      "file": "app/subprocess_utils.py"
+    },
+    {
+      "name": "run_process",
+      "type": "function",
+      "line": 48,
+      "file": "app/subprocess_utils.py"
+    },
+    {
+      "name": "no_window_creation_flags",
+      "type": "function",
+      "line": 67,
+      "file": "app/subprocess_utils.py"
+    },
+    {
+      "name": "command_basename",
+      "type": "function",
+      "line": 74,
+      "file": "app/subprocess_utils.py"
+    },
+    {
+      "name": "quote_command_arg",
+      "type": "function",
+      "line": 98,
+      "file": "app/subprocess_utils.py"
     },
     {
       "name": "SignalBridge",
       "type": "class",
-      "line": 25,
+      "line": 26,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "MainWindow",
       "type": "class",
-      "line": 36,
+      "line": 37,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 39,
+      "line": 40,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 60,
+      "line": 61,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_setup_menu",
       "type": "function",
-      "line": 187,
+      "line": 188,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_connect_signals",
       "type": "function",
-      "line": 211,
+      "line": 212,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 227,
+      "line": 228,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 245,
+      "line": 246,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_followup_requested",
       "type": "function",
-      "line": 328,
+      "line": 329,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_clear_followup_source",
       "type": "function",
-      "line": 339,
+      "line": 340,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_start_new_request",
       "type": "function",
-      "line": 346,
+      "line": 347,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_project_deleted",
       "type": "function",
-      "line": 357,
+      "line": 358,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_create_project",
       "type": "function",
-      "line": 378,
+      "line": 379,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_submit_request",
       "type": "function",
-      "line": 419,
+      "line": 420,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_submit_queued_followup",
       "type": "function",
-      "line": 527,
+      "line": 528,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_cancel_queued_request",
       "type": "function",
-      "line": 541,
+      "line": 542,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_update_send_state",
       "type": "function",
-      "line": 547,
+      "line": 548,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_run",
       "type": "function",
-      "line": 556,
+      "line": 557,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_pause",
       "type": "function",
-      "line": 563,
+      "line": 564,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_stop",
       "type": "function",
-      "line": 570,
+      "line": 571,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_event",
       "type": "function",
-      "line": 578,
+      "line": 579,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_capture_diff",
       "type": "function",
-      "line": 821,
+      "line": 822,
       "file": "app/ui/main_window.py"
     },
     {
@@ -2440,133 +2689,133 @@
     {
       "name": "ProjectDialog",
       "type": "class",
-      "line": 42,
+      "line": 43,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "ProjectPanel",
       "type": "class",
-      "line": 98,
+      "line": 99,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 45,
+      "line": 46,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_browse",
       "type": "function",
-      "line": 85,
+      "line": 86,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "get_data",
       "type": "function",
-      "line": 90,
+      "line": 91,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 106,
+      "line": 107,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 113,
+      "line": 114,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_projects",
       "type": "function",
-      "line": 181,
+      "line": 182,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_jobs",
       "type": "function",
-      "line": 200,
+      "line": 201,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_job",
       "type": "function",
-      "line": 224,
+      "line": 225,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "clear_job_selection",
       "type": "function",
-      "line": 232,
+      "line": 233,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_project",
       "type": "function",
-      "line": 236,
+      "line": 237,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_job_id",
       "type": "function",
-      "line": 244,
+      "line": 245,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_project_name",
       "type": "function",
-      "line": 249,
+      "line": 250,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "update_job_status",
       "type": "function",
-      "line": 254,
+      "line": 255,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "remove_project",
       "type": "function",
-      "line": 269,
+      "line": 270,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 277,
+      "line": 278,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 281,
+      "line": 282,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_add_project",
       "type": "function",
-      "line": 285,
+      "line": 286,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_show_project_menu",
       "type": "function",
-      "line": 298,
+      "line": 307,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_delete_project",
       "type": "function",
-      "line": 311,
+      "line": 320,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 327,
+      "line": 336,
       "file": "app/ui/project_panel.py"
     },
     {
@@ -2590,73 +2839,73 @@
     {
       "name": "load_config",
       "type": "function",
-      "line": 23,
+      "line": 24,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "save_config",
       "type": "function",
-      "line": 59,
+      "line": 60,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "PasswordRevealButton",
       "type": "class",
-      "line": 64,
+      "line": 68,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_password_field",
       "type": "function",
-      "line": 106,
+      "line": 110,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "SettingsDialog",
       "type": "class",
-      "line": 117,
+      "line": 121,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 67,
+      "line": 71,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_set_password_visible",
       "type": "function",
-      "line": 76,
+      "line": 80,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "paintEvent",
       "type": "function",
-      "line": 85,
+      "line": 89,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 120,
+      "line": 124,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 128,
+      "line": 132,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_save",
       "type": "function",
-      "line": 357,
+      "line": 365,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "get_config",
       "type": "function",
-      "line": 390,
+      "line": 418,
       "file": "app/ui/settings_dialog.py"
     },
     {
@@ -3112,253 +3361,259 @@
     {
       "name": "RepoMap",
       "type": "class",
-      "line": 39,
+      "line": 42,
       "file": "memory/repo_map.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 45,
+      "line": 48,
       "file": "memory/repo_map.py"
     },
     {
       "name": "_load",
       "type": "function",
-      "line": 50,
+      "line": 57,
       "file": "memory/repo_map.py"
     },
     {
       "name": "_save",
       "type": "function",
-      "line": 58,
+      "line": 65,
       "file": "memory/repo_map.py"
     },
     {
       "name": "_empty_map",
       "type": "function",
-      "line": 62,
+      "line": 78,
       "file": "memory/repo_map.py"
     },
     {
       "name": "_classify_file",
       "type": "function",
-      "line": 70,
+      "line": 86,
       "file": "memory/repo_map.py"
     },
     {
       "name": "_extract_symbols",
       "type": "function",
-      "line": 86,
+      "line": 102,
       "file": "memory/repo_map.py"
     },
     {
       "name": "update",
       "type": "function",
-      "line": 114,
+      "line": 133,
       "file": "memory/repo_map.py"
     },
     {
       "name": "get_symbols_for_file",
       "type": "function",
-      "line": 152,
+      "line": 171,
       "file": "memory/repo_map.py"
     },
     {
       "name": "find_symbol",
       "type": "function",
-      "line": 156,
+      "line": 175,
       "file": "memory/repo_map.py"
     },
     {
       "name": "get_category_files",
       "type": "function",
-      "line": 160,
+      "line": 179,
       "file": "memory/repo_map.py"
     },
     {
       "name": "get_context_summary",
       "type": "function",
-      "line": 164,
+      "line": 183,
       "file": "memory/repo_map.py"
     },
     {
       "name": "is_loaded",
       "type": "function",
-      "line": 194,
+      "line": 213,
       "file": "memory/repo_map.py"
     },
     {
       "name": "ContextManager",
       "type": "class",
-      "line": 13,
+      "line": 14,
       "file": "memory/context_manager.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 20,
+      "line": 21,
       "file": "memory/context_manager.py"
     },
     {
       "name": "_find_relevant_files",
       "type": "function",
-      "line": 68,
+      "line": 79,
       "file": "memory/context_manager.py"
     },
     {
       "name": "get_full_context",
       "type": "function",
-      "line": 116,
+      "line": 127,
       "file": "memory/context_manager.py"
     },
     {
       "name": "ProjectMemory",
       "type": "class",
-      "line": 22,
+      "line": 24,
       "file": "memory/project_memory.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 29,
+      "line": 31,
       "file": "memory/project_memory.py"
     },
     {
       "name": "_ensure_defaults",
       "type": "function",
-      "line": 35,
+      "line": 40,
       "file": "memory/project_memory.py"
     },
     {
       "name": "read_memory",
       "type": "function",
-      "line": 51,
+      "line": 59,
       "file": "memory/project_memory.py"
     },
     {
       "name": "write_memory",
       "type": "function",
-      "line": 62,
+      "line": 74,
       "file": "memory/project_memory.py"
     },
     {
       "name": "append_memory",
       "type": "function",
-      "line": 74,
+      "line": 92,
       "file": "memory/project_memory.py"
     },
     {
       "name": "get_all_memories",
       "type": "function",
-      "line": 81,
+      "line": 99,
       "file": "memory/project_memory.py"
     },
     {
       "name": "get_context_summary",
       "type": "function",
-      "line": 85,
+      "line": 103,
       "file": "memory/project_memory.py"
     },
     {
       "name": "exists",
       "type": "function",
-      "line": 99,
+      "line": 117,
       "file": "memory/project_memory.py"
     },
     {
       "name": "_load_codex_runtime_config",
       "type": "function",
-      "line": 23,
+      "line": 33,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_detect_proxy",
       "type": "function",
-      "line": 55,
+      "line": 65,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_load_platform_api_key",
       "type": "function",
-      "line": 72,
+      "line": 82,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_load_codex_token",
       "type": "function",
-      "line": 92,
+      "line": 102,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_find_codex_binary",
       "type": "function",
-      "line": 98,
+      "line": 108,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_prepare_codex_command",
+      "type": "function",
+      "line": 152,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_detect_chatgpt_login",
       "type": "function",
-      "line": 115,
+      "line": 178,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "get_codex_auth_status",
       "type": "function",
-      "line": 145,
+      "line": 212,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "CodexProvider",
       "type": "class",
-      "line": 197,
+      "line": 264,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 202,
+      "line": 269,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "is_authenticated",
       "type": "function",
-      "line": 246,
+      "line": 317,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_get_sandbox_mode",
       "type": "function",
-      "line": 272,
+      "line": 343,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "get_allowed_sandbox_modes",
       "type": "function",
-      "line": 281,
+      "line": 352,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_reasoning_effort",
       "type": "function",
-      "line": 285,
+      "line": 356,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_format_cli_prompt",
       "type": "function",
-      "line": 290,
+      "line": 361,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_parse_codex_jsonl",
       "type": "function",
-      "line": 308,
+      "line": 379,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_resolve_cwd",
       "type": "function",
-      "line": 419,
+      "line": 532,
       "file": "providers/codex_provider.py"
     },
     {
@@ -3586,49 +3841,49 @@
     {
       "name": "ReviewerAgent",
       "type": "class",
-      "line": 62,
+      "line": 63,
       "file": "agents/reviewer.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 65,
+      "line": 66,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_collect_job_changes",
       "type": "function",
-      "line": 170,
+      "line": 171,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_split_diff",
       "type": "function",
-      "line": 234,
+      "line": 235,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_validate_changed_files",
       "type": "function",
-      "line": 275,
+      "line": 276,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_merge_reviews",
       "type": "function",
-      "line": 331,
+      "line": 334,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_suppress_false_syntax_issues",
       "type": "function",
-      "line": 364,
+      "line": 367,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 412,
+      "line": 415,
       "file": "agents/reviewer.py"
     },
     {
@@ -4180,181 +4435,181 @@
     {
       "name": "WorktreeManager",
       "type": "class",
-      "line": 11,
+      "line": 12,
       "file": "git/worktree.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 14,
+      "line": 15,
       "file": "git/worktree.py"
     },
     {
       "name": "create",
       "type": "function",
-      "line": 18,
+      "line": 19,
       "file": "git/worktree.py"
     },
     {
       "name": "remove",
       "type": "function",
-      "line": 43,
+      "line": 44,
       "file": "git/worktree.py"
     },
     {
       "name": "list_worktrees",
       "type": "function",
-      "line": 60,
+      "line": 61,
       "file": "git/worktree.py"
     },
     {
       "name": "Repository",
       "type": "class",
-      "line": 11,
+      "line": 13,
       "file": "git/repository.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 14,
+      "line": 16,
       "file": "git/repository.py"
     },
     {
       "name": "_run",
       "type": "function",
-      "line": 17,
+      "line": 19,
       "file": "git/repository.py"
     },
     {
       "name": "is_repo",
       "type": "function",
-      "line": 23,
+      "line": 25,
       "file": "git/repository.py"
     },
     {
       "name": "ensure_initialized",
       "type": "function",
-      "line": 35,
+      "line": 37,
       "file": "git/repository.py"
     },
     {
       "name": "current_branch",
       "type": "function",
-      "line": 95,
+      "line": 97,
       "file": "git/repository.py"
     },
     {
       "name": "create_branch",
       "type": "function",
-      "line": 99,
+      "line": 101,
       "file": "git/repository.py"
     },
     {
       "name": "stage_all",
       "type": "function",
-      "line": 114,
+      "line": 116,
       "file": "git/repository.py"
     },
     {
       "name": "commit",
       "type": "function",
-      "line": 121,
+      "line": 123,
       "file": "git/repository.py"
     },
     {
       "name": "diff",
       "type": "function",
-      "line": 129,
+      "line": 131,
       "file": "git/repository.py"
     },
     {
       "name": "changed_files",
       "type": "function",
-      "line": 133,
+      "line": 135,
       "file": "git/repository.py"
     },
     {
       "name": "checkout",
       "type": "function",
-      "line": 139,
+      "line": 141,
       "file": "git/repository.py"
     },
     {
       "name": "stash",
       "type": "function",
-      "line": 146,
+      "line": 148,
       "file": "git/repository.py"
     },
     {
       "name": "is_clean",
       "type": "function",
-      "line": 153,
+      "line": 155,
       "file": "git/repository.py"
     },
     {
       "name": "unmerged_files",
       "type": "function",
-      "line": 157,
+      "line": 159,
       "file": "git/repository.py"
     },
     {
       "name": "get_commit_hash",
       "type": "function",
-      "line": 164,
+      "line": 166,
       "file": "git/repository.py"
     },
     {
       "name": "snapshot",
       "type": "function",
-      "line": 168,
+      "line": 170,
       "file": "git/repository.py"
     },
     {
       "name": "PolicyViolation",
       "type": "class",
-      "line": 11,
+      "line": 13,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "PolicyEngine",
       "type": "class",
-      "line": 18,
+      "line": 20,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 12,
+      "line": 14,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 45,
+      "line": 47,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_path",
       "type": "function",
-      "line": 48,
+      "line": 50,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_command",
       "type": "function",
-      "line": 96,
+      "line": 98,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_task_plan",
       "type": "function",
-      "line": 118,
+      "line": 120,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_tool_call",
       "type": "function",
-      "line": 146,
+      "line": 148,
       "file": "orchestrator/policy_engine.py"
     },
     {
@@ -4582,253 +4837,253 @@
     {
       "name": "Engine",
       "type": "class",
-      "line": 57,
+      "line": 58,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 60,
+      "line": 61,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "apply_runtime_config",
       "type": "function",
-      "line": 86,
+      "line": 87,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 110,
+      "line": 111,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 125,
+      "line": 126,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "register_agent",
       "type": "function",
-      "line": 128,
+      "line": 129,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "get_agent",
       "type": "function",
-      "line": 186,
+      "line": 187,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_on_state_change_sync",
       "type": "function",
-      "line": 197,
+      "line": 198,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_classify_request",
       "type": "function",
-      "line": 259,
+      "line": 260,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_document_request",
       "type": "function",
-      "line": 279,
+      "line": 280,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_document_task_profile",
       "type": "function",
-      "line": 284,
+      "line": 285,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_precheck_constitution",
       "type": "function",
-      "line": 644,
+      "line": 645,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalized_risk_level",
       "type": "function",
-      "line": 661,
+      "line": 662,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_risk_route",
       "type": "function",
-      "line": 675,
+      "line": 676,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_direct_plan_data",
       "type": "function",
-      "line": 880,
+      "line": 881,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_tasks_from_plan",
       "type": "function",
-      "line": 896,
+      "line": 897,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_optimize_plan",
       "type": "function",
-      "line": 915,
+      "line": 916,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_serialize_overlapping_tasks",
       "type": "function",
-      "line": 980,
+      "line": 981,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_prune_transitive_dependencies",
       "type": "function",
-      "line": 1000,
+      "line": 1001,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_path_patterns_overlap",
       "type": "function",
-      "line": 1032,
+      "line": 1033,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_estimate_task_budget",
       "type": "function",
-      "line": 1056,
+      "line": 1057,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_direct_plan",
       "type": "function",
-      "line": 1145,
+      "line": 1146,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_collect_analysis_dependency_reports",
       "type": "function",
-      "line": 1631,
+      "line": 1632,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_budget_error",
       "type": "function",
-      "line": 1922,
+      "line": 1923,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_user_input_required",
       "type": "function",
-      "line": 1934,
+      "line": 1935,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_task_path_mismatch",
       "type": "function",
-      "line": 1938,
+      "line": 1939,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_capability_error",
       "type": "function",
-      "line": 1946,
+      "line": 1947,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 1957,
+      "line": 1958,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_update_latest_repair_round",
       "type": "function",
-      "line": 2563,
+      "line": 2564,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_namespace_repair_plan",
       "type": "function",
-      "line": 2573,
+      "line": 2574,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_friendly_provider_error",
       "type": "function",
-      "line": 2601,
+      "line": 2602,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_failure_details",
       "type": "function",
-      "line": 2621,
+      "line": 2622,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_store_job_failure",
       "type": "function",
-      "line": 2682,
+      "line": 2683,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_checkpoint_task",
       "type": "function",
-      "line": 2686,
+      "line": 2687,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 2753,
+      "line": 2752,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 2768,
+      "line": 2767,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 2853,
+      "line": 2852,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 2858,
+      "line": 2857,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 2866,
+      "line": 2865,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_project_output_files",
       "type": "function",
-      "line": 2953,
+      "line": 2952,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "reaches",
       "type": "function",
-      "line": 1008,
+      "line": 1009,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "visit",
       "type": "function",
-      "line": 1640,
+      "line": 1641,
       "file": "orchestrator/engine.py"
     },
     {
@@ -4912,85 +5167,85 @@
     {
       "name": "TestManager",
       "type": "class",
-      "line": 32,
+      "line": 33,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "is_git_repo",
       "type": "function",
-      "line": 39,
+      "line": 40,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "capture_snapshot",
       "type": "function",
-      "line": 53,
+      "line": 54,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "snapshot_diff",
       "type": "function",
-      "line": 77,
+      "line": 78,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_uses_git",
       "type": "function",
-      "line": 90,
+      "line": 91,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "is_test_authoring_task",
       "type": "function",
-      "line": 98,
+      "line": 95,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "should_validate_locally",
       "type": "function",
-      "line": 115,
+      "line": 112,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "discover_test_command",
       "type": "function",
-      "line": 131,
+      "line": 128,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_is_shell_command",
       "type": "function",
-      "line": 158,
+      "line": 155,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_validate_source",
       "type": "function",
-      "line": 374,
+      "line": 371,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_validate_html",
       "type": "function",
-      "line": 407,
+      "line": 404,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "StructureParser",
       "type": "class",
-      "line": 408,
+      "line": 405,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 409,
+      "line": 406,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "handle_starttag",
       "type": "function",
-      "line": 413,
+      "line": 410,
       "file": "orchestrator/test_manager.py"
     },
     {
@@ -5116,25 +5371,25 @@
     {
       "name": "MergeManager",
       "type": "class",
-      "line": 15,
+      "line": 16,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 22,
+      "line": 23,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "get_active_worktrees",
       "type": "function",
-      "line": 139,
+      "line": 136,
       "file": "orchestrator/merge_manager.py"
     },
     {
       "name": "active_count",
       "type": "function",
-      "line": 143,
+      "line": 140,
       "file": "orchestrator/merge_manager.py"
     },
     {
@@ -5260,7 +5515,7 @@
   ],
   "categories": {
     "source": {
-      "count": 81,
+      "count": 84,
       "files": [
         "test_workflow_followup.py",
         "test_review_repair_workflow.py",
@@ -5270,6 +5525,7 @@
         "test_kimi_models.py",
         "test_deepseek_models.py",
         "test_document_workflow.py",
+        "test_windows_compatibility.py",
         "__init__.py",
         "test_pathlike_tools.py",
         "test_t003_static_compliance.py",
@@ -5291,10 +5547,12 @@
         "tools/__init__.py",
         "tools/file_tools.py",
         "tools/test_tools.py",
+        "app/text_utils.py",
         "app/branding.py",
         "app/paths.py",
         "app/__init__.py",
         "app/runtime.py",
+        "app/subprocess_utils.py",
         "app/main.py",
         "app/ui/main_window.py",
         "app/ui/project_panel.py",
@@ -5308,10 +5566,7 @@
         "memory/__init__.py",
         "memory/project_memory.py",
         "providers/codex_provider.py",
-        "providers/deepseek_provider.py",
-        "providers/__init__.py",
-        "providers/openai_provider.py",
-        "providers/kimi_provider.py"
+        "providers/deepseek_provider.py"
       ]
     },
     "other": {

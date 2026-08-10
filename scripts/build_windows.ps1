@@ -40,6 +40,19 @@ if (-not (Test-Path $AppExe -PathType Leaf)) {
     throw "PyInstaller completed but expected executable was not created: $AppExe"
 }
 
+Write-Host "==> Run packaged startup smoke test"
+$PreviousQtPlatform = $env:QT_QPA_PLATFORM
+$env:QT_QPA_PLATFORM = "offscreen"
+try {
+    $Smoke = Start-Process -FilePath $AppExe `
+        -ArgumentList "--startup-smoke-test" -Wait -PassThru
+    if ($Smoke.ExitCode -ne 0) {
+        throw "Packaged startup smoke test failed with exit code $($Smoke.ExitCode)"
+    }
+} finally {
+    $env:QT_QPA_PLATFORM = $PreviousQtPlatform
+}
+
 $Portable = Join-Path $Root "release/RockCore-$Version-Windows-x64-portable.zip"
 Compress-Archive -Path (Join-Path $AppDir "*") -DestinationPath $Portable -Force
 if (-not (Test-Path $Portable -PathType Leaf)) {

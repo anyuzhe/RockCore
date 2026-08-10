@@ -1,6 +1,7 @@
 """Desktop runtime setup shared by source and packaged launches."""
 
 import logging
+import os
 import sys
 
 from .branding import FULL_PRODUCT_NAME
@@ -9,6 +10,18 @@ from .branding import FULL_PRODUCT_NAME
 def configure_runtime_logging():
     """Keep a useful file log in the user data directory on packaged builds."""
     from .paths import app_data_dir
+
+    # GUI launches on Windows do not inherit a UTF-8 console configuration.
+    # Keep Python and all child processes deterministic for Chinese paths/text.
+    os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)

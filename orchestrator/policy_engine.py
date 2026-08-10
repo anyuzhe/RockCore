@@ -5,6 +5,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import command_basename
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +106,7 @@ class PolicyEngine:
                     f"Command matches forbidden pattern: {command[:100]}"
                 )
 
-        base_cmd = command.split()[0].split("/")[-1] if command.split() else ""
+        base_cmd = command_basename(command)
 
         if base_cmd in self.FORBIDDEN_COMMANDS:
             raise PolicyViolation(

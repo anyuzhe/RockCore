@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.text_utils import read_text_compatible
+
 
 class SearchTools:
     """Code search tools (grep, find, etc.) limited to project root."""
@@ -17,7 +19,7 @@ class SearchTools:
         if not p.is_absolute():
             p = self.project_root / p
         p = p.resolve()
-        if not str(p).startswith(str(self.project_root)):
+        if not p.is_relative_to(self.project_root):
             raise PermissionError(f"Path outside project root: {path}")
         return p
 
@@ -43,18 +45,18 @@ class SearchTools:
                         continue
                 fpath = Path(root) / fname
                 try:
-                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                        for line_no, line in enumerate(f, 1):
-                            if pattern in line or re.search(pattern, line):
-                                rel_path = fpath.relative_to(self.project_root)
-                                results.append({
-                                    "file": str(rel_path),
-                                    "line": line_no,
-                                    "content": line.rstrip()[:200],
-                                })
-                                count += 1
-                                if count >= max_results:
-                                    return {"results": results, "count": count}
+                    content, _ = read_text_compatible(fpath)
+                    for line_no, line in enumerate(content.splitlines(), 1):
+                        if pattern in line or re.search(pattern, line):
+                            rel_path = fpath.relative_to(self.project_root)
+                            results.append({
+                                "file": str(rel_path),
+                                "line": line_no,
+                                "content": line.rstrip()[:200],
+                            })
+                            count += 1
+                            if count >= max_results:
+                                return {"results": results, "count": count}
                 except (IOError, UnicodeDecodeError):
                     continue
 
@@ -66,13 +68,14 @@ class SearchTools:
         if not resolved.exists():
             return {"error": f"File not found: {path}"}
 
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+        content, file_encoding = read_text_compatible(resolved)
+        lines = content.splitlines()
 
         tail_lines = lines[-tail:]
         return {
             "path": str(resolved.relative_to(self.project_root)),
-            "lines": [l.rstrip() for l in tail_lines],
+            "lines": [line.rstrip() for line in tail_lines],
             "total_lines": len(lines),
             "showing": min(tail, len(lines)),
+            "encoding": file_encoding,
         }

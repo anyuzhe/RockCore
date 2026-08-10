@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -14,7 +15,7 @@ from PyQt6.QtGui import QPainter, QPainterPath, QPen
 
 from orchestrator.agent_config import PROVIDER_MODELS
 from orchestrator.cost_engine import CostEngine
-from app.paths import config_path
+from app.paths import application_dir, config_path, resolve_working_dir
 
 
 CONFIG_PATH = config_path()
@@ -23,7 +24,7 @@ CONFIG_PATH = config_path()
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
-            config = json.loads(CONFIG_PATH.read_text())
+            config = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
             if not isinstance(config, dict):
                 return {}
             version = int(config.get("workflow_defaults_version", 1) or 1)
@@ -58,7 +59,10 @@ def load_config() -> dict:
 
 def save_config(config: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    CONFIG_PATH.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 class PasswordRevealButton(QToolButton):
@@ -182,7 +186,9 @@ class SettingsDialog(QDialog):
 
         from providers.codex_provider import get_codex_auth_status
 
-        codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        codex_home = Path(os.path.expandvars(os.fspath(
+            os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        ))).expanduser()
         auth_path = codex_home / "auth.json"
         configured_codex = self._config.get("codex", {})
         auth_status = get_codex_auth_status(
@@ -242,7 +248,9 @@ class SettingsDialog(QDialog):
             f"Codex 模型：{auth_status['model']}\n"
             f"Codex CLI：{auth_status['codex_binary'] or '未找到'}\n"
             f"代理：{auth_status['proxy_source']}\n"
-            f"认证文件：{auth_path}"
+            f"认证文件：{auth_path}\n"
+            "Windows 会自动查找 PATH 和 %APPDATA%\\npm\\codex.cmd；"
+            "自定义位置可设置 CODEX_BINARY。"
         )
         info_label.setStyleSheet("color: #888; padding: 4px 8px;")
         info_label.setWordWrap(True)
@@ -370,7 +378,14 @@ class SettingsDialog(QDialog):
             "sandbox_mode": previous_codex.get("sandbox_mode", "read_only"),
         }
         self._config["max_concurrent_workers"] = self.max_workers.value()
-        self._config["working_dir"] = self.working_dir.text().strip()
+        requested_working_dir = self.working_dir.text().strip()
+        resolved_working_dir = resolve_working_dir(
+            requested_working_dir,
+            install_dir=(
+                application_dir() if getattr(sys, "frozen", False) else None
+            ),
+        )
+        self._config["working_dir"] = str(resolved_working_dir)
         self._config["agent_provider_map"] = {
             agent_type: combo.currentData()
             for agent_type, combo in self._role_combos.items()
@@ -383,8 +398,21 @@ class SettingsDialog(QDialog):
         self._config["workflow_defaults_version"] = 2
         self._config["pricing_currency_version"] = 1
 
-        save_config(self._config)
-        QMessageBox.information(self, "设置", "设置已保存。")
+        try:
+            save_config(self._config)
+        except OSError as error:
+            QMessageBox.warning(self, "保存失败", f"设置文件无法写入：{error}")
+            return
+        if requested_working_dir != str(resolved_working_dir):
+            self.working_dir.setText(str(resolved_working_dir))
+            QMessageBox.information(
+                self,
+                "工作目录已调整",
+                "原工作目录不可写或位于安装目录，已自动改为：\n"
+                f"{resolved_working_dir}",
+            )
+        else:
+            QMessageBox.information(self, "设置", "设置已保存。")
         self.accept()
 
     def get_config(self) -> dict:

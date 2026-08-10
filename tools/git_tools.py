@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import run_process
+
 
 class GitTools:
     """Git operations limited to the project repository."""
@@ -14,12 +16,11 @@ class GitTools:
     async def git_status(self) -> dict:
         """Get current git status."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "status", "--short"],
                 capture_output=True, text=True, cwd=self.project_root
             )
-            branch = subprocess.run(
+            branch = run_process(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -34,9 +35,8 @@ class GitTools:
     async def git_diff(self, staged: bool = False) -> dict:
         """Get git diff."""
         try:
-            import subprocess
             cmd = ["git", "diff", "--cached"] if staged else ["git", "diff"]
-            result = subprocess.run(cmd, capture_output=True, text=True,
+            result = run_process(cmd, capture_output=True, text=True,
                                     cwd=self.project_root)
             return {
                 "diff": result.stdout or "(no changes)",
@@ -48,8 +48,7 @@ class GitTools:
     async def create_branch(self, branch_name: str) -> dict:
         """Create a new branch from current HEAD."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "checkout", "-b", branch_name],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -62,10 +61,9 @@ class GitTools:
     async def commit(self, message: str) -> dict:
         """Stage all and commit."""
         try:
-            import subprocess
-            subprocess.run(["git", "add", "-A"], capture_output=True,
+            run_process(["git", "add", "-A"], capture_output=True,
                            cwd=self.project_root)
-            result = subprocess.run(
+            result = run_process(
                 ["git", "commit", "-m", message],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -78,8 +76,7 @@ class GitTools:
     async def checkout(self, branch: str) -> dict:
         """Checkout a branch."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "checkout", branch],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -94,8 +91,7 @@ class GitTools:
     async def create_worktree(self, branch_name: str, worktree_path: str) -> dict:
         """Create a new git worktree with a branch."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -108,14 +104,13 @@ class GitTools:
     async def remove_worktree(self, worktree_path: str) -> dict:
         """Remove a git worktree."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "worktree", "remove", worktree_path],
                 capture_output=True, text=True, cwd=self.project_root
             )
             if result.returncode != 0:
                 # Force remove if clean failed
-                result = subprocess.run(
+                result = run_process(
                     ["git", "worktree", "remove", "--force", worktree_path],
                     capture_output=True, text=True, cwd=self.project_root
                 )
@@ -128,14 +123,13 @@ class GitTools:
     async def merge_branch(self, source_branch: str, target_branch: str = "main") -> dict:
         """Merge source_branch into target_branch."""
         try:
-            import subprocess
             # Checkout target
-            subprocess.run(
+            run_process(
                 ["git", "checkout", target_branch],
                 capture_output=True, text=True, cwd=self.project_root
             )
             # Merge source
-            result = subprocess.run(
+            result = run_process(
                 ["git", "merge", source_branch, "--no-edit"],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -153,8 +147,7 @@ class GitTools:
     async def delete_branch(self, branch_name: str) -> dict:
         """Delete a local branch."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "branch", "-D", branch_name],
                 capture_output=True, text=True, cwd=self.project_root
             )
@@ -167,8 +160,7 @@ class GitTools:
     def _detect_conflicts(self) -> list[str]:
         """Detect files with merge conflicts."""
         try:
-            import subprocess
-            result = subprocess.run(
+            result = run_process(
                 ["git", "diff", "--name-only", "--diff-filter=U"],
                 capture_output=True, text=True, cwd=self.project_root
             )

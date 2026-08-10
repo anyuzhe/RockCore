@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.paths import project_state_dir
 from .project_memory import ProjectMemory
 from .repo_map import RepoMap
 
@@ -19,8 +20,13 @@ class ContextManager:
 
     def __init__(self, project_root: str):
         self.project_root = Path(project_root).resolve()
-        self.project_memory = ProjectMemory(str(self.project_root))
-        self.repo_map = RepoMap(str(self.project_root))
+        self.state_dir = project_state_dir(self.project_root)
+        self.project_memory = ProjectMemory(
+            str(self.project_root), state_dir=self.state_dir
+        )
+        self.repo_map = RepoMap(
+            str(self.project_root), state_dir=self.state_dir
+        )
 
     async def initialize(self):
         """Initialize the context manager and build the repo map."""
@@ -37,8 +43,13 @@ class ContextManager:
             self.repo_map.update()
             return
         self.project_root = new_root_path
-        self.project_memory = ProjectMemory(str(new_root_path))
-        self.repo_map = RepoMap(str(new_root_path))
+        self.state_dir = project_state_dir(new_root_path)
+        self.project_memory = ProjectMemory(
+            str(new_root_path), state_dir=self.state_dir
+        )
+        self.repo_map = RepoMap(
+            str(new_root_path), state_dir=self.state_dir
+        )
         self.repo_map.update()
         logger.info(f"ContextManager switched to project: {new_root}")
 

@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.paths import project_state_dir
+
 logger = logging.getLogger(__name__)
 
 MEMORY_FILES = {
@@ -26,9 +28,12 @@ class ProjectMemory:
     project-level knowledge accumulated across jobs.
     """
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str,
+                 state_dir: str | Path | None = None):
         self.project_root = Path(project_root).resolve()
-        self.ai_dir = self.project_root / ".ai"
+        self.ai_dir = Path(state_dir) if state_dir else project_state_dir(
+            self.project_root
+        )
         self.ai_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_defaults()
 
@@ -46,7 +51,10 @@ class ProjectMemory:
                     "known_issues": "# Known Issues\n\n",
                     "glossary": "# Glossary\n\n",
                 }
-                path.write_text(headers.get(name, ""))
+                try:
+                    path.write_text(headers.get(name, ""), encoding="utf-8")
+                except OSError as error:
+                    logger.warning("Could not initialize memory file %s: %s", path, error)
 
     def read_memory(self, name: str) -> str:
         """Read a memory file by name."""
@@ -57,7 +65,11 @@ class ProjectMemory:
         path = self.ai_dir / filename
         if not path.exists():
             return ""
-        return path.read_text()
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            logger.warning("Could not read memory file %s: %s", path, error)
+            return ""
 
     def write_memory(self, name: str, content: str):
         """Write content to a memory file."""
@@ -68,8 +80,14 @@ class ProjectMemory:
         path = self.ai_dir / filename
         header = f"# {name.replace('_', ' ').title()}\n\n"
         timestamp = f"\n\n---\n*Updated: {datetime.now().astimezone().isoformat()}*\n"
-        path.write_text(header + content.strip() + timestamp)
-        logger.info(f"Updated memory: {name}")
+        try:
+            path.write_text(
+                header + content.strip() + timestamp,
+                encoding="utf-8",
+            )
+            logger.info(f"Updated memory: {name}")
+        except OSError as error:
+            logger.warning("Could not write memory file %s: %s", path, error)
 
     def append_memory(self, name: str, entry: str):
         """Append an entry to a memory file."""

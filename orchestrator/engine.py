@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import run_process
 MAX_FLASH_RETRY = 2
 MAX_REPLAN_RETRY = 1
 MAX_REVIEW_REPAIR_ROUNDS = 2
@@ -2712,11 +2713,9 @@ class Engine:
     async def _check_file_changes(self, project_root: str,
                                   baseline_snapshot: dict | None = None) -> bool:
         """Check if any files have been modified/created in the working directory."""
-        import os, subprocess
-
         # Try git first
         try:
-            result = subprocess.run(
+            result = run_process(
                 ["git", "diff", "--name-only"],
                 capture_output=True, text=True, cwd=project_root,
                 timeout=5,
@@ -2727,7 +2726,7 @@ class Engine:
                     logger.info(f"File changes detected: {changed}")
                     return True
 
-            result2 = subprocess.run(
+            result2 = run_process(
                 ["git", "status", "--porcelain"],
                 capture_output=True, text=True, cwd=project_root,
                 timeout=5,

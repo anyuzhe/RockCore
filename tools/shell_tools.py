@@ -3,7 +3,16 @@
 import asyncio
 import logging
 import os
+import subprocess
+import sys
 from typing import Any
+
+from app.subprocess_utils import (
+    command_basename,
+    decode_process_output,
+    no_window_creation_flags,
+    utf8_environment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +47,7 @@ class ShellTools:
                 "stderr": "Command is empty",
                 "return_code": -1,
             }
-        base_cmd = command.split()[0] if command.split() else ""
+        base_cmd = command_basename(command)
         if base_cmd not in self.allowed_commands:
             return {
                 "error": f"Command not allowed: {base_cmd}",
@@ -49,11 +58,47 @@ class ShellTools:
             }
 
         try:
+            if sys.platform == "win32":
+                proc = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=self.project_root,
+                    env=utf8_environment(),
+                    creationflags=no_window_creation_flags(),
+                )
+                try:
+                    stdout, stderr = await asyncio.to_thread(
+                        proc.communicate, timeout=timeout
+                    )
+                except asyncio.CancelledError:
+                    proc.kill()
+                    await asyncio.to_thread(proc.communicate)
+                    raise
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    await asyncio.to_thread(proc.communicate)
+                    return {
+                        "error": f"Command timed out ({timeout}s)",
+                        "status": "timeout",
+                        "stdout": "",
+                        "stderr": "",
+                        "return_code": -1,
+                    }
+                return {
+                    "stdout": decode_process_output(stdout)[:max_output],
+                    "stderr": decode_process_output(stderr)[:max_output],
+                    "return_code": proc.returncode or 0,
+                    "status": "success" if proc.returncode == 0 else "failed",
+                }
+
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.project_root,
+                env=utf8_environment(),
             )
 
             try:
@@ -70,8 +115,8 @@ class ShellTools:
                     "return_code": -1,
                 }
 
-            stdout_str = stdout.decode("utf-8", errors="replace")[:max_output]
-            stderr_str = stderr.decode("utf-8", errors="replace")[:max_output]
+            stdout_str = decode_process_output(stdout)[:max_output]
+            stderr_str = decode_process_output(stderr)[:max_output]
 
             return {
                 "stdout": stdout_str,

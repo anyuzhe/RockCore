@@ -1,9 +1,10 @@
 """Git worktree management for parallel task execution."""
 
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any
+
+from app.subprocess_utils import run_process
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class WorktreeManager:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create branch first
-        result = subprocess.run(
+        result = run_process(
             ["git", "branch", branch, base],
             capture_output=True, text=True, cwd=self.repo_path,
         )
@@ -29,7 +30,7 @@ class WorktreeManager:
             logger.warning(f"Branch creation: {result.stderr}")
 
         # Create worktree
-        result = subprocess.run(
+        result = run_process(
             ["git", "worktree", "add", str(worktree_path), branch],
             capture_output=True, text=True, cwd=self.repo_path,
         )
@@ -44,11 +45,11 @@ class WorktreeManager:
         """Remove a worktree and its branch."""
         worktree_path = self.worktrees_dir / branch
 
-        subprocess.run(
+        run_process(
             ["git", "worktree", "remove", str(worktree_path)],
             capture_output=True, cwd=self.repo_path,
         )
-        result = subprocess.run(
+        result = run_process(
             ["git", "branch", "-D", branch],
             capture_output=True, text=True, cwd=self.repo_path,
         )
@@ -58,7 +59,7 @@ class WorktreeManager:
         }
 
     def list_worktrees(self) -> list[dict]:
-        result = subprocess.run(
+        result = run_process(
             ["git", "worktree", "list"],
             capture_output=True, text=True, cwd=self.repo_path,
         )

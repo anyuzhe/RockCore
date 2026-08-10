@@ -4,9 +4,12 @@ import ast
 import json
 import logging
 import re
+import tokenize
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from app.paths import project_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +45,35 @@ class RepoMap:
     The map is stored as .ai/repository_map.json and updated incrementally.
     """
 
-    def __init__(self, project_root: str):
+    def __init__(self, project_root: str,
+                 state_dir: str | Path | None = None):
         self.project_root = Path(project_root).resolve()
-        self.map_path = self.project_root / ".ai" / "repository_map.json"
+        self.state_dir = Path(state_dir) if state_dir else project_state_dir(
+            self.project_root
+        )
+        self.map_path = self.state_dir / "repository_map.json"
         self._map: dict[str, Any] = self._load()
 
     def _load(self) -> dict:
         if self.map_path.exists():
             try:
-                return json.loads(self.map_path.read_text())
+                return json.loads(self.map_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Failed to load repo map: {e}")
         return self._empty_map()
 
     def _save(self):
-        self.map_path.parent.mkdir(parents=True, exist_ok=True)
-        self.map_path.write_text(json.dumps(self._map, indent=2, default=str))
+        try:
+            self.map_path.parent.mkdir(parents=True, exist_ok=True)
+            self.map_path.write_text(
+                json.dumps(
+                    self._map, indent=2, ensure_ascii=False, default=str
+                ),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            # The in-memory map remains usable if a drive becomes read-only.
+            logger.warning("Failed to save repo map %s: %s", self.map_path, error)
 
     def _empty_map(self) -> dict:
         return {
@@ -90,7 +106,10 @@ class RepoMap:
             return symbols
 
         try:
-            tree = ast.parse(file_path.read_text())
+            # tokenize.open honors Python encoding declarations and handles
+            # non-ASCII Windows source paths/content correctly.
+            with tokenize.open(file_path) as source:
+                tree = ast.parse(source.read())
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     symbols.append({
@@ -106,7 +125,7 @@ class RepoMap:
                         "line": node.lineno,
                         "file": str(file_path.relative_to(self.project_root)),
                     })
-        except (SyntaxError, OSError) as e:
+        except (SyntaxError, UnicodeError, OSError) as e:
             logger.debug(f"Could not parse {file_path}: {e}")
 
         return symbols

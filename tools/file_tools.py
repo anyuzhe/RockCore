@@ -6,6 +6,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.text_utils import (
+    encode_text_compatible,
+    read_text_compatible,
+    write_text_compatible,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +80,7 @@ class FileTools:
         if size > max_size:
             return {"error": f"File too large ({size} bytes, max {max_size})"}
 
-        content = resolved.read_text(encoding="utf-8", errors="replace")
+        content, file_encoding = read_text_compatible(resolved)
         lines = content.split("\n")
         total_lines = len(lines)
 
@@ -91,6 +97,7 @@ class FileTools:
             "path": str(resolved.relative_to(self.project_root)),
             "size": size,
             "total_lines": total_lines,
+            "encoding": file_encoding,
         }
 
         # Add pagination metadata
@@ -297,16 +304,37 @@ class FileTools:
             "encrypted": encrypted,
         }
 
-    async def write_file(self, path: str, content: str, **kwargs) -> dict:
+    async def write_file(self, path: str, content: str,
+                         encoding: str = "preserve", **kwargs) -> dict:
         """Write content to a file (overwrite)."""
         resolved = self._resolve_path(path)
+        file_encoding = str(encoding or "preserve").lower()
+        if file_encoding == "preserve":
+            if resolved.is_file():
+                _, file_encoding = read_text_compatible(resolved)
+            else:
+                file_encoding = "utf-8"
+        try:
+            encoded = encode_text_compatible(content, file_encoding)
+        except (LookupError, UnicodeEncodeError) as error:
+            return {
+                "path": str(resolved.relative_to(self.project_root)),
+                "status": "encoding_error",
+                "error": (
+                    f"Content cannot be encoded as {file_encoding}: {error}. "
+                    "Retry write_file with encoding='utf-8' to explicitly "
+                    "convert the file."
+                ),
+                "encoding": file_encoding,
+            }
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
-        logger.info(f"[file_written] path={resolved} bytes={len(content)}")
+        resolved.write_bytes(encoded)
+        logger.info(f"[file_written] path={resolved} bytes={len(encoded)}")
         return {
             "path": str(resolved.relative_to(self.project_root)),
             "absolute_path": str(resolved),
-            "size": len(content),
+            "size": len(encoded),
+            "encoding": file_encoding,
             "status": "written",
         }
 
@@ -318,7 +346,7 @@ class FileTools:
         if not resolved.is_file():
             return {"error": f"Not a file: {path}", "matches": []}
 
-        content = resolved.read_text(encoding="utf-8", errors="replace")
+        content, file_encoding = read_text_compatible(resolved)
         lines = content.split("\n")
         matches = []
         text_lower = text.lower()
@@ -342,6 +370,7 @@ class FileTools:
             "matches": matches[:20],
             "count": len(matches),
             "total_lines": len(lines),
+            "encoding": file_encoding,
         }
 
     async def apply_patch(self, path: str, search: str, replace: str) -> dict:
@@ -351,7 +380,7 @@ class FileTools:
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed", "reason": "file_not_found"}
 
-        content = resolved.read_text(encoding="utf-8")
+        content, file_encoding = read_text_compatible(resolved)
         match_count = content.count(search)
 
         if match_count == 0:
@@ -373,13 +402,22 @@ class FileTools:
             }
 
         new_content = content.replace(search, replace, 1)
-        resolved.write_text(new_content, encoding="utf-8")
+        try:
+            write_text_compatible(resolved, new_content, file_encoding)
+        except (LookupError, UnicodeEncodeError, ValueError) as error:
+            return {
+                "path": str(resolved.relative_to(self.project_root)),
+                "status": "encoding_error",
+                "error": f"Patch cannot preserve {file_encoding}: {error}",
+                "encoding": file_encoding,
+            }
         old_lines = content.count("\n")
         new_lines = new_content.count("\n")
         return {
             "path": str(resolved.relative_to(self.project_root)),
             "status": "patched",
             "line_delta": new_lines - old_lines,
+            "encoding": file_encoding,
         }
 
     async def insert_before(self, path: str, anchor: str, content: str) -> dict:
@@ -388,7 +426,7 @@ class FileTools:
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed"}
 
-        text = resolved.read_text(encoding="utf-8")
+        text, file_encoding = read_text_compatible(resolved)
         match_count = text.count(anchor)
 
         if match_count == 0:
@@ -410,11 +448,20 @@ class FileTools:
 
         idx = text.index(anchor)
         new_text = text[:idx] + content + text[idx:]
-        resolved.write_text(new_text, encoding="utf-8")
+        try:
+            write_text_compatible(resolved, new_text, file_encoding)
+        except (LookupError, UnicodeEncodeError, ValueError) as error:
+            return {
+                "path": str(resolved.relative_to(self.project_root)),
+                "status": "encoding_error",
+                "error": f"Insert cannot preserve {file_encoding}: {error}",
+                "encoding": file_encoding,
+            }
         return {
             "path": str(resolved.relative_to(self.project_root)),
             "status": "inserted",
             "position": idx,
+            "encoding": file_encoding,
         }
 
     async def insert_after(self, path: str, anchor: str, content: str) -> dict:
@@ -423,7 +470,7 @@ class FileTools:
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed"}
 
-        text = resolved.read_text(encoding="utf-8")
+        text, file_encoding = read_text_compatible(resolved)
         match_count = text.count(anchor)
 
         if match_count == 0:
@@ -445,9 +492,18 @@ class FileTools:
 
         idx = text.index(anchor) + len(anchor)
         new_text = text[:idx] + content + text[idx:]
-        resolved.write_text(new_text, encoding="utf-8")
+        try:
+            write_text_compatible(resolved, new_text, file_encoding)
+        except (LookupError, UnicodeEncodeError, ValueError) as error:
+            return {
+                "path": str(resolved.relative_to(self.project_root)),
+                "status": "encoding_error",
+                "error": f"Insert cannot preserve {file_encoding}: {error}",
+                "encoding": file_encoding,
+            }
         return {
             "path": str(resolved.relative_to(self.project_root)),
             "status": "inserted",
             "position": idx,
+            "encoding": file_encoding,
         }

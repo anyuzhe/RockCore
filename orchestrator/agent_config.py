@@ -220,7 +220,7 @@ def load_project_config(project_root: str) -> ProjectAgentConfig:
     config_path = Path(project_root) / ".ai" / "agents.json"
     if config_path.exists():
         try:
-            data = json.loads(config_path.read_text())
+            data = json.loads(config_path.read_text(encoding="utf-8-sig"))
             mode = data.get("mode", "auto")
             # If mode is a preset name and no custom overrides, return the preset
             if mode == "fast" and "worker" not in data:
@@ -243,7 +243,7 @@ def load_project_config(project_root: str) -> ProjectAgentConfig:
                 config.reviewer.enabled = True
                 config.emergency_coder.enabled = True
             return config
-        except (json.JSONDecodeError, TypeError) as e:
+        except (json.JSONDecodeError, OSError, UnicodeError, TypeError) as e:
             logger.warning(f"Failed to load {config_path}: {e}")
     return ProjectAgentConfig()  # default: auto mode
 
@@ -253,5 +253,8 @@ def save_project_config(project_root: str, config: ProjectAgentConfig):
     config_dir = Path(project_root) / ".ai"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "agents.json"
-    config_path.write_text(json.dumps(config.to_dict(), indent=2, ensure_ascii=False))
+    config_path.write_text(
+        json.dumps(config.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     logger.info(f"Project config saved: {config_path}")

@@ -18,7 +18,11 @@ sys.path.insert(0, str(project_root))
 from qasync import QApplication
 
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, icon_path
-from app.paths import default_workspace_dir
+from app.paths import (
+    app_data_dir,
+    application_dir,
+    resolve_working_dir,
+)
 from app.runtime import configure_runtime_logging, configure_windows_identity
 
 logging.basicConfig(
@@ -43,10 +47,20 @@ async def main():
     from agents.worker import WorkerAgent
     from agents.reviewer import ReviewerAgent
     from agents.emergency_coder import EmergencyCoderAgent
-    from app.ui.settings_dialog import load_config
+    from app.ui.settings_dialog import load_config, save_config
     from memory.context_manager import ContextManager
 
     config = load_config()
+    working_path = resolve_working_dir(
+        config.get("working_dir"),
+        install_dir=application_dir() if getattr(sys, "frozen", False) else None,
+    )
+    working_dir = str(working_path)
+    if config.get("working_dir") != working_dir:
+        # Migrate stale values such as C:\Program Files\...\RockCore from
+        # pre-packaging builds before any context component writes `.ai`.
+        config["working_dir"] = working_dir
+        save_config(config)
 
     # ── Initialize V6 engines ──
     risk_engine = RiskEngine()
@@ -72,7 +86,6 @@ async def main():
     await engine.start()
 
     # ── Initialize context manager (V5) ──
-    working_dir = config.get("working_dir", str(default_workspace_dir()))
     context_manager = ContextManager(working_dir)
     await context_manager.initialize()
 
@@ -117,7 +130,7 @@ async def main():
 
     # ── Register agents ──
     tool_broker = ToolBroker(
-        project_root=config.get("working_dir", project_root),
+        project_root=working_dir,
         policy_engine=engine.policy_engine,
     )
     engine.tool_broker = tool_broker
@@ -129,6 +142,11 @@ async def main():
     engine.register_agent("emergency_coder", EmergencyCoderAgent(engine.model_router, tool_broker))
 
     logger.info("V5 agents registered: Codex(Governor/Reviewer/Emergency) + Kimi(Planner) + DeepSeek(Worker) + Memory")
+
+    if "--startup-smoke-test" in sys.argv:
+        logger.info("Packaged startup smoke test passed")
+        await engine.stop()
+        return
 
     # ── Start PyQt application ──
     # qasync.run() already created the QApplication, get the existing instance
@@ -316,4 +334,21 @@ async def main():
 
 if __name__ == "__main__":
     import qasync
-    qasync.run(main())
+    try:
+        qasync.run(main())
+    except Exception as error:
+        logger.exception("RockCore startup failed")
+        try:
+            from PyQt6.QtWidgets import QApplication as QtApplication, QMessageBox
+
+            app = QtApplication.instance() or QtApplication(sys.argv)
+            log_path = app_data_dir() / "rockcore.log"
+            QMessageBox.critical(
+                None,
+                "RockCore 启动失败",
+                "RockCore 无法完成启动。程序不会向安装目录写入数据。\n\n"
+                f"原因：{error}\n\n详细日志：{log_path}",
+            )
+        except Exception:
+            pass
+        raise SystemExit(1)

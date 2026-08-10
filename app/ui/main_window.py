@@ -18,6 +18,7 @@ from .task_panel import TaskPanel
 from .settings_dialog import SettingsDialog, load_config
 from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
+from app.subprocess_utils import run_process
 
 logger = logging.getLogger(__name__)
 
@@ -822,7 +823,6 @@ class MainWindow(QMainWindow):
         """Show the latest task's actual changes, including committed changes."""
         if not self._current_project:
             return
-        import subprocess
         try:
             changes = (task_result or {}).get("changes", {})
             changed_files = changes.get("changed", []) if isinstance(changes, dict) else []
@@ -832,13 +832,13 @@ class MainWindow(QMainWindow):
                 lines.extend(f"  {path}" for path in changed_files)
                 lines.append("")
             root = self._current_project.get("root_path", ".")
-            result = subprocess.run(
+            result = run_process(
                 ["git", "rev-parse", "--is-inside-work-tree"],
                 capture_output=True, text=True,
                 cwd=root,
             )
             if result.returncode == 0:
-                commit_result = subprocess.run(
+                commit_result = run_process(
                     [
                         "git", "log", "--reverse", "--format=%H",
                         "--fixed-strings", f"--grep=AI {self._selected_job_id}:",
@@ -848,14 +848,14 @@ class MainWindow(QMainWindow):
                 commits = [value for value in commit_result.stdout.splitlines() if value]
                 if commits:
                     for commit in commits:
-                        show_result = subprocess.run(
+                        show_result = run_process(
                             ["git", "show", "--format=medium", "--stat", "--patch", commit],
                             capture_output=True, text=True, cwd=root,
                         )
                         if show_result.stdout.strip():
                             lines.append(show_result.stdout.strip())
                 elif task_result:
-                    diff_result = subprocess.run(
+                    diff_result = run_process(
                         ["git", "show", "--format=medium", "--stat", "--patch", "HEAD"],
                         capture_output=True, text=True, cwd=root,
                     )

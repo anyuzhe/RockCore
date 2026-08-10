@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import run_process
+
 logger = logging.getLogger(__name__)
 
 
@@ -15,7 +17,7 @@ class Repository:
         self.root_path = Path(root_path).resolve()
 
     def _run(self, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        return run_process(
             ["git"] + list(args),
             capture_output=True, text=True, cwd=self.root_path,
         )

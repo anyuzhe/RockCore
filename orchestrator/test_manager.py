@@ -6,7 +6,6 @@ import fnmatch
 import hashlib
 import ast
 import json
-import shlex
 import subprocess
 import sys
 import time
@@ -14,6 +13,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import command_basename, quote_command_arg, run_process
+from app.text_utils import read_text_compatible
 from .event_bus import EventBus
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class TestManager:
     @staticmethod
     def is_git_repo(root: str | Path) -> bool:
         try:
-            result = subprocess.run(
+            result = run_process(
                 ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, timeout=5,
             )
@@ -88,11 +89,7 @@ class TestManager:
 
     @staticmethod
     def _uses_git(command: str) -> bool:
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            tokens = command.split()
-        return "git" in [Path(token).name for token in tokens]
+        return command_basename(command) == "git"
 
     @staticmethod
     def is_test_authoring_task(task: Any) -> bool:
@@ -147,7 +144,7 @@ class TestManager:
             or (root_path / "tests").is_dir()
             or list(root_path.glob("test_*.py"))
         ):
-            return f"{shlex.quote(sys.executable)} -m pytest -q"
+            return f"{quote_command_arg(sys.executable)} -m pytest -q"
         if (root_path / "Cargo.toml").is_file():
             return "cargo test"
         if (root_path / "go.mod").is_file():
@@ -159,7 +156,7 @@ class TestManager:
         """Check if a string looks like an actual shell command, not natural language."""
         if not cmd or not cmd.strip():
             return False
-        base = cmd.strip().split()[0].split("/")[-1]
+        base = command_basename(cmd)
         return base in VALID_TEST_COMMANDS
 
     async def run_tests(self, task: Any, repos: dict,
@@ -198,7 +195,7 @@ class TestManager:
 
         start = time.time()
         try:
-            proc = subprocess.run(
+            proc = run_process(
                 command, shell=True, capture_output=True,
                 text=True, timeout=self.DEFAULT_TIMEOUT, cwd=cwd,
             )
@@ -333,7 +330,7 @@ class TestManager:
                 test_command = self.discover_test_command(root)
             if test_command:
                 try:
-                    proc = subprocess.run(
+                    proc = run_process(
                         test_command, shell=True, capture_output=True, text=True,
                         timeout=self.DEFAULT_TIMEOUT, cwd=str(root),
                     )
@@ -378,13 +375,13 @@ class TestManager:
             return cls._validate_html(path)
         issues = []
         try:
-            content = path.read_text(encoding="utf-8")
+            content, _ = read_text_compatible(path)
             if suffix == ".json":
                 json.loads(content)
             elif suffix == ".py":
                 ast.parse(content, filename=str(path))
             elif suffix in {".js", ".mjs", ".cjs"}:
-                proc = subprocess.run(
+                proc = run_process(
                     ["node", "--check", str(path)], capture_output=True,
                     text=True, timeout=15,
                 )
@@ -417,7 +414,7 @@ class TestManager:
 
         issues = []
         try:
-            content = path.read_text(encoding="utf-8")
+            content, _ = read_text_compatible(path)
             parser = StructureParser()
             parser.feed(content)
             parser.close()

@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import run_process
 from tools.git_tools import GitTools
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,7 @@ class MergeManager:
         self.worktrees_base.mkdir(parents=True, exist_ok=True)
         self.git_tools = GitTools(str(self.project_root))
         try:
-            import subprocess
-            current = subprocess.run(
+            current = run_process(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True, text=True, cwd=self.project_root,
             )
@@ -68,14 +68,12 @@ class MergeManager:
         branch = wt_info["branch"]
 
         try:
-            import subprocess
-
             # Stage and commit in worktree
-            subprocess.run(
+            run_process(
                 ["git", "add", "-A"],
                 capture_output=True, text=True, cwd=wt_path,
             )
-            commit_result = subprocess.run(
+            commit_result = run_process(
                 ["git", "commit", "-m", commit_message],
                 capture_output=True, text=True, cwd=wt_path,
             )
@@ -123,8 +121,7 @@ class MergeManager:
 
         try:
             # Abort any in-progress merge
-            import subprocess
-            subprocess.run(
+            run_process(
                 ["git", "merge", "--abort"],
                 capture_output=True, text=True, cwd=self.project_root,
             )

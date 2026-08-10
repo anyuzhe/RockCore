@@ -5,10 +5,11 @@ import json
 import logging
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.subprocess_utils import run_process
+from app.text_utils import read_text_compatible
 from orchestrator.model_router import ModelRouter
 from orchestrator.cost_engine import BudgetExceededError
 
@@ -171,7 +172,7 @@ Output ONLY valid JSON."""
         """Collect the final net patch for this job, with worktree diff fallback."""
 
         try:
-            commit_result = subprocess.run(
+            commit_result = run_process(
                 [
                     "git", "log", "--reverse", "--format=%H", "--fixed-strings",
                     f"--grep=AI {job_id}:",
@@ -180,18 +181,18 @@ Output ONLY valid JSON."""
             )
             commits = [line.strip() for line in commit_result.stdout.splitlines() if line.strip()]
             if commit_result.returncode == 0 and commits:
-                first_parent = subprocess.run(
+                first_parent = run_process(
                     ["git", "rev-parse", f"{commits[0]}^"],
                     capture_output=True, text=True, cwd=project_root, timeout=10,
                 )
                 if first_parent.returncode == 0:
                     base = first_parent.stdout.strip()
                     target = commits[-1]
-                    diff_result = subprocess.run(
+                    diff_result = run_process(
                         ["git", "diff", "--stat", "--patch", base, target, "--"],
                         capture_output=True, text=True, cwd=project_root, timeout=10,
                     )
-                    names_result = subprocess.run(
+                    names_result = run_process(
                         ["git", "diff", "--name-only", base, target, "--"],
                         capture_output=True, text=True, cwd=project_root, timeout=10,
                     )
@@ -202,11 +203,11 @@ Output ONLY valid JSON."""
                     ]
                     return diff_result.stdout or "(no changes)", changed_files
 
-                show = subprocess.run(
+                show = run_process(
                     ["git", "show", "--format=", "--stat", "--patch", commits[-1]],
                     capture_output=True, text=True, cwd=project_root, timeout=10,
                 )
-                names = subprocess.run(
+                names = run_process(
                     ["git", "show", "--format=", "--name-only", commits[-1]],
                     capture_output=True, text=True, cwd=project_root, timeout=10,
                 )
@@ -215,11 +216,11 @@ Output ONLY valid JSON."""
                 ]
                 return show.stdout or "(no changes)", changed_files
 
-            diff_result = subprocess.run(
+            diff_result = run_process(
                 ["git", "diff"], capture_output=True, text=True,
                 cwd=project_root, timeout=10,
             )
-            names_result = subprocess.run(
+            names_result = run_process(
                 ["git", "diff", "--name-only"], capture_output=True, text=True,
                 cwd=project_root, timeout=10,
             )
@@ -294,13 +295,15 @@ Output ONLY valid JSON."""
             try:
                 suffix = path.suffix.lower()
                 if suffix == ".json":
-                    json.loads(path.read_text(encoding="utf-8"))
+                    source, _ = read_text_compatible(path)
+                    json.loads(source)
                     results.append(f"- {relative}: JSON syntax OK")
                 elif suffix == ".py":
-                    ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+                    source, _ = read_text_compatible(path)
+                    ast.parse(source, filename=relative)
                     results.append(f"- {relative}: Python syntax OK")
                 elif suffix in {".js", ".mjs", ".cjs"} and node:
-                    source = path.read_text(encoding="utf-8")
+                    source, _ = read_text_compatible(path)
                     command = [node, "--check"]
                     check_input = None
                     if suffix != ".cjs":
@@ -310,7 +313,7 @@ Output ONLY valid JSON."""
                         check_input = source
                     else:
                         command.append(str(path))
-                    checked = subprocess.run(
+                    checked = run_process(
                         command, input=check_input, capture_output=True,
                         text=True, timeout=15,
                     )

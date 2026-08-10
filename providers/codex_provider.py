@@ -6,15 +6,25 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from urllib.request import getproxies
 
+from app.paths import application_dir, resolve_working_dir
+from app.subprocess_utils import (
+    decode_process_output,
+    no_window_creation_flags,
+    run_process,
+    utf8_environment,
+)
 from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
-CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+CODEX_HOME = Path(os.path.expandvars(os.fspath(
+    os.environ.get("CODEX_HOME", Path.home() / ".codex")
+))).expanduser()
 AUTH_PATH = CODEX_HOME / "auth.json"
 CONFIG_PATH = CODEX_HOME / "config.toml"
 REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
@@ -96,20 +106,73 @@ def _load_codex_token(auth_path: Path | None = None,
 
 
 def _find_codex_binary(environ: dict | None = None) -> str:
-    """Find the CLI even when a macOS app launch did not inherit shell PATH."""
+    """Find Codex even when a desktop launch did not inherit the shell PATH."""
     environment = os.environ if environ is None else environ
     configured = environment.get("CODEX_BINARY", "")
     candidates = [
         configured,
         shutil.which("codex", path=environment.get("PATH")),
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-        "/opt/homebrew/bin/codex",
-        "/usr/local/bin/codex",
     ]
+    windows_environment = sys.platform == "win32" or any(
+        environment.get(name) for name in ("APPDATA", "LOCALAPPDATA")
+    )
+    if windows_environment:
+        appdata = environment.get("APPDATA", "")
+        localappdata = environment.get("LOCALAPPDATA", "")
+        userprofile = environment.get("USERPROFILE", "")
+        candidates.extend([
+            str(Path(appdata) / "npm" / "codex.cmd") if appdata else "",
+            str(Path(appdata) / "npm" / "codex.exe") if appdata else "",
+            str(Path(localappdata) / "Programs" / "ChatGPT" / "resources" / "codex.exe")
+            if localappdata else "",
+            str(Path(localappdata) / "Microsoft" / "WindowsApps" / "codex.exe")
+            if localappdata else "",
+            str(Path(userprofile) / ".local" / "bin" / "codex.exe")
+            if userprofile else "",
+        ])
+    else:
+        candidates.extend([
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+        ])
     for candidate in candidates:
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.is_file():
+            continue
+        if sys.platform == "win32" or path.suffix.lower() in {
+            ".exe", ".cmd", ".bat", ".ps1",
+        } or os.access(path, os.X_OK):
+            return str(path)
     return ""
+
+
+def _prepare_codex_command(binary: str, arguments: list[str],
+                           environ: dict | None = None,
+                           platform: str | None = None) -> list[str]:
+    """Wrap npm ``.cmd``/PowerShell launchers correctly on Windows."""
+    platform_name = sys.platform if platform is None else platform
+    if platform_name != "win32":
+        return [binary, *arguments]
+    environment = os.environ if environ is None else environ
+    suffix = Path(binary).suffix.lower()
+    if suffix in {".cmd", ".bat"}:
+        comspec = environment.get("COMSPEC") or "cmd.exe"
+        invocation = subprocess.list2cmdline([binary, *arguments])
+        return [comspec, "/d", "/s", "/c", invocation]
+    if suffix == ".ps1":
+        powershell = (
+            shutil.which("pwsh", path=environment.get("PATH"))
+            or shutil.which("powershell.exe", path=environment.get("PATH"))
+            or "powershell.exe"
+        )
+        return [
+            powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", binary, *arguments,
+        ]
+    return [binary, *arguments]
 
 
 def _detect_chatgpt_login(
@@ -118,17 +181,21 @@ def _detect_chatgpt_login(
     runner: Callable[..., Any] | None = None,
 ) -> tuple[bool, str, str]:
     """Ask Codex which login mode is active without reading or exposing tokens."""
+    environment = os.environ if environ is None else environ
     binary = _find_codex_binary(environ)
     if not binary:
         return False, "codex CLI unavailable", ""
 
-    run = runner or subprocess.run
+    run = runner or run_process
     try:
+        command = _prepare_codex_command(
+            binary, ["login", "status"], environ=environment
+        )
         result = run(
-            [binary, "login", "status"],
+            command,
             capture_output=True,
-            text=True,
             timeout=5,
+            creationflags=no_window_creation_flags(),
         )
         output = f"{getattr(result, 'stdout', '')}\n{getattr(result, 'stderr', '')}".strip()
         normalized = output.lower()
@@ -223,6 +290,9 @@ class CodexProvider(BaseProvider):
         self.chatgpt_authenticated = logged_in
         self.chatgpt_source = login_source
         self.codex_binary = binary
+        self._process_environment = utf8_environment(
+            None if environ is None else environ
+        )
         if self.api_key:
             self.authentication_mode = "platform_api"
             self.auth_source = self.platform_api_source
@@ -240,6 +310,7 @@ class CodexProvider(BaseProvider):
         self.proxy, self.proxy_source = _detect_proxy(environ)
         self.max_retries = int(self.config.get("max_retries", 5))
         self.timeout = float(self.config.get("timeout", 60))
+        self.cli_timeout = float(self.config.get("cli_timeout", 600))
         self._clients: dict[str, Any] = {}
 
     @property
@@ -377,8 +448,7 @@ class CodexProvider(BaseProvider):
         model: str = "",
         reasoning_effort: str = "",
     ) -> tuple[str, str, int]:
-        command = [
-            self.codex_binary,
+        arguments = [
             "exec",
             "--json",
             "--ephemeral",
@@ -388,18 +458,61 @@ class CodexProvider(BaseProvider):
             "-C", cwd,
         ]
         if model and model != "codex-sdk":
-            command.extend(["--model", model])
+            arguments.extend(["--model", model])
         effort = self._reasoning_effort(reasoning_effort)
         if effort:
-            command.extend([
+            arguments.extend([
                 "--config", f'model_reasoning_effort="{effort}"',
             ])
-        command.append("-")
+        arguments.append("-")
+        command = _prepare_codex_command(
+            self.codex_binary,
+            arguments,
+            environ=self._process_environment,
+        )
+
+        # qasync uses a selector loop on Windows, whose asyncio subprocess
+        # methods are unsupported. Popen + to_thread keeps the GUI responsive
+        # while retaining cancellation and timeout cleanup.
+        if sys.platform == "win32":
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                env=self._process_environment,
+                creationflags=no_window_creation_flags(),
+            )
+            try:
+                stdout, stderr = await asyncio.to_thread(
+                    process.communicate,
+                    prompt.encode("utf-8"),
+                    timeout=self.cli_timeout,
+                )
+            except asyncio.CancelledError:
+                process.kill()
+                await asyncio.to_thread(process.communicate)
+                raise
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                await asyncio.to_thread(process.communicate)
+                raise RuntimeError(
+                    f"Codex CLI 执行超时（{self.cli_timeout:g} 秒）"
+                ) from error
+            return (
+                decode_process_output(stdout),
+                decode_process_output(stderr),
+                int(process.returncode or 0),
+            )
+
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=self._process_environment,
         )
         try:
             stdout, stderr = await process.communicate(prompt.encode("utf-8"))
@@ -411,8 +524,8 @@ class CodexProvider(BaseProvider):
                 process.kill()
                 await process.wait()
             raise
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
+        stdout_text = decode_process_output(stdout)
+        stderr_text = decode_process_output(stderr)
         return stdout_text, stderr_text, process.returncode
 
     @staticmethod
@@ -424,7 +537,13 @@ class CodexProvider(BaseProvider):
             project = getattr(job, "project", None) if job else None
             project_root = getattr(project, "root_path", "") if project else ""
         path = Path(project_root or os.getcwd()).expanduser()
-        return str(path if path.is_dir() else Path.cwd())
+        configured = path if path.is_dir() else None
+        return str(resolve_working_dir(
+            configured,
+            install_dir=(
+                application_dir() if getattr(sys, "frozen", False) else None
+            ),
+        ))
 
     async def _chat_via_codex_exec(
         self, system_prompt: str, messages: list[dict], **kwargs

@@ -135,12 +135,23 @@ class ToolBroker:
                 "type": "function",
                 "function": {
                     "name": "write_file",
-                    "description": "Write content to a file (creates dirs if needed)",
+                    "description": (
+                        "Write content to a file (creates dirs if needed). "
+                        "Existing files keep their detected encoding by default."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "File path relative to project root"},
                             "content": {"type": "string", "description": "File content"},
+                            "encoding": {
+                                "type": "string",
+                                "enum": ["preserve", "utf-8", "utf-8-sig", "utf-16", "gb18030", "gbk", "cp936", "cp1252"],
+                                "description": (
+                                    "Text encoding. Use preserve (default) for existing files; "
+                                    "select utf-8 only when an encoding conversion is intended."
+                                ),
+                            },
                         },
                         "required": ["path", "content"],
                     },

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.branding import COMPANY_NAME, PRODUCT_NAME, logo_path
+from app.paths import is_usable_project_dir
 from app.ui.time_utils import format_local_timestamp
 
 
@@ -292,6 +293,14 @@ class ProjectPanel(QWidget):
             return
         if not Path(data["root_path"]).is_dir():
             QMessageBox.warning(self, "目录不可用", "项目目录不存在或不是文件夹。")
+            return
+        if not is_usable_project_dir(data["root_path"]):
+            QMessageBox.warning(
+                self,
+                "目录不可写",
+                "RockCore 需要修改项目文件并保存项目状态。请选择当前用户可写的"
+                "项目目录，不要选择 Program Files 或 RockCore 安装目录。",
+            )
             return
         self.project_selected.emit({"action": "create", **data})
 
