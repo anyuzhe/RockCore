@@ -2,6 +2,7 @@
 
 import fnmatch
 import logging
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -121,10 +122,23 @@ class PolicyEngine:
 
         for task in plan.get("tasks", []):
             for path in task.get("allowed_paths", []):
+                normalized = str(path or "").replace("\\", "/")
+                if Path(normalized).is_absolute():
+                    errors.append(
+                        f"Task {task.get('id')}: allowed_path must be relative: "
+                        f"'{normalized}'"
+                    )
+                    continue
+                if ".." in normalized.split("/"):
+                    errors.append(
+                        f"Task {task.get('id')}: allowed_path contains traversal: "
+                        f"'{normalized}'"
+                    )
+                    continue
                 for pp in protected:
-                    if fnmatch.fnmatch(path, pp):
+                    if fnmatch.fnmatch(normalized, pp):
                         errors.append(
-                            f"Task {task.get('id')}: allowed_path '{path}' "
+                            f"Task {task.get('id')}: allowed_path '{normalized}' "
                             f"intersects protected_path '{pp}'"
                         )
         return errors

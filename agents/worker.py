@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
 REPORT_TASK_TYPES = {"analysis", "review", "testing"}
+ALREADY_SATISFIED_MARKER = "[ALREADY_SATISFIED]"
+STATE_VERIFICATION_TOOLS = {
+    "read_file", "search_in_file", "search_code", "git_diff",
+}
 # Some review-oriented coding tasks intentionally edit files only when a defect
 # is found. Keep this narrow so a worker that forgot to edit a normal coding
 # task is still caught as a failure.
@@ -26,14 +30,16 @@ EXPLORATION_TOOLS = {
     "list_files", "read_file", "search_in_file", "search_code",
     "git_status", "git_diff", "read_log",
 }
+MAX_CONVERSATION_CHARS = 14_000
 
 WORKER_SYSTEM_PROMPT = """You are a code executor, not an investigator.
 
 Your ONLY job is to execute the given task using the available tools.
 
 CRITICAL RULES:
-1. You are working in a USER project, NOT in the AI Engineering Studio codebase.
-2. Do NOT explore or investigate any "studio" code, databases, or configs.
+1. The selected project is authoritative. It may itself be RockCore; stay within
+   the task's allowed paths and do not access unrelated user or system files.
+2. Inspect only the code and configuration needed for the current task.
 3. Use ONLY relative paths like "index.html", "src/main.py", etc.
 4. For analysis/review tasks: inspect the project and return a concrete report. Do not
    create or modify files unless the task explicitly requests a report artifact.
@@ -44,6 +50,9 @@ CRITICAL RULES:
 9. NEVER use absolute paths. NEVER access ~/.ai_engineering_studio or similar.
 10. For coding tasks, it is better to make changes and hit the turn limit than
     to keep reading and never edit.
+11. If a coding task's requested state is already present before your first edit,
+    inspect the relevant code and verify it. Then return [ALREADY_SATISFIED]
+    followed by concrete evidence. Do not make a meaningless rewrite.
 
 Available tools:
 - list_files: List files in the project directory
@@ -91,6 +100,7 @@ class WorkerAgent:
 
     async def run(self, task, project=None, project_root: str | None = None,
                   provider_override: str | None = None,
+                  model_override: str | None = None,
                   recovery_context: str = "") -> dict:
         """Execute a single task using the tool-calling loop."""
         logger.info(f"Worker: executing task {task.task_id}: {task.title}")
@@ -107,20 +117,15 @@ class WorkerAgent:
             except Exception as e:
                 logger.warning(f"Context manager failed: {e}")
 
-        system_prompt = WORKER_SYSTEM_PROMPT + f"""
-\n\n## Current Task: {task.task_id}
-Title: {task.title}
-Description: {task.description}
-Type: {task.task_type}
-Allowed Paths: {task.allowed_paths or 'all'}
-Acceptance Command: {task.acceptance_command or 'none'}
-Project Root: {project_root}
-{task_memory_context}"""
+        system_prompt = WORKER_SYSTEM_PROMPT
 
         task_context = f"""
 Task: {task.task_id} - {task.title}
 Description: {task.description}
 Type: {task.task_type}
+Allowed Paths: {task.allowed_paths or 'all'}
+Acceptance Command: {task.acceptance_command or 'none'}
+{task_memory_context[:4000]}
 """
 
         if task.task_type in {"analysis", "review"}:
@@ -155,6 +160,7 @@ Type: {task.task_type}
         premature_completion_count = 0
         empty_report_count = 0
         force_tool_call = False
+        verified_existing_state = False
         allow_no_change = self._allows_no_change(task)
         progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
         finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
@@ -185,19 +191,24 @@ Type: {task.task_type}
                     })
                     progress_warning_sent = True
 
+                messages = self._compact_messages(messages)
+                model_kwargs = (
+                    {"model": model_override} if model_override else {}
+                )
                 response = await self.model_router.chat_with_tools(
                     self.agent_type,
                     system_prompt,
                     messages,
-                    tools=self.tool_broker.get_tool_definitions(),
+                    tools=self._tool_definitions(task),
                     provider_override=provider_override,
                     task=task,
-                    max_tokens=8192,
+                    max_tokens=4096,
                     tool_choice=(
                         "required"
                         if task.task_type == "coding" and force_tool_call and not has_written
                         else "auto"
                     ),
+                    **model_kwargs,
                 )
 
                 if not isinstance(response, dict):
@@ -253,6 +264,19 @@ Type: {task.task_type}
 
                 if not tool_calls:
                     if task.task_type == "coding" and not has_written:
+                        already_satisfied = (
+                            ALREADY_SATISFIED_MARKER in (content or "")
+                            and verified_existing_state
+                        )
+                        if already_satisfied:
+                            final_content = content.replace(
+                                ALREADY_SATISFIED_MARKER, ""
+                            ).strip()
+                            no_changes_declared = True
+                            messages.append({
+                                "role": "assistant", "content": final_content,
+                            })
+                            break
                         if allow_no_change and (content or "").strip():
                             logger.info(
                                 "Worker: task %s completed without changes "
@@ -284,7 +308,9 @@ Type: {task.task_type}
                             "role": "user",
                             "content": (
                                 "This is a coding task and no editing tool has been "
-                                "used. The task is not complete. Use write_file, "
+                                "used. If you verified that the requested state is "
+                                "already present, return [ALREADY_SATISFIED] with "
+                                "concrete evidence. Otherwise use write_file, "
                                 "apply_patch, insert_before, or insert_after now."
                             ),
                         })
@@ -406,6 +432,28 @@ Type: {task.task_type}
                                     "expected a JSON object"
                                 ),
                             }
+                        if (
+                            task.task_type == "coding"
+                            and func_name in WRITE_TOOLS
+                            and result.get("status") == "rejected"
+                            and (
+                                "[allowed_path]" in str(result.get("error", ""))
+                                or "path not in allowed set" in str(
+                                    result.get("error", "")
+                                ).lower()
+                            )
+                        ):
+                            tool_calls_made.append({
+                                "tool": func_name,
+                                "args": args,
+                                "result_status": "rejected",
+                            })
+                            return self._failure(
+                                str(result.get("error") or "Path not in allowed set"),
+                                tool_calls_made,
+                                total_input,
+                                total_output,
+                            )
                         if func_name in EXPLORATION_TOOLS:
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
@@ -416,6 +464,12 @@ Type: {task.task_type}
                         ):
                             has_written = True
                             force_tool_call = False
+                        if (
+                            func_name in STATE_VERIFICATION_TOOLS
+                            and result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
+                            verified_existing_state = True
                     tool_calls_made.append({
                         "tool": func_name,
                         "args": args,
@@ -423,7 +477,7 @@ Type: {task.task_type}
                     })
 
                     # Format result for the model
-                    result_str = json.dumps(result, ensure_ascii=False, default=str)[:3000]
+                    result_str = json.dumps(result, ensure_ascii=False, default=str)[:1800]
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -479,6 +533,109 @@ Type: {task.task_type}
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
             }
+
+    @staticmethod
+    def _compact_messages(messages: list[dict],
+                          max_chars: int = MAX_CONVERSATION_CHARS) -> list[dict]:
+        """Bound cumulative prompt growth while preserving tool-call pairs."""
+        def size(message: dict) -> int:
+            return len(json.dumps(message, ensure_ascii=False, default=str))
+
+        def trim_text(value: str, limit: int) -> str:
+            if len(value) <= limit:
+                return value
+            side = max(1, (limit - 80) // 2)
+            return (
+                value[:side]
+                + "\n...[compacted; re-read workspace for full content]...\n"
+                + value[-side:]
+            )
+
+        def compact_history_message(message: dict) -> dict:
+            # Round-trip to avoid mutating the caller's conversation objects.
+            compacted = json.loads(json.dumps(
+                message, ensure_ascii=False, default=str
+            ))
+            content = compacted.get("content")
+            if isinstance(content, str):
+                compacted["content"] = trim_text(content, 3_500)
+            for tool_call in compacted.get("tool_calls") or []:
+                function = tool_call.get("function") or {}
+                arguments = function.get("arguments")
+                if isinstance(arguments, str) and len(arguments) > 1_200:
+                    function["arguments"] = json.dumps({
+                        "note": "historical tool arguments compacted",
+                    })
+            return compacted
+
+        if sum(size(message) for message in messages) <= max_chars:
+            return messages
+        if len(messages) <= 2:
+            return messages
+
+        head = compact_history_message(messages[0])
+        head_content = head.get("content")
+        if isinstance(head_content, str):
+            head["content"] = trim_text(
+                head_content, max(256, max_chars // 2)
+            )
+        groups: list[list[dict]] = []
+        index = 1
+        while index < len(messages):
+            message = compact_history_message(messages[index])
+            group = [message]
+            index += 1
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                while index < len(messages) and messages[index].get("role") == "tool":
+                    group.append(compact_history_message(messages[index]))
+                    index += 1
+            groups.append(group)
+
+        note = {
+            "role": "user",
+            "content": (
+                "Earlier tool exchanges were compacted to keep this task within "
+                "its context budget. Keep using the established findings and "
+                "current workspace state; do not restart broad exploration."
+            ),
+        }
+        remaining = max_chars - size(head) - size(note)
+        selected: list[list[dict]] = []
+        used = 0
+        for group in reversed(groups):
+            group_size = sum(size(message) for message in group)
+            if group_size > remaining:
+                # Never send an oversized or half-paired tool exchange. The
+                # compaction note tells the model to re-read authoritative
+                # workspace state when the latest tool output was enormous.
+                break
+            selected.append(group)
+            used += group_size
+            if used >= remaining:
+                break
+        selected.reverse()
+        compacted = [head, note] + [
+            message for group in selected for message in group
+        ]
+        # JSON framing adds a little overhead beyond content limits. The group
+        # selection above accounts for it without ever splitting a tool pair.
+        if sum(size(item) for item in compacted) > max_chars:
+            head["content"] = trim_text(
+                str(head.get("content") or ""), max(64, max_chars // 3)
+            )
+        return compacted
+
+    def _tool_definitions(self, task) -> list[dict]:
+        """Request a compact task-specific tool schema, with legacy fallback."""
+        try:
+            return self.tool_broker.get_tool_definitions(
+                getattr(task, "task_type", None),
+                test_authoring=getattr(task, "task_type", "") == "testing",
+            )
+        except TypeError:
+            # Small test doubles and older third-party brokers may expose the
+            # original zero-argument method.
+            return self.tool_broker.get_tool_definitions()
 
     @staticmethod
     def _failure(error: str, tool_calls: list[dict], input_tokens: int,

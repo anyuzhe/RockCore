@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from agents.worker import WorkerAgent
 from orchestrator.agent_config import ProjectAgentConfig
+from orchestrator.cost_engine import BudgetExceededError, JobBudget
 from orchestrator.engine import Engine
 from orchestrator.model_router import ModelRouter
 
@@ -85,6 +86,43 @@ class _PrematureThenEditingRouter:
                 "usage": {},
             }
         return {"content": "Task fully implemented.", "tool_calls": [], "usage": {}}
+
+
+class _AlreadySatisfiedRouter:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat_with_tools(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "Checking the existing implementation.",
+                "tool_calls": [{
+                    "id": "verify-existing",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": "game.js"}),
+                    },
+                }],
+                "usage": {},
+            }
+        return {
+            "content": (
+                "[ALREADY_SATISFIED] The requested score is already present "
+                "in game.js."
+            ),
+            "tool_calls": [],
+            "usage": {},
+        }
+
+
+class _UnverifiedAlreadySatisfiedRouter:
+    async def chat_with_tools(self, *_args, **_kwargs):
+        return {
+            "content": "[ALREADY_SATISFIED] It looks complete.",
+            "tool_calls": [],
+            "usage": {},
+        }
 
 
 class _ReviewSequenceRouter:
@@ -226,6 +264,15 @@ class _InvalidResultRouter:
         return {"content": "Done", "tool_calls": [], "usage": {}}
 
 
+class _RejectedPathBroker(_RecordingBroker):
+    async def execute(self, _task_value, name, _args):
+        self.executed.append(name)
+        return {
+            "status": "rejected",
+            "error": "[allowed_path] Path not in allowed set: site/index.html",
+        }
+
+
 def test_coding_worker_corrects_premature_no_tool_completion():
     async def scenario():
         router = _PrematureThenEditingRouter()
@@ -238,6 +285,37 @@ def test_coding_worker_corrects_premature_no_tool_completion():
         assert router.calls == 3
         assert router.tool_choices == ["auto", "required", "auto"]
         assert broker.executed == ["apply_patch"]
+
+    asyncio.run(scenario())
+
+
+def test_coding_worker_accepts_verified_already_satisfied_state():
+    async def scenario():
+        router = _AlreadySatisfiedRouter()
+        broker = _RecordingBroker()
+        worker = WorkerAgent(router, broker, max_turns=4)
+
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert result["no_changes"] is True
+        assert "ALREADY_SATISFIED" not in result["content"]
+        assert "already present" in result["content"]
+        assert broker.executed == ["read_file"]
+
+    asyncio.run(scenario())
+
+
+def test_coding_worker_rejects_unverified_already_satisfied_state():
+    async def scenario():
+        worker = WorkerAgent(
+            _UnverifiedAlreadySatisfiedRouter(), _RecordingBroker(), max_turns=3
+        )
+
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "failed"
+        assert result["error"] == "Coding model ended without editing files"
 
     asyncio.run(scenario())
 
@@ -336,6 +414,20 @@ def test_worker_converts_an_invalid_tool_result_to_recoverable_error():
     asyncio.run(scenario())
 
 
+def test_worker_surfaces_allowed_path_rejection_without_spending_all_turns():
+    async def scenario():
+        broker = _RejectedPathBroker()
+        worker = WorkerAgent(_ToolExceptionRouter(), broker, max_turns=8)
+
+        result = await worker.run(_task(), project_root=".")
+
+        assert result["status"] == "failed"
+        assert "site/index.html" in result["error"]
+        assert broker.executed == ["apply_patch"]
+
+    asyncio.run(scenario())
+
+
 def test_worker_enforces_edit_after_exploration_budget():
     async def scenario():
         router = _ToolSequenceRouter()
@@ -403,7 +495,10 @@ class _TransientProviderWorker:
         self.calls = []
 
     async def run(self, *_args, **kwargs):
-        self.calls.append(kwargs.get("provider_override"))
+        self.calls.append({
+            "provider": kwargs.get("provider_override"),
+            "model": kwargs.get("model_override"),
+        })
         if kwargs.get("provider_override") == "kimi":
             return {"status": "completed", "content": "Recovered with Kimi."}
         return {"status": "failed", "error": "Connection error"}
@@ -420,7 +515,7 @@ class _ThrowingProviderWorker:
         raise RuntimeError("Missing credentials for DeepSeek")
 
 
-def test_no_change_turn_limit_switches_to_kimi_repair(tmp_path):
+def test_functional_failures_stay_on_primary_worker_until_emergency(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         worker = _RecoveringWorker()
@@ -428,11 +523,7 @@ def test_no_change_turn_limit_switches_to_kimi_repair(tmp_path):
         async def no_changes(*_args, **_kwargs):
             return False
 
-        async def repair_plan(*_args, **_kwargs):
-            return {"summary": "Finish the existing implementation", "tasks": []}
-
         engine._check_file_changes = no_changes
-        engine._repair_plan = repair_plan
         engine.model_router._providers["kimi"] = object()
 
         result = await engine._execute_single_task_with_escalation(
@@ -443,9 +534,53 @@ def test_no_change_turn_limit_switches_to_kimi_repair(tmp_path):
             str(tmp_path),
         )
 
+        assert result["status"] == "failed"
+        assert len(worker.calls) == 3
+        assert all(call.get("provider_override") is None for call in worker.calls)
+        assert "attempt 1 failed" in worker.calls[1]["recovery_context"]
+        assert "final Worker attempt" in worker.calls[2]["recovery_context"]
+
+    asyncio.run(scenario())
+
+
+def test_emergency_runs_after_three_primary_worker_failures(tmp_path):
+    class FailedWorker:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"status": "failed", "error": "type mismatch"}
+
+    class Emergency:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"status": "completed", "fix_success": True}
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        worker = FailedWorker()
+        emergency = Emergency()
+        engine.register_agent("emergency_coder", emergency)
+        task = _task()
+        task._rockcore_retry_count = 2
+        task._rockcore_emergency_after_failures = 3
+
+        result = await engine._execute_single_task_with_escalation(
+            task,
+            SimpleNamespace(job_id="JOB-EMERGENCY", project=None),
+            {},
+            worker,
+            str(tmp_path),
+        )
+
         assert result["status"] == "completed"
-        assert worker.calls[-1]["provider_override"] == "kimi"
-        assert "Finish the existing implementation" in worker.calls[-1]["recovery_context"]
+        assert worker.calls == 3
+        assert emergency.calls == 1
+        assert len(engine.event_bus.get_history("task_escalating")) == 1
 
     asyncio.run(scenario())
 
@@ -465,7 +600,10 @@ def test_connection_failure_switches_to_kimi_immediately(tmp_path):
         )
 
         assert result["status"] == "completed"
-        assert worker.calls == [None, "kimi"]
+        assert worker.calls == [
+            {"provider": None, "model": None},
+            {"provider": "kimi", "model": "kimi-k2.7"},
+        ]
 
     asyncio.run(scenario())
 
@@ -494,6 +632,49 @@ def test_transient_provider_error_is_classified_for_fallback():
     assert Engine._is_provider_unavailable("Connection error")
     assert Engine._is_provider_unavailable("HTTP 503 Service Unavailable")
     assert Engine._is_provider_unavailable("Request timed out")
+
+
+def test_tool_choice_capability_error_is_not_provider_unavailability():
+    error = "Thinking mode does not support this tool_choice"
+
+    assert Engine._is_provider_capability_error(error)
+    assert not Engine._is_provider_unavailable(error)
+
+
+def test_tool_choice_capability_error_switches_to_kimi_once(tmp_path):
+    async def scenario():
+        worker = _TransientProviderWorker()
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        engine.model_router._providers["kimi"] = object()
+
+        async def run_with_capability_error(*_args, **kwargs):
+            worker.calls.append({
+                "provider": kwargs.get("provider_override"),
+                "model": kwargs.get("model_override"),
+            })
+            if kwargs.get("provider_override") == "kimi":
+                return {"status": "completed", "content": "Recovered with Kimi."}
+            return {
+                "status": "failed",
+                "error": "Thinking mode does not support this tool_choice",
+            }
+
+        worker.run = run_with_capability_error
+        result = await engine._execute_single_task_with_escalation(
+            _task(),
+            SimpleNamespace(job_id="JOB-CAPABILITY", project=None),
+            {},
+            worker,
+            str(tmp_path),
+        )
+
+        assert result["status"] == "completed"
+        assert worker.calls == [
+            {"provider": None, "model": None},
+            {"provider": "kimi", "model": "kimi-k2.7"},
+        ]
+
+    asyncio.run(scenario())
 
 
 class _SlowProvider:
@@ -559,6 +740,36 @@ def test_default_worker_budgets_use_reliable_soft_limits():
         "complex": 36,
     }
     assert config.complexity_exploration["simple"] == 4
+    assert config.governor.model == "gpt-5.6-sol"
+    assert config.governor.reasoning_effort == "high"
+    assert config.planner.model == "kimi-k3"
+    assert config.reviewer.provider == "codex"
+    assert config.reviewer.reasoning_effort == "high"
+    assert config.emergency_coder.reasoning_effort == "max"
+    assert config.worker.emergency_after_failures == 3
+    assert config.worker.fallback_model == "kimi-k2.7"
+
+
+def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
+    config = ProjectAgentConfig.from_dict({
+        "governor": {
+            "provider": "codex", "model": "codex-sdk",
+        },
+        "planner": {
+            "provider": "kimi", "model": "kimi-k2.6",
+        },
+        "reviewer": {
+            "provider": "kimi", "model": "kimi-k2.6",
+        },
+    })
+
+    assert config.config_version == 2
+    assert config.governor.model == "gpt-5.6-sol"
+    assert config.governor.reasoning_effort == "high"
+    assert config.planner.model == "kimi-k3"
+    assert config.reviewer.provider == "codex"
+    assert config.reviewer.model == "gpt-5.6-sol"
+    assert config.emergency_coder.reasoning_effort == "max"
 
 
 def test_large_existing_task_receives_a_dynamic_budget(tmp_path):
@@ -576,3 +787,108 @@ def test_large_existing_task_receives_a_dynamic_budget(tmp_path):
     assert budget["exploration_turns"] == 6
     assert budget["existing_files"] == 2
     assert budget["total_lines"] == 770
+
+
+def test_worker_compacts_history_without_splitting_recent_tool_pair():
+    messages = [
+        {"role": "user", "content": "ORIGINAL REQUIREMENTS\n" + "x" * 8_000},
+        {
+            "role": "assistant",
+            "content": "old exploration",
+            "tool_calls": [{
+                "id": "old-call",
+                "function": {"name": "read_file", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "old-call", "content": "z" * 8_000},
+        {
+            "role": "assistant",
+            "content": "recent check",
+            "tool_calls": [{
+                "id": "recent-call",
+                "function": {"name": "git_diff", "arguments": "{}"},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "recent-call", "content": "verified"},
+    ]
+
+    compacted = WorkerAgent._compact_messages(messages, max_chars=5_000)
+    serialized_size = sum(len(json.dumps(item, ensure_ascii=False)) for item in compacted)
+    ids = {
+        call["id"]
+        for message in compacted
+        for call in (message.get("tool_calls") or [])
+    }
+    tool_response_ids = {
+        message.get("tool_call_id")
+        for message in compacted
+        if message.get("role") == "tool"
+    }
+
+    assert compacted[0]["content"].startswith("ORIGINAL REQUIREMENTS")
+    assert "recent-call" in ids
+    assert ids == tool_response_ids
+    assert serialized_size <= 5_000
+
+
+def test_model_router_raises_structured_budget_error_before_provider_call():
+    class Provider:
+        calls = 0
+
+        async def chat(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"content": "unexpected", "usage": {}}
+
+    async def scenario():
+        router = ModelRouter(provider_map={"worker": "deepseek"})
+        provider = Provider()
+        router.register_provider("deepseek", provider)
+        router.cost_engine.set_budget(
+            "JOB-BUDGET", JobBudget(max_input_tokens=1)
+        )
+        await router.cost_engine.record_usage(
+            "JOB-BUDGET", "worker", input_tokens=2
+        )
+        router.set_job_id("JOB-BUDGET")
+
+        try:
+            await router.chat("worker", "system", [])
+        except BudgetExceededError as error:
+            assert "Input tokens exceeded" in str(error)
+        else:
+            raise AssertionError("expected structured budget error")
+        assert provider.calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_budget_error_stops_worker_escalation_immediately(tmp_path):
+    class BudgetWorker:
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            return {
+                "status": "failed",
+                "error": (
+                    "RockCore job budget exceeded: "
+                    "Input tokens exceeded: 500001/500000"
+                ),
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        worker = BudgetWorker()
+        result = await engine._execute_single_task_with_escalation(
+            _task(), SimpleNamespace(job_id="JOB-BUDGET", project=None),
+            {}, worker, str(tmp_path),
+        )
+
+        assert result["status"] == "failed"
+        assert "budget exceeded" in result["error"].lower()
+        assert worker.calls == 1
+        assert not engine.event_bus.get_history("task_replanning")
+        assert not engine.event_bus.get_history("task_escalating")
+
+    asyncio.run(scenario())

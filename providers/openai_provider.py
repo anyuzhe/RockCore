@@ -37,7 +37,7 @@ class OpenAIProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             temperature=kwargs.get("temperature", 0.3),
             max_tokens=kwargs.get("max_tokens", 4096),
@@ -61,7 +61,7 @@ class OpenAIProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             tools=tools,
             temperature=kwargs.get("temperature", 0.3),

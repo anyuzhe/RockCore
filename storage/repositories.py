@@ -75,19 +75,64 @@ class JobRepository:
         if job:
             job.status = status
             job.updated_at = datetime.now(timezone.utc)
-            if status in ("done", "failed", "cancelled"):
+            if status in (
+                "done", "failed", "cancelled", "interrupted",
+                "needs_attention",
+            ):
                 job.completed_at = datetime.now(timezone.utc)
             self.session.commit()
         return job
 
+    def update_risk_level(self, job_id: str, risk_level: str) -> Optional[Job]:
+        job = self.get_by_id(job_id)
+        if job:
+            job.risk_level = risk_level
+            job.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return job
+
+    def set_failure(self, job_id: str, code: str, reason: str,
+                    recovery_hint: str = "") -> Optional[Job]:
+        job = self.get_by_id(job_id)
+        if job:
+            job.failure_code = code or "unknown"
+            job.failure_reason = reason or "未知错误"
+            job.recovery_hint = recovery_hint or ""
+            job.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return job
+
+    def clear_failure(self, job_id: str) -> Optional[Job]:
+        job = self.get_by_id(job_id)
+        if job:
+            job.failure_code = ""
+            job.failure_reason = ""
+            job.recovery_hint = ""
+            self.session.commit()
+        return job
+
+    def update_checkpoint(self, job_id: str, checkpoint: dict) -> Optional[Job]:
+        job = self.get_by_id(job_id)
+        if job:
+            job.last_checkpoint = dict(checkpoint or {})
+            job.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return job
+
     def add_usage(self, job_id: str, input_tokens: int = 0,
-                  output_tokens: int = 0, cost: float = 0.0) -> Optional[Job]:
+                  output_tokens: int = 0, cost: float = 0.0,
+                  billable_cost: float = 0.0) -> Optional[Job]:
         job = self.get_by_id(job_id)
         if job:
             job.usage_input_tokens = (job.usage_input_tokens or 0) + max(0, int(input_tokens or 0))
             job.usage_output_tokens = (job.usage_output_tokens or 0) + max(0, int(output_tokens or 0))
             job.usage_calls = (job.usage_calls or 0) + 1
             job.usage_cost = round((job.usage_cost or 0.0) + max(0.0, float(cost or 0.0)), 6)
+            job.usage_billable_cost = round(
+                (job.usage_billable_cost or 0.0)
+                + max(0.0, float(billable_cost or 0.0)),
+                6,
+            )
             job.updated_at = datetime.now(timezone.utc)
             self.session.commit()
         return job
@@ -145,6 +190,26 @@ class PlanRepository:
             self.session.commit()
         return plan
 
+    def upsert_repair_round(self, job_id: int, repair_round: dict) -> Optional[Plan]:
+        """Persist one review-repair decision inside the job's existing plan."""
+        plan = self.get_by_job(job_id)
+        if not plan:
+            return None
+        raw_output = dict(plan.raw_output or {})
+        rounds = list(raw_output.get("repair_rounds") or [])
+        round_number = repair_round.get("round")
+        replacement = dict(repair_round)
+        for index, existing in enumerate(rounds):
+            if existing.get("round") == round_number:
+                rounds[index] = replacement
+                break
+        else:
+            rounds.append(replacement)
+        raw_output["repair_rounds"] = rounds
+        plan.raw_output = raw_output
+        self.session.commit()
+        return plan
+
 
 class TaskRepository:
     def __init__(self, session: Session):
@@ -178,6 +243,13 @@ class TaskRepository:
             Task.task_id == task_id
         ).first()
 
+    def get_by_job_and_id(self, job_id: int, task_id: str) -> Optional[Task]:
+        """Resolve a task inside one job; task IDs repeat across jobs."""
+        return self.session.query(Task).filter(
+            Task.job_id == job_id,
+            Task.task_id == task_id,
+        ).first()
+
     def get_by_pk(self, pk: int) -> Optional[Task]:
         return self.session.get(Task, pk)
 
@@ -193,6 +265,34 @@ class TaskRepository:
     def update_status_by_pk(self, task_pk: int, status: str) -> Optional[Task]:
         task = self.get_by_pk(task_pk)
         return self._set_status(task, status)
+
+    def update_definition(self, task_pk: int, *, description: str | None = None,
+                          allowed_paths: list[str] | None = None,
+                          acceptance_command: str | None = None) -> Optional[Task]:
+        """Refine an unstarted task from verified prerequisite findings."""
+        task = self.get_by_pk(task_pk)
+        if task:
+            if description is not None:
+                task.description = description
+            if allowed_paths is not None:
+                task.allowed_paths = allowed_paths
+            if acceptance_command is not None:
+                task.acceptance_command = acceptance_command
+            task.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return task
+
+    def update_result(self, task_pk: int, *, summary: str = "",
+                      data: dict | None = None,
+                      failure_reason: str = "") -> Optional[Task]:
+        task = self.get_by_pk(task_pk)
+        if task:
+            task.result_summary = (summary or "")[:4000]
+            task.result_data = dict(data or {})
+            task.failure_reason = (failure_reason or "")[:4000]
+            task.updated_at = datetime.now(timezone.utc)
+            self.session.commit()
+        return task
 
     def _set_status(self, task: Optional[Task], status: str) -> Optional[Task]:
         if task:

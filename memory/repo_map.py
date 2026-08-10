@@ -164,14 +164,24 @@ class RepoMap:
     def get_context_summary(self, max_files: int = 30) -> str:
         """Get a condensed summary of the repo map for prompt injection."""
         categories = self._map.get("categories", {})
+        files = self._map.get("files", [])
         symbols = self._map.get("symbols", [])
 
         lines = [f"Repository: {self.project_root.name}"]
-        lines.append(f"Total files: {len(self._map.get('files', []))}")
+        lines.append(f"Total files: {len(files)}")
         lines.append(f"Total symbols: {len(symbols)}")
 
         for cat, info in categories.items():
             lines.append(f"  {cat}: {info.get('count', 0)} files")
+
+        if files:
+            shown_files = files[:max_files]
+            lines.append(f"\nProject files ({len(shown_files)} shown):")
+            for file_info in shown_files:
+                lines.append(
+                    f"  {file_info.get('path', '')} "
+                    f"[{file_info.get('category', 'other')}]"
+                )
 
         if symbols:
             lines.append(f"\nTop-level symbols ({min(len(symbols), 20)} shown):")
@@ -182,4 +192,6 @@ class RepoMap:
 
     @property
     def is_loaded(self) -> bool:
-        return bool(self._map.get("symbols"))
+        # Static HTML/CSS/data projects legitimately have no extractable Python
+        # symbols. Their file inventory is still valuable planning context.
+        return bool(self._map.get("files"))

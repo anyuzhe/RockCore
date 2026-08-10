@@ -1,0 +1,316 @@
+"""Regression coverage for the phase-one/two workflow optimizations."""
+
+import asyncio
+from types import SimpleNamespace
+
+from orchestrator.cost_engine import CostEngine
+from orchestrator.engine import Engine
+from orchestrator.model_router import ModelRouter
+from orchestrator.test_manager import TestManager
+from orchestrator.policy_engine import PolicyEngine
+from orchestrator.state_machine import JobState
+from tools.tool_broker import ToolBroker
+
+
+def test_visible_total_token_budget_has_no_hidden_component_cap():
+    budget = CostEngine.budget_from_config({
+        "max_total_tokens": 1_000_000,
+        "max_api_calls": 250,
+        "max_cost_usd": 5,
+    })
+
+    assert budget.max_total_tokens == 1_000_000
+    assert budget.max_input_tokens == 1_000_000
+    assert budget.max_output_tokens == 1_000_000
+    assert budget.max_api_calls == 250
+
+
+def test_runtime_settings_update_scheduler_and_default_budget(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"), max_concurrent_workers=3)
+
+    engine.apply_runtime_config({
+        "max_concurrent_workers": 1,
+        "budget": {
+            "max_total_tokens": 800_000,
+            "max_api_calls": 77,
+            "max_cost_usd": 3,
+        },
+        "agent_provider_map": {"worker": "kimi"},
+    })
+
+    budget = engine.model_router.cost_engine.get_budget("future-job")
+    assert engine.scheduler.max_concurrent == 1
+    assert budget.max_input_tokens == 800_000
+    assert budget.max_api_calls == 77
+    assert engine.model_router._provider_map["worker"] == "kimi"
+
+
+def test_simple_plan_collapses_analysis_and_overlapping_coding():
+    plan = {
+        "summary": "Update one page",
+        "tasks": [
+            {
+                "id": "T001", "type": "analysis", "title": "Locate page",
+                "description": "Find the existing IG row.",
+                "allowed_paths": ["site/index.html"], "dependencies": [],
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Update content",
+                "description": "Add the exact score.",
+                "allowed_paths": ["site/index.html"], "dependencies": ["T001"],
+            },
+            {
+                "id": "T003", "type": "coding", "title": "Update style",
+                "description": "Keep the score on one line.",
+                "allowed_paths": ["site/index.html"], "dependencies": ["T002"],
+            },
+            {
+                "id": "T004", "type": "testing", "title": "Validate HTML",
+                "description": "Check structure and content.",
+                "allowed_paths": ["site/index.html"], "dependencies": ["T003"],
+            },
+        ],
+    }
+
+    Engine._optimize_plan(plan, "simple")
+
+    assert [task["id"] for task in plan["tasks"]] == ["T002", "T004"]
+    assert "Find the existing IG row" in plan["tasks"][0]["description"]
+    assert "Keep the score on one line" in plan["tasks"][0]["description"]
+    assert plan["tasks"][1]["dependencies"] == ["T002"]
+
+
+def test_validation_only_testing_task_stays_local(tmp_path):
+    baseline = TestManager.capture_snapshot(tmp_path)
+    (tmp_path / "index.html").write_text(
+        "<!doctype html><html><body><h1>ok</h1></body></html>",
+        encoding="utf-8",
+    )
+    task = SimpleNamespace(
+        task_type="testing", title="Validate HTML", description="Check structure",
+        acceptance_command="", allowed_paths=["index.html"],
+    )
+
+    assert TestManager.should_validate_locally(task)
+    assert not TestManager.is_test_authoring_task(task)
+    assert TestManager.snapshot_diff(tmp_path, baseline)["added"] == ["index.html"]
+
+
+def test_test_authoring_task_still_uses_worker():
+    task = SimpleNamespace(
+        task_type="testing", title="新增测试用例", description="补充边界测试",
+        acceptance_command="pytest -q", allowed_paths=["tests/test_site.py"],
+    )
+
+    assert TestManager.is_test_authoring_task(task)
+    assert not TestManager.should_validate_locally(task)
+
+
+def test_tool_schema_is_pruned_by_task_type(tmp_path):
+    broker = ToolBroker(tmp_path, PolicyEngine())
+    analysis = {
+        item["function"]["name"]
+        for item in broker.get_tool_definitions("analysis")
+    }
+    coding = {
+        item["function"]["name"]
+        for item in broker.get_tool_definitions("coding")
+    }
+
+    assert "write_file" not in analysis
+    assert "run_tests" not in analysis
+    assert {"read_file", "search_code", "git_diff"}.issubset(analysis)
+    assert {"write_file", "apply_patch", "run_tests"}.issubset(coding)
+
+
+def test_provider_capability_error_immediately_falls_back():
+    class BrokenProvider:
+        model = "thinking-model"
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            raise RuntimeError("Thinking mode does not support this tool_choice")
+
+    class WorkingProvider:
+        model = "tool-model"
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            return {
+                "content": "recovered", "tool_calls": [],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+
+    async def scenario():
+        router = ModelRouter(
+            provider_map={"worker": "deepseek"},
+        )
+        router.register_provider("deepseek", BrokenProvider())
+        router.register_provider("kimi", WorkingProvider())
+
+        response = await router.chat_with_tools(
+            "worker", "system", [], [],
+            task=SimpleNamespace(task_id="T001", task_type="coding"),
+        )
+
+        assert response["content"] == "recovered"
+        assert router._circuit_is_open("deepseek")
+
+    asyncio.run(scenario())
+
+
+def test_project_routing_overrides_global_route_and_model():
+    class Provider:
+        model = "default"
+
+        def __init__(self):
+            self.models = []
+            self.reasoning = []
+
+        async def chat(self, *_args, **kwargs):
+            self.models.append(kwargs.get("model"))
+            self.reasoning.append(kwargs.get("reasoning_effort"))
+            return {"content": "ok", "usage": {}}
+
+    async def scenario():
+        router = ModelRouter(
+            provider_map={"planner": "deepseek"},
+        )
+        deepseek = Provider()
+        kimi = Provider()
+        router.register_provider("deepseek", deepseek)
+        router.register_provider("kimi", kimi)
+        router.set_job_id("JOB-1")
+        router.set_job_routing(
+            "JOB-1", {"planner": "kimi"}, {"planner": "kimi-project"},
+            {"planner": "high"},
+        )
+
+        await router.chat("planner", "system", [])
+
+        assert deepseek.models == []
+        assert kimi.models == ["kimi-project"]
+        assert kimi.reasoning == ["high"]
+
+    asyncio.run(scenario())
+
+
+def test_start_marks_stale_job_as_resumable_interruption(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+            repos["job"].create("JOB-STALE", project.id, "unfinished")
+        finally:
+            repos["_session"].close()
+
+        await engine.start()
+        repos = engine._get_repos()
+        try:
+            job = repos["job"].get_by_id("JOB-STALE")
+            assert job.status == "interrupted"
+            assert job.failure_code == "process_interrupted"
+            assert "继续" in job.recovery_hint
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_continuation_includes_task_failure_checkpoint(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        source = repos["job"].create("JOB-1", project.id, "build page")
+        task = repos["task"].create(
+            "T001", source.id, "Edit page", allowed_paths=["index.html"]
+        )
+        repos["task"].update_status_by_pk(task.id, "failed")
+        repos["task"].update_result(
+            task.id, summary="partial markup saved",
+            failure_reason="validation failed",
+        )
+        repos["job"].update_status(source.job_id, "failed")
+        repos["job"].set_failure(
+            source.job_id, "validation_failed", "duplicate id",
+            "fix the reported HTML issue",
+        )
+        followup = repos["job"].create(
+            "JOB-2", project.id, "continue", source_job_id=source.job_id
+        )
+
+        context = engine._build_continuation_context(followup, repos)
+
+        assert "T001 [failed]" in context
+        assert "partial markup saved" in context
+        assert "duplicate id" in context
+        assert "Do NOT repeat tasks marked done" in context
+    finally:
+        repos["_session"].close()
+
+
+def test_review_failure_after_completed_work_is_needs_attention(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+            job = repos["job"].create("JOB-1", project.id, "change page")
+            task = repos["task"].create("T001", job.id, "Edit page")
+            repos["task"].update_status_by_pk(task.id, "done")
+            engine.state_machine._states[job.job_id] = JobState.REVIEWING
+
+            await engine._finish_review_failure(
+                job, repos,
+                {"issues": [{"problem": "one issue"}]},
+                "The final check found one repairable issue.",
+                status="rejected",
+            )
+
+            repos["_session"].refresh(job)
+            assert job.status == "needs_attention"
+            assert job.failure_reason.startswith("The final check")
+            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_early_pipeline_failure_still_emits_authoritative_finished_event(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        created = await engine.create_job(project.id, "change page", str(tmp_path))
+
+        async def govern(job, repos, _config=None):
+            repos["constitution"].create(
+                job_id=job.id, goal=job.user_request, constraints=[],
+                acceptance_criteria=[], protected_paths=[],
+            )
+            engine.state_machine.transition(job.job_id, JobState.GOVERNING)
+            engine.state_machine.transition(job.job_id, JobState.GOVERNED)
+
+        async def fail_plan(job, repos, _config=None):
+            engine.state_machine.transition(job.job_id, JobState.PLANNING)
+            repos["job"].update_status(job.job_id, "failed")
+            repos["job"].set_failure(
+                job.job_id, "plan_rejected", "unsafe plan", "adjust paths"
+            )
+            engine.state_machine.transition(job.job_id, JobState.FAILED)
+
+        engine._run_governor = govern
+        engine._run_planner = fail_plan
+
+        await engine.run_job(created["job_id"], str(tmp_path))
+
+        finished = engine.event_bus.get_history("job_finished")
+        assert finished[-1]["data"] == {
+            "job_id": created["job_id"], "status": "failed"
+        }
+
+    asyncio.run(scenario())

@@ -70,7 +70,7 @@ Run the acceptance command to verify.
                 self.agent_type,
                 EMERGENCY_SYSTEM_PROMPT,
                 messages,
-                agent_type="emergency_coder",
+                project_root=project_root,
             )
 
             content = response.get("content", "{}")

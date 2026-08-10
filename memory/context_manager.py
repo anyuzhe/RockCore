@@ -32,6 +32,9 @@ class ContextManager:
         Called when the engine starts a job on a different project."""
         new_root_path = Path(new_root).resolve()
         if new_root_path == self.project_root:
+            # A previous job may have added, removed, or moved files while the
+            # selected project stayed the same.
+            self.repo_map.update()
             return
         self.project_root = new_root_path
         self.project_memory = ProjectMemory(str(new_root_path))
@@ -46,25 +49,31 @@ class ContextManager:
         # Project memory summary
         memory_summary = self.project_memory.get_context_summary()
         if memory_summary:
-            parts.append("=== Project Knowledge ===\n" + memory_summary)
+            parts.append("=== Project Knowledge ===\n" + memory_summary[:1800])
 
         # Repository map summary
         if self.repo_map.is_loaded:
-            parts.append("=== Repository Map ===\n" + self.repo_map.get_context_summary())
+            parts.append(
+                "=== Repository Map ===\n"
+                + self.repo_map.get_context_summary()[:1800]
+            )
 
         # Task-specific file context
         relevant_files = self._find_relevant_files(task)
         if relevant_files:
             parts.append("=== Relevant Files ===\n" + "\n".join(f"- {f}" for f in relevant_files))
 
-        return "\n\n".join(parts)
+        return "\n\n".join(parts)[:4000]
 
     def _find_relevant_files(self, task) -> list[str]:
         """Find files relevant to a task based on task type and description."""
         relevant = set()
+        exact_allowed = False
 
         # Add files from allowed paths
         for pattern in (task.allowed_paths or []):
+            if not any(char in pattern for char in "*?["):
+                exact_allowed = True
             try:
                 for f in self.project_root.rglob(pattern):
                     if f.is_file():
@@ -73,7 +82,7 @@ class ContextManager:
                 logger.warning(f"Glob pattern '{pattern}' failed: {e}")
 
         # For coding tasks, add source files
-        if task.task_type == "coding":
+        if task.task_type == "coding" and not exact_allowed:
             source_files = self.repo_map.get_category_files("source")
             relevant.update(source_files[:10])  # Limit to 10 source files
 
@@ -87,7 +96,7 @@ class ContextManager:
             for cat in ("source", "config"):
                 relevant.update(self.repo_map.get_category_files(cat)[:15])
 
-        return sorted(relevant)[:20]  # Max 20 files
+        return sorted(relevant)[:12]
 
     async def update_after_task(self, task, result: dict):
         """Update project memory and repo map after a task completes."""

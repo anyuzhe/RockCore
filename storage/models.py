@@ -44,7 +44,16 @@ class Job(Base):
     usage_input_tokens = Column(Integer, default=0)
     usage_output_tokens = Column(Integer, default=0)
     usage_calls = Column(Integer, default=0)
+    # API-price-equivalent estimate for every provider call, including calls
+    # made through a ChatGPT subscription.
     usage_cost = Column(Float, default=0.0)
+    # Estimated cost only for separately billed API transports. Nullable keeps
+    # migrated historical rows distinguishable from newly classified usage.
+    usage_billable_cost = Column(Float, default=0.0, nullable=True)
+    failure_code = Column(String(64), default="")
+    failure_reason = Column(Text, default="")
+    recovery_hint = Column(Text, default="")
+    last_checkpoint = Column(JSON, default=dict)
 
     project = relationship("Project", back_populates="jobs")
     constitution = relationship("Constitution", uselist=False, back_populates="job",
@@ -105,6 +114,9 @@ class Task(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime, nullable=True)
+    result_summary = Column(Text, default="")
+    result_data = Column(JSON, default=dict)
+    failure_reason = Column(Text, default="")
 
     job = relationship("Job", back_populates="tasks")
     agent_runs = relationship("AgentRun", back_populates="task", cascade="all, delete-orphan")
@@ -127,7 +139,10 @@ class AgentRun(Base):
     status = Column(String(32), default="pending")
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
+    # ``cost`` is the equivalent estimate retained for compatibility.
     cost = Column(Float, default=0.0)
+    billable_cost = Column(Float, default=0.0, nullable=True)
+    billing_mode = Column(String(32), default="api")
     error_message = Column(Text, default="")
     started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)

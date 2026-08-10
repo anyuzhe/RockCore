@@ -16,6 +16,7 @@ from PyQt6.QtGui import QAction, QFont, QKeySequence, QShortcut
 from .project_panel import ProjectPanel
 from .task_panel import TaskPanel
 from .settings_dialog import SettingsDialog, load_config
+from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,10 @@ class MainWindow(QMainWindow):
                         "user_request": job.user_request,
                         "status": job.status,
                         "source_job_id": job.source_job_id,
-                        "created_at": job.created_at.isoformat() if job.created_at else "",
+                        "failure_code": getattr(job, "failure_code", "") or "",
+                        "failure_reason": getattr(job, "failure_reason", "") or "",
+                        "recovery_hint": getattr(job, "recovery_hint", "") or "",
+                        "created_at": as_utc_isoformat(job.created_at),
                         "usage": self._job_usage(job),
                     }
                     constitution_dict = None
@@ -584,6 +588,10 @@ class MainWindow(QMainWindow):
         )
         if is_selected:
             self.task_panel.log_event(event_type, **data)
+        repair_round = int(data.get("repair_round", 0) or 0)
+        task_repair_round = self.task_panel._repair_round_from_task_id(
+            data.get("task_id", "")
+        )
         live_status = {
             "job_governing": "governing",
             "job_planning": "planning",
@@ -599,19 +607,43 @@ class MainWindow(QMainWindow):
 
         if event_type == "job_governing" and is_selected:
             self.task_panel.update_stage("governor", "running", "正在分析需求目标与边界")
+        elif event_type == "deterministic_precheck" and is_selected:
+            risk_name = {
+                "low": "低", "medium": "中", "high": "高", "critical": "关键",
+            }.get(data.get("risk_level", "medium"), "中")
+            route_name = {
+                "low": "直接执行",
+                "medium": "策划后执行",
+                "high": "完整治理与审核",
+                "configured": "按项目配置",
+            }.get(data.get("workflow_route", "configured"), "按项目配置")
+            self.task_panel.append_stage_output(
+                "governor",
+                f"确定性预检：{risk_name}风险（{data.get('risk_score', 0)} 分）"
+                f"，流程：{route_name}",
+            )
         elif event_type == "job_governed" and is_selected:
-            self.task_panel.update_stage("governor", "success")
+            if self.task_panel.stages["governor"]._status not in {"fallback", "failed"}:
+                self.task_panel.update_stage("governor", "success")
         elif event_type == "job_planning" and is_selected:
-            self.task_panel.update_stage("planner", "running", "正在生成执行计划")
+            self.task_panel.update_stage(
+                "planner", "running", "正在生成执行计划",
+                repair_round=repair_round,
+            )
         elif event_type == "plan_ready" and is_selected:
-            self.task_panel.update_stage("planner", "success")
+            self.task_panel.update_stage(
+                "planner", "success", repair_round=repair_round
+            )
             self._reload_selected_workflow()
         elif event_type == "plan_rejected" and is_selected:
             self.task_panel.update_stage(
                 "planner", "rejected", "计划未通过约束检查", {"errors": data.get("errors", [])}
             )
         elif event_type == "job_executing" and is_selected:
-            self.task_panel.update_stage("worker", "running", "正在准备执行步骤")
+            self.task_panel.update_stage(
+                "worker", "running", "正在准备执行步骤",
+                repair_round=repair_round,
+            )
         elif event_type == "task_running" and is_selected:
             if not self.task_panel.has_task(data.get("task_id", "")):
                 self._reload_selected_workflow()
@@ -621,12 +653,16 @@ class MainWindow(QMainWindow):
             result = data.get("result") or {}
             if result.get("no_changes"):
                 self.task_panel.append_stage_output(
-                    "worker", "检查完成：未发现需要修改的问题。"
+                    "worker", "检查完成：未发现需要修改的问题。",
+                    repair_round=task_repair_round,
                 )
             self._capture_diff(data.get("result"))
         elif event_type == "task_failed" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "failed")
-            self.task_panel.append_stage_output("worker", f"错误：{data.get('error', '未知错误')}")
+            self.task_panel.append_stage_output(
+                "worker", f"错误：{data.get('error', '未知错误')}",
+                repair_round=task_repair_round,
+            )
             self._capture_diff(data.get("result"))
         elif event_type == "task_blocked" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "blocked")
@@ -635,47 +671,88 @@ class MainWindow(QMainWindow):
                 "worker",
                 f"{data.get('task_id', '')} 因依赖任务失败而未执行"
                 + (f"：{blocked_by}" if blocked_by else ""),
+                repair_round=task_repair_round,
             )
         elif event_type == "task_repairing" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
                 f"{data.get('task_id', '')} 首次执行失败，正在准备修复",
+                repair_round=task_repair_round,
             )
         elif event_type == "task_continuing" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
                 f"{data.get('task_id', '')} 已保留部分改动，正在继续完成",
+                repair_round=task_repair_round,
             )
         elif event_type == "task_replanning" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
                 f"{data.get('task_id', '')} 正在重新规划修复步骤",
+                repair_round=task_repair_round,
             )
         elif event_type == "task_escalating" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
                 f"{data.get('task_id', '')} 已升级到紧急修复执行者",
+                repair_round=task_repair_round,
             )
         elif event_type == "task_provider_fallback" and is_selected:
             self.task_panel.update_stage(
                 "worker", "running",
                 f"执行模型从 {data.get('from_provider', '?')} 切换到 "
                 f"{data.get('to_provider', '?')}",
+                repair_round=task_repair_round,
             )
+        elif event_type == "task_refined" and is_selected:
+            paths = ", ".join(data.get("allowed_paths") or [])
+            self.task_panel.update_stage(
+                "planner", "success",
+                f"已根据前置分析更新 {data.get('task_id', '')}"
+                + (f" 的目标文件：{paths}" if paths else ""),
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_refinement_rejected" and is_selected:
+            self.task_panel.update_stage(
+                "planner", "rejected",
+                f"{data.get('task_id', '')} 的动态路径未通过安全检查",
+                {"errors": data.get("errors", [])},
+                repair_round=task_repair_round,
+            )
+        elif event_type == "review_repair_assessing" and is_selected:
+            self.task_panel.update_stage(
+                "planner", "running",
+                f"正在判断第 {data.get('repair_round', 1)} 轮审核问题能否自动修复",
+                repair_round=repair_round,
+            )
+        elif event_type == "review_repair_executed" and is_selected:
+            self.task_panel.update_stage(
+                "worker", "success",
+                f"第 {data.get('repair_round', 1)} 轮修复已执行，准备再次审核",
+                repair_round=repair_round,
+            )
+            self._reload_selected_workflow()
+        elif event_type == "review_repair_failed" and is_selected:
+            self._reload_selected_workflow()
         elif event_type == "test_running" and is_selected:
             self.task_panel.append_stage_output(
                 "worker",
                 f"正在验收：{data.get('command', '')}",
+                repair_round=task_repair_round,
             )
         elif event_type == "job_reviewing" and is_selected:
             self._reload_selected_workflow()
-            self.task_panel.update_stage("reviewer", "running", "正在审核执行结果")
+            self.task_panel.update_stage(
+                "reviewer", "running", "正在审核执行结果",
+                repair_round=repair_round,
+            )
         elif event_type == "review_complete" and is_selected:
             result = data.get("result", "pass")
             self.task_panel.update_stage(
                 "reviewer",
                 "success" if result == "pass" else "failed" if result == "error" else "rejected",
                 "审核通过" if result == "pass" else "审核执行失败" if result == "error" else "审核未通过",
+                repair_round=repair_round,
             )
         elif event_type == "phase_summary" and is_selected:
             agent = data.get("agent_type", "")
@@ -684,14 +761,24 @@ class MainWindow(QMainWindow):
             self.task_panel.update_stage(
                 stage_key, phase_status,
                 data.get("summary", ""), data.get("details"),
+                repair_round=repair_round,
             )
         elif event_type == "job_done":
             self.status_label.setText("任务完成")
             self._capture_diff()
         elif event_type == "job_finished":
+            finished_job_id = data.get("job_id", "")
             fin_status = data.get("status", "")
-            self.task_panel.update_job_status(data.get("job_id", ""), fin_status)
-            self.status_label.setText("任务失败" if fin_status == "failed" else "任务完成")
+            # job_finished is the authoritative terminal event. Keep the
+            # conversation header and sidebar history on the same final state.
+            self.task_panel.update_job_status(finished_job_id, fin_status)
+            self.project_panel.update_job_status(finished_job_id, fin_status)
+            if fin_status == "failed":
+                self.status_label.setText("任务失败")
+            elif fin_status in {"interrupted", "needs_attention"}:
+                self.status_label.setText("任务需继续处理")
+            else:
+                self.status_label.setText("任务完成")
             self._capture_diff()
             if is_selected:
                 self._reload_selected_workflow()
@@ -712,6 +799,8 @@ class MainWindow(QMainWindow):
                 output_tokens=data.get("output_tokens", 0),
                 task_id=data.get("task_id", ""),
                 estimated_cost=data.get("estimated_cost", 0.0),
+                billable_cost=data.get("billable_cost"),
+                billing_mode=data.get("billing_mode", "api"),
             )
         elif event_type == "test_result":
             self.task_panel.log_test_result(
@@ -795,8 +884,11 @@ class MainWindow(QMainWindow):
                         "user_request": j.user_request,
                         "status": j.status,
                         "source_job_id": j.source_job_id,
+                        "failure_code": getattr(j, "failure_code", "") or "",
+                        "failure_reason": getattr(j, "failure_reason", "") or "",
+                        "recovery_hint": getattr(j, "recovery_hint", "") or "",
                         "risk_level": j.risk_level,
-                        "created_at": j.created_at.isoformat() if j.created_at else "",
+                        "created_at": as_utc_isoformat(j.created_at),
                     }
                     for j in jobs
                 ]
@@ -828,11 +920,14 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_settings(self):
-        model_scoring = getattr(self.engine.model_router, "model_scoring", None)
-        dialog = SettingsDialog(self, model_scoring=model_scoring)
+        dialog = SettingsDialog(self)
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self._config = dialog.get_config()
-            self.task_panel.log("设置已更新", "log")
+            self.engine.apply_runtime_config(self._config)
+            self.task_panel.log(
+                "预算、并发、角色路由和模型设置已更新；新密钥需要重启后加载",
+                "log",
+            )
 
     def _switch_tab(self, name: str):
         self.task_panel.expand_detail(name)
@@ -843,7 +938,7 @@ class MainWindow(QMainWindow):
             f"{FULL_PRODUCT_NAME}\n\n"
             f"{PRODUCT_LINE}\n"
             f"{LEGAL_COMPANY_NAME}\n\n"
-            "Codex SDK(裁决/审核) → Kimi K2.6(策划) → DeepSeek V4 Flash(执行)"
+            "Codex SDK（裁决/审核）→ Kimi（策划）→ DeepSeek V4（执行）"
         )
 
     def _get_repos(self):
@@ -868,11 +963,19 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _task_usage(runs: list) -> dict:
+        billable_values = [
+            getattr(run, "billable_cost", None) for run in runs
+        ]
         return {
             "input_tokens": sum(int(run.input_tokens or 0) for run in runs),
             "output_tokens": sum(int(run.output_tokens or 0) for run in runs),
             "calls": len(runs),
             "cost": round(sum(float(run.cost or 0.0) for run in runs), 6),
+            "billable_cost": (
+                round(sum(float(value or 0.0) for value in billable_values), 6)
+                if all(value is not None for value in billable_values)
+                else None
+            ),
         }
 
     @staticmethod
@@ -882,6 +985,7 @@ class MainWindow(QMainWindow):
             "output_tokens": int(getattr(job, "usage_output_tokens", 0) or 0),
             "calls": int(getattr(job, "usage_calls", 0) or 0),
             "cost": float(getattr(job, "usage_cost", 0.0) or 0.0),
+            "billable_cost": getattr(job, "usage_billable_cost", None),
         }
 
     def _close_repos(self, repos):

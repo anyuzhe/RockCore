@@ -1,14 +1,16 @@
 """Main orchestrator engine — the brain of the AI Engineering Studio."""
 
 import asyncio
+import fnmatch
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 MAX_FLASH_RETRY = 2
 MAX_REPLAN_RETRY = 1
+MAX_REVIEW_REPAIR_ROUNDS = 2
 
 
 # Keywords that signal higher complexity
@@ -29,6 +31,7 @@ from .state_machine import StateMachine, JobState
 from .scheduler import Scheduler
 from .policy_engine import PolicyEngine
 from .model_router import ModelRouter
+from .cost_engine import BudgetExceededError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
 from .agent_config import ProjectAgentConfig, load_project_config
@@ -46,7 +49,8 @@ logger = logging.getLogger(__name__)
 class Engine:
     """Central orchestrator that coordinates all agents and tools."""
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None,
+                 max_concurrent_workers: int = 3):
         from storage.database import init_database
         self._engine = init_database(db_path)
         self._session_factory = create_session_factory(self._engine)
@@ -54,7 +58,9 @@ class Engine:
         self.event_bus = EventBus()
         self.event_bus.subscribe("model_chat", self._record_model_usage)
         self.state_machine = StateMachine()
-        self.scheduler = Scheduler(max_concurrent=3)
+        self.scheduler = Scheduler(
+            max_concurrent=max(1, int(max_concurrent_workers or 1))
+        )
         self.policy_engine = PolicyEngine()
         self.model_router = ModelRouter(event_bus=self.event_bus)
 
@@ -68,6 +74,30 @@ class Engine:
 
         # Wire state machine to event bus
         self.state_machine.add_listener(self._on_state_change_sync)
+
+    def apply_runtime_config(self, config: dict | None):
+        """Apply settings that are safe to change without rebuilding agents."""
+        config = config or {}
+        max_workers = max(1, int(config.get("max_concurrent_workers", 3)))
+        self.scheduler.max_concurrent = max_workers
+        # Recreate lazily so a previously-created semaphore cannot retain the
+        # old concurrency value.
+        self.scheduler._semaphore = None
+        self.model_router.cost_engine.set_default_budget(
+            self.model_router.cost_engine.budget_from_config(
+                config.get("budget", {})
+            )
+        )
+        self.model_router.set_provider_map(
+            config.get("agent_provider_map", {})
+        )
+        provider_models = {
+            "kimi": (config.get("kimi") or {}).get("model"),
+            "deepseek": (config.get("deepseek") or {}).get("model"),
+        }
+        for provider_name, model in provider_models.items():
+            if model and self.model_router.has_provider(provider_name):
+                self.model_router.get_provider(provider_name).model = model
 
     def _get_repos(self):
         session = self._session_factory()
@@ -98,15 +128,25 @@ class Engine:
         input_tokens = max(0, int(data.get("input_tokens") or 0))
         output_tokens = max(0, int(data.get("output_tokens") or 0))
         estimated_cost = max(0.0, float(data.get("estimated_cost") or 0.0))
+        billing_mode = str(data.get("billing_mode") or "api")
+        raw_billable_cost = data.get("billable_cost")
+        billable_cost = (
+            0.0
+            if billing_mode == "chatgpt_cli"
+            else estimated_cost
+            if raw_billable_cost is None
+            else max(0.0, float(raw_billable_cost or 0.0))
+        )
         repos = self._get_repos()
         try:
-            repos["job"].add_usage(
-                job_id, input_tokens, output_tokens, estimated_cost
+            job = repos["job"].add_usage(
+                job_id, input_tokens, output_tokens,
+                estimated_cost, billable_cost,
             )
             task_id = data.get("task_id")
-            if not task_id:
+            if not task_id or not job:
                 return
-            task = repos["task"].get_by_id(task_id)
+            task = repos["task"].get_by_job_and_id(job.id, task_id)
             if not task:
                 return
             run = repos["agent_run"].create(
@@ -120,6 +160,8 @@ class Engine:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost=estimated_cost,
+                billable_cost=billable_cost,
+                billing_mode=billing_mode,
                 error_message=str(data.get("error") or ""),
             )
         except Exception as error:
@@ -144,6 +186,29 @@ class Engine:
 
     async def start(self):
         self._running = True
+        repos = self._get_repos()
+        try:
+            terminal = {
+                "done", "failed", "cancelled", "interrupted",
+                "needs_attention",
+            }
+            for job in repos["job"].list_all():
+                if job.status in terminal:
+                    continue
+                reason = (
+                    "RockCore 上次退出时该任务仍在运行，已保留已有结果，"
+                    "可通过“继续此需求”从检查点恢复。"
+                )
+                repos["job"].update_status(job.job_id, "interrupted")
+                repos["job"].set_failure(
+                    job.job_id, "process_interrupted", reason,
+                    "继续此需求时会携带已完成步骤、失败原因和文件范围。",
+                )
+                await self.event_bus.publish(
+                    "job_interrupted", job_id=job.job_id, error=reason
+                )
+        finally:
+            self._close_repos(repos)
         logger.info("Engine started")
 
     async def stop(self):
@@ -151,7 +216,8 @@ class Engine:
         self.scheduler.stop()
         logger.info("Engine stopped")
 
-    async def _skip_phase(self, job, repos, phase: str):
+    async def _skip_phase(self, job, repos, phase: str,
+                          reason: str = "已按项目配置禁用"):
         """Skip a disabled agent phase with proper state transitions."""
         state_map = {
             "governor": (JobState.GOVERNING, JobState.GOVERNED),
@@ -162,16 +228,18 @@ class Engine:
             self.state_machine.transition(job.job_id, s)
         await self.event_bus.publish("phase_summary",
             phase=phase, agent_type=phase, status="skipped",
-            summary=f"{phase} 已按项目配置禁用")
+            summary=f"{phase} {reason}")
 
-    async def _skip_review(self, job, repos):
+    async def _skip_review(self, job, repos,
+                           reason: str = "审核已按项目配置跳过"):
         """Skip reviewer and go straight to DONE."""
         self.state_machine.transition(job.job_id, JobState.REVIEWING)
         self.state_machine.transition(job.job_id, JobState.DONE)
         repos["job"].update_status(job.job_id, "done")
+        repos["job"].clear_failure(job.job_id)
         await self.event_bus.publish("phase_summary",
             phase="reviewer", agent_type="reviewer", status="skipped",
-            summary="审核已按项目配置跳过")
+            summary=reason)
         await self.event_bus.publish("job_done", job_id=job.job_id)
 
     def _classify_request(self, user_request: str) -> str:
@@ -198,7 +266,9 @@ class Engine:
                 if not source_job or source_job.project_id != project_id:
                     raise ValueError("The source job does not belong to this project")
 
-            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            # Job IDs are user-facing, so their calendar date follows the
+            # machine's local timezone. Persisted timestamps remain UTC.
+            today = datetime.now().astimezone().strftime("%Y%m%d")
             count = len(repos["job"].list_all()) + 1
             job_id_str = f"JOB-{today}-{count:03d}"
             while repos["job"].get_by_id(job_id_str):
@@ -225,6 +295,10 @@ class Engine:
         logger.info(f"Running job: {job_id}")
 
         repos = self._get_repos()
+        job = None
+        worker = None
+        saved_turns = None
+        finalized = False
         try:
             job = repos["job"].get_by_id(job_id)
             if not job:
@@ -266,6 +340,7 @@ class Engine:
                     + ", ".join(unmerged_files[:8])
                 )
                 repos["job"].update_status(job.job_id, "failed")
+                self._store_job_failure(repos, job.job_id, error)
                 self.state_machine.transition(job.job_id, JobState.GOVERNING)
                 self.state_machine.transition(job.job_id, JobState.FAILED)
                 await self.event_bus.publish(
@@ -282,25 +357,82 @@ class Engine:
 
             # Classify request complexity
             complexity = self._classify_request(job.user_request)
+            job._rockcore_complexity = complexity
             logger.info(f"Job {job_id}: complexity={complexity}")
+
+            precheck = self.model_router.risk_engine.precheck_request(
+                job.user_request, proj_root
+            )
+            workflow_route = (
+                precheck["route"] if proj_config.mode == "auto"
+                else "low" if proj_config.mode == "fast"
+                else "configured"
+            )
+            job._rockcore_workflow_route = workflow_route
+            repos["job"].update_risk_level(job_id, precheck["level"])
+            job.risk_level = precheck["level"]
+            await self.event_bus.publish(
+                "deterministic_precheck",
+                job_id=job_id,
+                risk_level=precheck["level"],
+                risk_score=precheck["score"],
+                workflow_route=workflow_route,
+                reasons=precheck["reasons"],
+                has_tests=precheck["has_tests"],
+            )
+            logger.info(
+                "Job %s: deterministic risk=%s/%s route=%s",
+                job_id, precheck["level"], precheck["score"], workflow_route,
+            )
+
+            profiles = {
+                "governor": proj_config.governor,
+                "planner": proj_config.planner,
+                "worker": proj_config.worker,
+                "reviewer": proj_config.reviewer,
+                "emergency_coder": proj_config.emergency_coder,
+            }
+            self.model_router.set_job_routing(
+                job_id,
+                provider_map={
+                    role: profile.provider for role, profile in profiles.items()
+                    if profile.provider
+                },
+                model_map={
+                    role: profile.model for role, profile in profiles.items()
+                    if profile.model
+                },
+                reasoning_map={
+                    role: profile.reasoning_effort
+                    for role, profile in profiles.items()
+                    if profile.reasoning_effort
+                },
+            )
 
             # Apply config: set worker turn limits
             worker = self.get_agent("worker")
-            saved_turns = None
             if worker:
                 saved_turns = worker.max_turns
                 worker.max_turns = proj_config.get_worker_turns(complexity)
 
-            # Complexity controls budgets only. Skipping governance/planning is
-            # an explicit project-level choice, never an automatic guess.
-            if proj_config.mode == "fast":
+            if workflow_route == "low":
                 await self._run_simple(job, repos, proj_config)
             else:
                 # ── Phase 1: Governor ──
-                if proj_config.governor.enabled:
+                auto_medium = (
+                    proj_config.mode == "auto" and workflow_route == "medium"
+                )
+                if proj_config.governor.enabled and not auto_medium:
                     await self._run_governor(job, repos, proj_config)
                 else:
-                    await self._skip_phase(job, repos, "governor")
+                    reason = (
+                        "已由确定性预检判定为中风险，使用保守约束"
+                        if auto_medium else "已按项目配置禁用"
+                    )
+                    await self._skip_phase(job, repos, "governor", reason)
+                    self._create_precheck_constitution(
+                        job, repos, precheck["level"]
+                    )
                 if self._is_cancelled(job.job_id, job, repos):
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
@@ -332,16 +464,24 @@ class Engine:
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
                     return
-                if job.status == "failed":
+                if job.status in {"failed", "needs_attention"}:
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
                     return
 
                 # ── Phase 4: Review ──
-                if proj_config.reviewer.enabled:
-                    await self._run_reviewer(job, repos)
+                if proj_config.reviewer.enabled and not auto_medium:
+                    await self._run_reviewer(
+                        job, repos,
+                        proj_config=proj_config,
+                        complexity=complexity,
+                    )
                 else:
-                    await self._skip_review(job, repos)
+                    await self._skip_review(
+                        job, repos,
+                        "中风险任务已通过确定性验证，跳过模型审核"
+                        if auto_medium else "审核已按项目配置跳过",
+                    )
 
             if worker and saved_turns is not None:
                 worker.max_turns = saved_turns
@@ -349,14 +489,40 @@ class Engine:
             # ── Phase 5: Finalize ──
             if not self._is_cancelled(job.job_id, job, repos):
                 await self._finalize(job, repos)
+                finalized = True
 
         except Exception as e:
             logger.error(f"Job failed: {job_id}: {e}")
             repos["job"].update_status(job_id, "failed")
+            self._store_job_failure(repos, job_id, str(e))
             self.state_machine.transition(job_id, JobState.FAILED)
             await self.event_bus.publish("job_failed", job_id=job_id, error=str(e))
         finally:
+            if worker and saved_turns is not None:
+                worker.max_turns = saved_turns
+            if job is not None and not finalized:
+                try:
+                    await self._finalize(job, repos)
+                except Exception as error:
+                    logger.warning("Could not finalize %s: %s", job_id, error)
             self._close_repos(repos)
+
+    @staticmethod
+    def _create_precheck_constitution(job, repos, risk_level: str):
+        """Persist deterministic conservative bounds when Governor is skipped."""
+        if repos["constitution"].get_by_job(job.id):
+            return
+        normalized_risk = "high" if risk_level == "critical" else risk_level
+        repos["constitution"].create(
+            job_id=job.id,
+            goal=job.user_request,
+            constraints=["只修改完成当前需求所必需的文件"],
+            acceptance_criteria=["确定性验证通过", "需求中的可观察结果已实现"],
+            risk=normalized_risk or "medium",
+            protected_paths=[],
+            requires_final_review=normalized_risk == "high",
+            raw_output={"source": "deterministic_precheck"},
+        )
 
     async def _run_governor(self, job, repos, proj_config=None):
         repos["job"].update_status(job.job_id, "governing")
@@ -378,6 +544,7 @@ class Engine:
                 )
             except Exception as e:
                 logger.warning(f"Governor failed, using defaults: {e}")
+                failure_reason = self._friendly_provider_error(str(e))
                 repos["constitution"].create(
                     job_id=job.id,
                     goal=job.user_request,
@@ -391,7 +558,11 @@ class Engine:
                 await self.event_bus.publish(
                     "phase_summary",
                     phase="governor", agent_type="governor", status="fallback",
-                    summary="裁决者不可用，已使用保守的默认约束继续执行",
+                    summary=(
+                        "裁决者不可用，已使用保守的默认约束继续执行。"
+                        f"原因：{failure_reason}"
+                    ),
+                    details={"error": failure_reason},
                 )
         else:
             repos["constitution"].create(
@@ -434,6 +605,9 @@ class Engine:
             used_fallback = True
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
+        self._optimize_plan(
+            plan_data, getattr(job, "_rockcore_complexity", "normal")
+        )
         self._serialize_overlapping_tasks(plan_data)
         self._prune_transitive_dependencies(plan_data)
 
@@ -453,6 +627,9 @@ class Engine:
         if errors:
             logger.error(f"Plan validation failed: {errors}")
             repos["job"].update_status(job.job_id, "failed")
+            self._store_job_failure(
+                repos, job.job_id, f"Plan validation failed: {errors[0]}"
+            )
             self.state_machine.transition(job.job_id, JobState.FAILED)
             await self.event_bus.publish("plan_rejected", job_id=job.job_id, errors=errors)
             await self.event_bus.publish("phase_summary",
@@ -494,7 +671,8 @@ class Engine:
             }],
         }
 
-    def _create_tasks_from_plan(self, job, repos, plan_data: dict):
+    def _create_tasks_from_plan(self, job, repos, plan_data: dict,
+                                order_offset: int = 0):
         for i, task_data in enumerate(plan_data.get("tasks", [])):
             repos["task"].create(
                 task_id=task_data.get("id", f"T{i+1:03d}"),
@@ -508,8 +686,73 @@ class Engine:
                 ),
                 dependencies=task_data.get("dependencies", []),
                 acceptance_command=task_data.get("acceptance_command", ""),
-                order=i,
+                order=order_offset + i,
             )
+
+    @classmethod
+    def _optimize_plan(cls, plan_data: dict, complexity: str = "normal"):
+        """Collapse model-heavy ceremony for small, targeted changes."""
+        if complexity != "simple":
+            return
+        tasks = [dict(task) for task in (plan_data.get("tasks") or [])]
+        coding = [task for task in tasks if task.get("type", "coding") == "coding"]
+        if not coding:
+            return
+
+        analysis = [task for task in tasks if task.get("type") == "analysis"]
+        primary = coding[0]
+        descriptions = []
+        for task in analysis + coding:
+            text = str(task.get("description") or "").strip()
+            if text and text not in descriptions:
+                descriptions.append(text)
+        primary["description"] = "\n\n".join(descriptions)
+        primary["title"] = str(primary.get("title") or "完成目标修改")
+        primary["allowed_paths"] = list(dict.fromkeys(
+            path for task in analysis + coding
+            for path in (task.get("allowed_paths") or [])
+        )) or ["*"]
+        primary["dependencies"] = []
+        primary["acceptance_command"] = next((
+            str(task.get("acceptance_command") or "")
+            for task in coding if task.get("acceptance_command")
+        ), "")
+
+        collapsed_ids = {
+            task.get("id") for task in analysis + coding if task.get("id")
+        }
+        replacement_id = primary.get("id") or "T001"
+        retained = [primary]
+        validation_kept = False
+        for task in tasks:
+            if task in analysis or task in coding or task.get("type") == "review":
+                continue
+            if task.get("type") == "testing":
+                text = (
+                    f"{task.get('title', '')} {task.get('description', '')}"
+                ).lower()
+                authoring = any(marker in text for marker in (
+                    "write test", "add test", "create test", "update test",
+                    "编写测试", "新增测试", "添加测试", "补充测试", "测试用例",
+                ))
+                if validation_kept and not authoring:
+                    continue
+                validation_kept = validation_kept or not authoring
+            dependencies = []
+            for dependency in task.get("dependencies") or []:
+                mapped = replacement_id if dependency in collapsed_ids else dependency
+                if mapped != task.get("id") and mapped not in dependencies:
+                    dependencies.append(mapped)
+            if not dependencies and task.get("type") == "testing":
+                dependencies = [replacement_id]
+            task["dependencies"] = dependencies
+            retained.append(task)
+
+        plan_data["tasks"] = retained
+        plan_data["summary"] = (
+            str(plan_data.get("summary") or "")
+            + f"（简单任务已收敛为 {len(retained)} 个步骤）"
+        )
 
     @classmethod
     def _serialize_overlapping_tasks(cls, plan_data: dict):
@@ -689,25 +932,32 @@ class Engine:
 
     async def _run_execution(self, job, repos, job_baseline: dict | None = None,
                              proj_config: ProjectAgentConfig | None = None,
-                             complexity: str = "normal"):
+                             complexity: str = "normal",
+                             task_ids: set[str] | None = None,
+                             repair_round: int = 0) -> dict:
         """Execute tasks in parallel using DAG scheduler (V4: worktree isolation)."""
         if self._is_cancelled(job.job_id, job, repos):
-            return
+            return {"status": "cancelled", "reason": "任务已由用户停止"}
         self.state_machine.transition(job.job_id, JobState.EXECUTING)
         repos["job"].update_status(job.job_id, "executing")
-        await self.event_bus.publish("job_executing", job_id=job.job_id)
+        await self.event_bus.publish(
+            "job_executing", job_id=job.job_id,
+            repair_round=repair_round,
+        )
         if self._is_cancelled(job.job_id, job, repos):
-            return
+            return {"status": "cancelled", "reason": "任务已由用户停止"}
 
         worker = self.get_agent("worker")
         if not worker:
             logger.warning("No worker agent registered")
-            return
+            return {"status": "failed", "reason": "未注册执行者"}
 
         # Collect all tasks as dicts for the DAG scheduler
         all_tasks = repos["task"].list_by_job(job.id)
+        if task_ids is not None:
+            all_tasks = [task for task in all_tasks if task.task_id in task_ids]
         if not all_tasks:
-            return
+            return {"status": "failed", "reason": "没有可执行的任务"}
 
         task_dicts = []
         for t in all_tasks:
@@ -721,11 +971,24 @@ class Engine:
                 "acceptance_command": t.acceptance_command or "",
                 "_db_task": t,
             })
+        task_data_by_id = {item["task_id"]: item for item in task_dicts}
+        completed_task_results: dict[str, dict] = {}
 
         # Define runner for each task (with worktree isolation)
         async def run_single_task(task_id: str, task_data: dict):
             t = task_data["_db_task"]
             nonlocal repos, job, worker
+
+            analysis_reports = self._collect_analysis_dependency_reports(
+                task_id, task_data_by_id, completed_task_results
+            )
+            if analysis_reports:
+                await self._ground_task_in_analysis(
+                    t, job, repos, analysis_reports
+                )
+                task_data["description"] = t.description
+                task_data["allowed_paths"] = t.allowed_paths or []
+                task_data["acceptance_command"] = t.acceptance_command or ""
 
             if self.test_manager.should_validate_locally(t):
                 repos["task"].update_status_by_pk(t.id, "running")
@@ -739,15 +1002,23 @@ class Engine:
                 )
                 if result.get("status") != "passed":
                     repos["task"].update_status_by_pk(t.id, "failed")
+                    self._checkpoint_task(
+                        repos, job, t, status="failed", result=result,
+                        error=result.get("output", "Local validation failed"),
+                    )
                     await self.event_bus.publish(
                         "task_failed", job_id=job.job_id, task_id=task_id,
                         error=result.get("output", "Local validation failed"),
                     )
                     raise RuntimeError(result.get("output", "Local validation failed"))
                 repos["task"].update_status_by_pk(t.id, "done")
+                self._checkpoint_task(
+                    repos, job, t, status="done", result=result
+                )
                 await self.event_bus.publish(
                     "task_done", job_id=job.job_id, task_id=task_id, result=result
                 )
+                completed_task_results[task_id] = result
                 return result
 
             # Create worktree for this task
@@ -777,6 +1048,37 @@ class Engine:
             )
             task_worker.max_turns = budget["max_turns"]
             task_worker.max_exploration_turns = budget["exploration_turns"]
+            if complexity == "simple":
+                task_worker.max_turns = min(task_worker.max_turns, 18)
+            task_input_limits = {
+                "simple": 120_000,
+                "normal": 220_000,
+                "complex": 320_000,
+            }
+            t._rockcore_input_budget = task_input_limits.get(
+                complexity, 220_000
+            )
+            t._rockcore_retry_count = (
+                proj_config.worker.retry_count if proj_config else MAX_FLASH_RETRY
+            )
+            t._rockcore_emergency_after_failures = (
+                proj_config.worker.emergency_after_failures
+                if proj_config else 3
+            )
+            t._rockcore_fallback_provider = (
+                proj_config.worker.fallback_provider
+                if proj_config else "kimi"
+            )
+            t._rockcore_fallback_model = (
+                proj_config.worker.fallback_model
+                if proj_config else "kimi-k2.7"
+            )
+            t._rockcore_emergency_enabled = (
+                proj_config.emergency_coder.enabled if proj_config else True
+            )
+            t._rockcore_auto_repair = (
+                proj_config.auto_repair if proj_config else True
+            )
             logger.info(
                 f"Task {task_id} budget: turns={task_worker.max_turns}, "
                 f"exploration={task_worker.max_exploration_turns} "
@@ -833,6 +1135,10 @@ class Engine:
                         "its required output — marking failed"
                     )
                     repos["task"].update_status_by_pk(t.id, "failed")
+                    self._checkpoint_task(
+                        repos, job, t, status="failed", result=result,
+                        error=error,
+                    )
                     await self.event_bus.publish("task_failed", job_id=job.job_id,
                                                   task_id=task_id,
                                                   error=error)
@@ -844,11 +1150,29 @@ class Engine:
                 test_passed = True
                 if t.acceptance_command:
                     test_result = await self.test_manager.run_tests(
-                        t, repos, self.event_bus, project_root=task_worktree_root
+                        t, repos, self.event_bus,
+                        baseline_snapshot=task_baseline,
+                        project_root=task_worktree_root,
                     )
                     if test_result and test_result.get("status") != "passed":
                         test_passed = False
                         logger.warning(f"Task {task_id} acceptance test failed: {test_result.get('status')}")
+                elif (
+                    t.task_type == "coding"
+                    and (proj_config is None or proj_config.auto_validation)
+                    and has_file_changes
+                ):
+                    test_result = await self.test_manager.validate_project(
+                        t, repos, self.event_bus,
+                        baseline_snapshot=task_baseline,
+                        project_root=task_worktree_root,
+                    )
+                    if test_result.get("status") != "passed":
+                        test_passed = False
+                        logger.warning(
+                            "Task %s deterministic validation failed: %s",
+                            task_id, test_result.get("output", "failed"),
+                        )
 
                 if test_passed:
                     # Merge worktree back
@@ -862,6 +1186,10 @@ class Engine:
                                 error = f"Merge conflict: {', '.join(conflicts)}"
                             error = error or "Task changes could not be merged"
                             repos["task"].update_status_by_pk(t.id, "failed")
+                            self._checkpoint_task(
+                                repos, job, t, status="failed",
+                                result=merge_result, error=error,
+                            )
                             await self.event_bus.publish(
                                 "task_failed", job_id=job.job_id, task_id=task_id,
                                 error=error,
@@ -879,12 +1207,28 @@ class Engine:
                         result_payload["no_changes"] = True
                     if task_output:
                         result_payload["output"] = task_output
+                    self._checkpoint_task(
+                        repos, job, t, status="done", result=result_payload
+                    )
+                    task_context_manager = getattr(
+                        task_worker, "context_manager", None
+                    )
+                    if task_context_manager:
+                        await task_context_manager.update_after_task(
+                            t, result_payload
+                        )
                     await self.event_bus.publish(
                         "task_done", job_id=job.job_id,
                         task_id=task_id, result=result_payload,
                     )
+                    completed_task_results[task_id] = result_payload
+                    return result_payload
                 else:
                     repos["task"].update_status_by_pk(t.id, "failed")
+                    self._checkpoint_task(
+                        repos, job, t, status="failed", result=result,
+                        error="Acceptance test failed",
+                    )
                     await self.event_bus.publish("task_failed", job_id=job.job_id,
                                                   task_id=task_id,
                                                   error="Acceptance test failed")
@@ -899,6 +1243,10 @@ class Engine:
                 if has_worktree:
                     await self.merge_manager.abort_worktree(task_id)
                 error = result.get("error", "Unknown") if result else "Unknown"
+                self._checkpoint_task(
+                    repos, job, t, status="failed", result=result,
+                    error=error,
+                )
                 raise RuntimeError(error)
 
         # Run through DAG scheduler
@@ -911,7 +1259,7 @@ class Engine:
                     summary="任务已由用户停止",
                     details={"done": len(self.scheduler._completed), "failed": 0},
                 )
-                return
+                return {"status": "cancelled", "reason": "任务已由用户停止"}
             blocked = [
                 tid for tid, result in results.items()
                 if isinstance(result, dict) and result.get("status") == "blocked"
@@ -927,6 +1275,11 @@ class Engine:
                 repos["task"].update_status_by_pk(
                     task_data["_db_task"].id, "blocked"
                 )
+                self._checkpoint_task(
+                    repos, job, task_data["_db_task"], status="blocked",
+                    result=blocked_result,
+                    error=blocked_result.get("error", "Dependency failed"),
+                )
                 await self.event_bus.publish(
                     "task_blocked",
                     job_id=job.job_id,
@@ -941,7 +1294,10 @@ class Engine:
             ]
             if failed:
                 logger.error(f"Tasks failed: {failed}")
-                repos["job"].update_status(job.job_id, "failed")
+                terminal_status = (
+                    "needs_attention" if self.scheduler._completed else "failed"
+                )
+                repos["job"].update_status(job.job_id, terminal_status)
                 self.state_machine.transition(job.job_id, JobState.FAILED)
                 direct_failures = [tid for tid in failed if tid not in blocked]
                 failure_messages = [
@@ -954,6 +1310,7 @@ class Engine:
                         for tid in direct_failures
                     ]
                 reason = failure_messages[0][:160] if failure_messages else "未知错误"
+                self._store_job_failure(repos, job.job_id, reason)
                 await self.event_bus.publish("phase_summary",
                     phase="execution", agent_type="worker", status="failed",
                     summary=f"任务执行失败：{reason}",
@@ -963,16 +1320,17 @@ class Engine:
                         "blocked": len(blocked),
                     },
                 )
-                return
+                return {"status": "failed", "reason": reason}
         except Exception as e:
             logger.error(f"Execution failed: {e}")
             repos["job"].update_status(job.job_id, "failed")
+            self._store_job_failure(repos, job.job_id, str(e))
             self.state_machine.transition(job.job_id, JobState.FAILED)
             await self.event_bus.publish("phase_summary",
                 phase="execution", agent_type="worker", status="failed",
                 summary=f"执行异常：{str(e)[:100]}",
             )
-            return
+            return {"status": "failed", "reason": str(e)}
 
         self.state_machine.transition(job.job_id, JobState.TESTING)
         await self.event_bus.publish("execution_complete", job_id=job.job_id)
@@ -981,36 +1339,211 @@ class Engine:
             summary=f"所有任务执行完成",
             details={"done": len(task_dicts), "failed": 0},
         )
+        return {"status": "completed", "task_ids": sorted(task_ids or [])}
+
+    @staticmethod
+    def _collect_analysis_dependency_reports(
+        task_id: str,
+        task_data_by_id: dict[str, dict],
+        completed_results: dict[str, dict],
+    ) -> dict[str, str]:
+        """Collect reports from all completed analysis ancestors of a task."""
+        reports: dict[str, str] = {}
+        visited: set[str] = set()
+
+        def visit(current_id: str):
+            if current_id in visited:
+                return
+            visited.add(current_id)
+            current = task_data_by_id.get(current_id) or {}
+            for dependency_id in current.get("dependencies") or []:
+                dependency = task_data_by_id.get(dependency_id) or {}
+                result = completed_results.get(dependency_id) or {}
+                if dependency.get("type") == "analysis":
+                    output = str(
+                        result.get("output")
+                        or (result.get("result") or {}).get("content")
+                        or ""
+                    ).strip()
+                    if output:
+                        reports[dependency_id] = output
+                visit(dependency_id)
+
+        visit(task_id)
+        return reports
+
+    async def _ground_task_in_analysis(self, task, job, repos,
+                                       reports: dict[str, str]):
+        """Feed prerequisite findings into a task and repair guessed paths."""
+        if not reports or task.task_type == "analysis":
+            return
+
+        report_sections = [
+            f"[{task_id}]\n{report[:5000]}"
+            for task_id, report in sorted(reports.items())
+        ]
+        report_text = "\n\n".join(report_sections)
+        marker = "\n\n=== Verified prerequisite analysis ===\n"
+        description = task.description or ""
+        if marker.strip() not in description:
+            description = description + marker + report_text
+
+        project_root = job.project.root_path if job.project else "."
+        project_files = self._project_output_files(project_root)
+        basename_counts: dict[str, int] = {}
+        for relative_path in project_files:
+            basename = Path(relative_path).name
+            basename_counts[basename] = basename_counts.get(basename, 0) + 1
+        referenced_files = [
+            relative_path
+            for relative_path in project_files
+            if (
+                relative_path in report_text
+                or (
+                    basename_counts.get(Path(relative_path).name) == 1
+                    and Path(relative_path).name in report_text
+                )
+            )
+        ]
+
+        current_paths = list(task.allowed_paths or [])
+        current_matches = any(
+            fnmatch.fnmatch(relative_path, pattern)
+            for relative_path in project_files
+            for pattern in current_paths
+        )
+        refined_paths = current_paths
+        if referenced_files and not current_matches:
+            # The original paths were speculative and match no real project
+            # files. Replace them with exact files proven by the prerequisite.
+            refined_paths = sorted(set(referenced_files))
+
+        constitution = repos["constitution"].get_by_job(job.id)
+        validation_errors = self.policy_engine.check_task_plan(
+            {
+                "tasks": [{
+                    "id": task.task_id,
+                    "allowed_paths": refined_paths,
+                }],
+            },
+            {
+                "protected_paths": (
+                    constitution.protected_paths if constitution else []
+                ),
+            },
+        )
+        if validation_errors:
+            logger.warning(
+                "Task %s analysis refinement rejected: %s",
+                task.task_id, validation_errors,
+            )
+            # The report itself is still safe and useful context even when a
+            # proposed path intersects a protected area.
+            repos["task"].update_definition(
+                task.id,
+                description=description,
+                allowed_paths=current_paths,
+            )
+            task.description = description
+            await self.event_bus.publish(
+                "task_refinement_rejected",
+                job_id=job.job_id,
+                task_id=task.task_id,
+                errors=validation_errors,
+            )
+            return
+
+        repos["task"].update_definition(
+            task.id,
+            description=description,
+            allowed_paths=refined_paths,
+        )
+        task.description = description
+        task.allowed_paths = refined_paths
+        await self.event_bus.publish(
+            "task_refined",
+            job_id=job.job_id,
+            task_id=task.task_id,
+            analysis_tasks=sorted(reports),
+            allowed_paths=refined_paths,
+            paths_changed=refined_paths != current_paths,
+        )
 
     async def _execute_single_task_with_escalation(self, task, job, repos, worker, worktree_root):
-        """Execute a single task with L0-L4 escalation (used by parallel runner)."""
-        replan_count = 0
+        """Retry the primary Worker, then escalate once to Emergency."""
         escalation_count = 0
         last_error = ""
+        repair_guidance = ""
         initial_turn_budget = getattr(worker, "max_turns", 16)
         continuation_turn_budget = min(12, max(8, initial_turn_budget // 2))
+        configured_attempts = max(
+            1, int(getattr(task, "_rockcore_retry_count", MAX_FLASH_RETRY)) + 1
+        )
+        emergency_after = max(1, min(6, int(getattr(
+            task, "_rockcore_emergency_after_failures", 3
+        ))))
+        primary_attempts = min(configured_attempts, emergency_after)
 
-        for attempt in range(1, MAX_FLASH_RETRY + 2):  # L0 + L1 retry
+        for attempt in range(1, primary_attempts + 1):
             try:
-                result = await worker.run(task, project_root=worktree_root)
+                recovery_context = ""
+                if attempt > 1:
+                    recovery_context = (
+                        f"Primary Worker attempt {attempt - 1} failed. "
+                        f"Error: {last_error[:1800]}\n"
+                        "Inspect the existing changes and the exact failure; do not "
+                        "repeat broad exploration. Apply a focused fix and verify it."
+                    )
+                    if attempt >= 3:
+                        recovery_context += (
+                            " This is the final Worker attempt before Emergency. "
+                            "Re-read the acceptance command and relevant final files."
+                        )
+                    if repair_guidance:
+                        recovery_context += "\nPlanner guidance:\n" + repair_guidance
+                result = await worker.run(
+                    task,
+                    project_root=worktree_root,
+                    recovery_context=recovery_context,
+                )
                 if result and result.get("status") == "completed":
                     return {"status": "completed", "result": result}
 
                 if result and result.get("error"):
                     last_error = str(result["error"])
-                    if self._is_provider_unavailable(last_error):
-                        fallback = await self._run_worker_fallback(
-                            worker, task, worktree_root, last_error
-                        )
-                        if fallback:
-                            return fallback
+                    if self._is_budget_error(last_error):
                         return {"status": "failed", "error": last_error}
+                    if self._is_task_path_mismatch(last_error):
+                        logger.warning(
+                            "Task %s has an invalid allowed-path plan; "
+                            "requesting a focused path correction",
+                            task.task_id,
+                        )
+                        if attempt < primary_attempts:
+                            try:
+                                repair_plan = await self._repair_plan(
+                                    job, task, last_error, repos
+                                )
+                            except BudgetExceededError as error:
+                                return {"status": "failed", "error": str(error)}
+                            if repair_plan:
+                                await self._apply_repair_plan_paths(
+                                    task, job, repos, repair_plan
+                                )
+                                repair_guidance = json.dumps(
+                                    repair_plan, ensure_ascii=False, default=str
+                                )[:3000]
+                        continue
+                    if self._is_provider_capability_error(last_error):
+                        break
+                    if self._is_provider_unavailable(last_error):
+                        break
                     if "ended without editing files" in last_error.lower():
                         logger.warning(
                             f"Task {task.task_id}: model ended before editing; "
                             "switching to focused repair"
                         )
-                        break
+                        continue
 
                 # A turn limit means the model did not explicitly finish. Keep
                 # partial edits for a continuation, but never auto-pass merely
@@ -1041,10 +1574,18 @@ class Engine:
                             f"Task {task.task_id}: max turns with no changes; "
                             "switching to focused repair"
                         )
-                        break
+                        continue
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
+                if self._is_budget_error(last_error):
+                    return {"status": "failed", "error": last_error}
+                if self._is_provider_capability_error(last_error):
+                    logger.warning(
+                        f"Task {task.task_id}: provider capability mismatch; "
+                        "switching to fallback"
+                    )
+                    break
                 if self._is_provider_unavailable(last_error):
                     logger.warning(
                         f"Task {task.task_id}: provider failure is not retryable "
@@ -1052,49 +1593,31 @@ class Engine:
                     )
                     break
 
-        if self._is_provider_unavailable(last_error):
+        if (
+            self._is_provider_capability_error(last_error)
+            or self._is_provider_unavailable(last_error)
+        ):
             fallback = await self._run_worker_fallback(
                 worker, task, worktree_root, last_error
             )
             if fallback:
-                return fallback
+                if fallback.get("status") == "completed":
+                    return fallback
+                last_error = fallback.get("error", last_error)
+
+        if not bool(getattr(task, "_rockcore_auto_repair", True)):
             return {"status": "failed", "error": last_error}
 
-        # L0 + L1 failed — escalate
-        worker.max_turns = continuation_turn_budget
+        # The configured primary Worker failure threshold has been reached.
         await self.event_bus.publish("task_repairing", job_id=job.job_id,
-                                      task_id=task.task_id, error=last_error)
+                                      task_id=task.task_id, error=last_error,
+                                      attempts=primary_attempts)
 
-        # L2: Replan
-        if replan_count < MAX_REPLAN_RETRY:
-            replan_count += 1
-            await self.event_bus.publish("task_replanning", job_id=job.job_id,
-                                          task_id=task.task_id)
-            repair_plan = await self._repair_plan(job, task, last_error, repos)
-            if repair_plan:
-                recovery_context = json.dumps(
-                    repair_plan, ensure_ascii=False, default=str
-                )
-                for attempt in range(1, MAX_FLASH_RETRY + 2):
-                    try:
-                        result = await worker.run(
-                            task,
-                            project_root=worktree_root,
-                            provider_override=(
-                                "kimi" if self.model_router.has_provider("kimi") else None
-                            ),
-                            recovery_context=recovery_context,
-                        )
-                        if result and result.get("status") == "completed":
-                            return {"status": "completed", "result": result}
-                        if result and result.get("error"):
-                            last_error = str(result["error"])
-                    except Exception as e:
-                        last_error = str(e)
-                        logger.warning(f"Repair attempt {attempt} failed: {e}")
-
-        # L3: Emergency Coder
-        if escalation_count < 1:
+        # Emergency Coder: one quality-first attempt after the Worker threshold.
+        if (
+            bool(getattr(task, "_rockcore_emergency_enabled", True))
+            and escalation_count < 1
+        ):
             escalation_count += 1
             await self.event_bus.publish("task_escalating", job_id=job.job_id,
                                           task_id=task.task_id)
@@ -1104,6 +1627,37 @@ class Engine:
 
         # L4: Failed
         return {"status": "failed", "error": last_error}
+
+    @staticmethod
+    def _is_budget_error(error: str) -> bool:
+        normalized = (error or "").lower()
+        return (
+            "rockcore job budget exceeded" in normalized
+            or "total tokens exceeded" in normalized
+            or "input tokens exceeded" in normalized
+            or "output tokens exceeded" in normalized
+            or "api calls exceeded" in normalized
+            or "cost exceeded" in normalized
+        )
+
+    @staticmethod
+    def _is_task_path_mismatch(error: str) -> bool:
+        normalized = (error or "").lower()
+        return (
+            "[allowed_path]" in normalized
+            or "path not in allowed set" in normalized
+        )
+
+    @staticmethod
+    def _is_provider_capability_error(error: str) -> bool:
+        """Return whether a provider rejected a requested model capability."""
+        normalized = (error or "").lower()
+        markers = (
+            "thinking mode does not support this tool_choice",
+            "does not support this tool_choice",
+            "unsupported tool_choice",
+        )
+        return any(marker in normalized for marker in markers)
 
     @staticmethod
     def _is_provider_unavailable(error: str) -> bool:
@@ -1128,7 +1682,14 @@ class Engine:
                                    original_error: str) -> dict | None:
         """Try one tool-capable alternate worker when the primary provider is unavailable."""
         fallback_errors = []
-        for provider in ("kimi",):
+        configured_provider = str(
+            getattr(task, "_rockcore_fallback_provider", "kimi") or "kimi"
+        )
+        configured_model = str(
+            getattr(task, "_rockcore_fallback_model", "kimi-k2.7")
+            or "kimi-k2.7"
+        )
+        for provider in (configured_provider,):
             if not self.model_router.has_provider(provider):
                 continue
             await self.event_bus.publish(
@@ -1141,6 +1702,7 @@ class Engine:
                     task,
                     project_root=worktree_root,
                     provider_override=provider,
+                    model_override=configured_model,
                     recovery_context=(
                         "The primary worker provider failed before completing this task. "
                         "Use the existing project state and finish the task with focused "
@@ -1181,9 +1743,65 @@ class Engine:
             }
             repair_plan = await planner.repair_plan(job, repair_context)
             return repair_plan
+        except BudgetExceededError:
+            raise
         except Exception as e:
             logger.error(f"Repair planning failed: {e}")
             return None
+
+    async def _apply_repair_plan_paths(self, task, job, repos,
+                                       repair_plan: dict) -> bool:
+        """Apply safe path corrections from a focused repair plan."""
+        repair_tasks = repair_plan.get("tasks") or []
+        proposed_paths = [
+            path
+            for repair_task in repair_tasks
+            for path in (repair_task.get("allowed_paths") or [])
+        ]
+        if not proposed_paths:
+            return False
+
+        project_root = job.project.root_path if job.project else "."
+        normalized_paths = self._normalize_paths(proposed_paths, project_root)
+        combined_paths = list(dict.fromkeys([
+            *(task.allowed_paths or []),
+            *normalized_paths,
+        ]))
+        constitution = repos["constitution"].get_by_job(job.id)
+        errors = self.policy_engine.check_task_plan(
+            {"tasks": [{
+                "id": task.task_id,
+                "allowed_paths": combined_paths,
+            }]},
+            {"protected_paths": (
+                constitution.protected_paths if constitution else []
+            )},
+        )
+        if errors:
+            logger.warning(
+                "Repair plan paths rejected for %s: %s", task.task_id, errors
+            )
+            await self.event_bus.publish(
+                "task_refinement_rejected",
+                job_id=job.job_id,
+                task_id=task.task_id,
+                errors=errors,
+            )
+            return False
+
+        repos["task"].update_definition(
+            task.id, allowed_paths=combined_paths
+        )
+        task.allowed_paths = combined_paths
+        await self.event_bus.publish(
+            "task_refined",
+            job_id=job.job_id,
+            task_id=task.task_id,
+            allowed_paths=combined_paths,
+            paths_changed=True,
+            source="repair_plan",
+        )
+        return True
 
     async def _escalate_to_emergency(self, task, job, error) -> dict | None:
         """L3: Codex Emergency Coder with workspace_write access."""
@@ -1198,83 +1816,589 @@ class Engine:
             logger.error(f"Emergency coder failed: {e}")
             return None
 
-    async def _run_reviewer(self, job, repos):
-        if self._is_cancelled(job.job_id, job, repos):
-            return
-        self.state_machine.transition(job.job_id, JobState.REVIEWING)
-        repos["job"].update_status(job.job_id, "reviewing")
-        await self.event_bus.publish("job_reviewing", job_id=job.job_id)
-        if self._is_cancelled(job.job_id, job, repos):
-            return
+    async def _run_reviewer(self, job, repos,
+                            proj_config: ProjectAgentConfig | None = None,
+                            complexity: str = "normal"):
+        """Review, plan actionable rework, execute it, and review again."""
+        repair_round = 0
 
-        review_result = None
-        reviewer = self.get_agent("reviewer")
-        if reviewer:
-            try:
-                review_result = await reviewer.run(job)
-                repos["review"].create(
-                    job_id=job.id,
-                    result=review_result.get("result", "pass"),
-                    severity=review_result.get("severity", "low"),
-                    issues=review_result.get("issues", []),
-                    constraint_violations=review_result.get("constraint_violations", []),
-                    suggested_actions=review_result.get("suggested_actions", []),
-                    summary=review_result.get("summary", ""),
-                )
-                await self.event_bus.publish("review_complete", job_id=job.job_id,
-                                              result=review_result.get("result"))
-            except Exception as e:
-                logger.warning(f"Reviewer failed: {e}")
-                summary = f"审核者不可用：{str(e)[:300]}"
-                repos["review"].create(
-                    job_id=job.id,
-                    result="error",
-                    severity="high",
-                    issues=[{"problem": summary, "severity": "high"}],
-                    summary=summary,
-                )
+        while True:
+            if self._is_cancelled(job.job_id, job, repos):
+                return
+            self.state_machine.transition(job.job_id, JobState.REVIEWING)
+            repos["job"].update_status(job.job_id, "reviewing")
+            await self.event_bus.publish(
+                "job_reviewing", job_id=job.job_id,
+                repair_round=repair_round,
+            )
+            review_budget = self.model_router.cost_engine.reserve_review_budget(
+                job.job_id, repair_round
+            )
+            await self.event_bus.publish(
+                "budget_reserved",
+                job_id=job.job_id,
+                phase="review",
+                round=repair_round,
+                max_input_tokens=review_budget.max_input_tokens,
+                max_cost_usd=review_budget.max_cost_usd,
+            )
+            if self._is_cancelled(job.job_id, job, repos):
+                return
+
+            reviewer = self.get_agent("reviewer")
+            if not reviewer:
+                summary = "审核者不可用：未注册审核者"
                 review_result = {
                     "result": "error",
+                    "severity": "high",
                     "summary": summary,
                     "issues": [{"problem": summary, "severity": "high"}],
+                    "constraint_violations": [],
+                    "suggested_actions": [],
                 }
+            else:
+                try:
+                    review_result = await reviewer.run(job)
+                except Exception as error:
+                    logger.warning("Reviewer failed: %s", error)
+                    summary = f"审核者不可用：{str(error)[:300]}"
+                    review_result = {
+                        "result": "error",
+                        "severity": "high",
+                        "summary": summary,
+                        "issues": [{"problem": summary, "severity": "high"}],
+                        "constraint_violations": [],
+                        "suggested_actions": [],
+                    }
+
+            review_result.setdefault("result", "error")
+            review_result.setdefault("severity", "medium")
+            review_result.setdefault("summary", "")
+            review_result.setdefault("issues", [])
+            review_result.setdefault("constraint_violations", [])
+            review_result.setdefault("suggested_actions", [])
+            repos["review"].create(
+                job_id=job.id,
+                result=review_result["result"],
+                severity=review_result["severity"],
+                issues=review_result["issues"],
+                constraint_violations=review_result["constraint_violations"],
+                suggested_actions=review_result["suggested_actions"],
+                summary=review_result["summary"],
+            )
+            await self.event_bus.publish(
+                "review_complete", job_id=job.job_id,
+                result=review_result["result"],
+                summary=review_result["summary"],
+                issues=review_result["issues"],
+                repair_round=repair_round,
+            )
+
+            if self._is_cancelled(job.job_id, job, repos):
+                return
+
+            review_status = review_result["result"]
+            if review_status == "pass":
+                if repair_round:
+                    plan = repos["plan"].get_by_job(job.id)
+                    rounds = list((plan.raw_output or {}).get("repair_rounds") or []) if plan else []
+                    if rounds:
+                        last_round = dict(rounds[-1])
+                        last_round.update({
+                            "status": "passed",
+                            "final_review_summary": review_result["summary"],
+                        })
+                        repos["plan"].upsert_repair_round(job.id, last_round)
+                self.state_machine.transition(job.job_id, JobState.DONE)
+                repos["job"].update_status(job.job_id, "done")
+                repos["job"].clear_failure(job.job_id)
                 await self.event_bus.publish(
-                    "review_complete", job_id=job.job_id, result="error"
+                    "phase_summary",
+                    phase="reviewer", agent_type="reviewer", status="success",
+                    summary=(
+                        f"修复后审核通过：{review_result['summary'][:200]}"
+                        if repair_round else "审核通过"
+                    ),
+                    repair_round=repair_round,
                 )
+                await self.event_bus.publish("job_done", job_id=job.job_id)
+                return review_result
 
-        if self._is_cancelled(job.job_id, job, repos):
-            return
-
-        # If reviewer rejected, mark failed, not done
-        review_status = review_result.get("result") if review_result else "error"
-        is_rejected = review_status in {"reject", "error"}
-        if is_rejected:
-            logger.warning(f"Job {job.job_id}: review {review_status.upper()}")
-            repos["job"].update_status(job.job_id, "failed")
-            self.state_machine.transition(job.job_id, JobState.FAILED)
-            await self.event_bus.publish("phase_summary",
+            logger.warning("Job %s: review %s", job.job_id, review_status.upper())
+            await self.event_bus.publish(
+                "phase_summary",
                 phase="reviewer", agent_type="reviewer",
                 status="failed" if review_status == "error" else "rejected",
                 summary=(
-                    f"审核失败：{review_result.get('summary', '')[:200]}"
+                    f"审核失败：{review_result['summary'][:200]}"
                     if review_status == "error" else
-                    f"审核驳回：{review_result.get('summary', '')[:200]}"
+                    f"审核未通过，正在交由策划者判断能否修复："
+                    f"{review_result['summary'][:200]}"
                 ),
-                details={"issues": review_result.get("issues", []) if review_result else []},
+                details={"issues": review_result["issues"]},
+                repair_round=repair_round,
             )
-            await self.event_bus.publish("job_failed", job_id=job.job_id,
-                                         error=(
-                                             "Reviewer unavailable"
-                                             if review_status == "error" else "Review rejected"
-                                         ))
-        else:
-            self.state_machine.transition(job.job_id, JobState.DONE)
-            repos["job"].update_status(job.job_id, "done")
-            await self.event_bus.publish("phase_summary",
-                phase="reviewer", agent_type="reviewer", status="success",
-                summary="审核通过",
+
+            # An unavailable reviewer produced no trustworthy findings to repair.
+            if review_status == "error":
+                reason = (
+                    "审核者未能完成审核，没有有效审核意见可供策划者生成修复计划。"
+                    f"{review_result['summary']}"
+                )
+                if repair_round:
+                    self._update_latest_repair_round(
+                        repos, job.id,
+                        status="review_error", reason=reason,
+                    )
+                await self._finish_review_failure(
+                    job, repos, review_result, reason, status="failed",
+                    repair_round=repair_round,
+                )
+                return review_result
+
+            if repair_round >= MAX_REVIEW_REPAIR_ROUNDS:
+                reason = (
+                    f"已完成 {repair_round} 轮自动修复，但审核仍未通过："
+                    f"{review_result['summary']}"
+                )
+                self._update_latest_repair_round(
+                    repos, job.id,
+                    status="review_rejected", reason=reason,
+                )
+                await self._finish_review_failure(
+                    job, repos, review_result, reason, status="rejected",
+                    repair_round=repair_round,
+                )
+                return review_result
+
+            if repair_round:
+                reason = (
+                    f"第 {repair_round} 轮修复后审核仍未通过："
+                    f"{review_result['summary']}"
+                )
+                self._update_latest_repair_round(
+                    repos, job.id,
+                    status="review_rejected",
+                    reason=reason,
+                    final_review_summary=review_result["summary"],
+                )
+
+            repair_round += 1
+            repair_outcome = await self._attempt_review_repair(
+                job, repos, review_result,
+                round_number=repair_round,
+                proj_config=proj_config,
+                complexity=complexity,
             )
-            await self.event_bus.publish("job_done", job_id=job.job_id)
+            if repair_outcome.get("status") != "completed":
+                if self._is_cancelled(job.job_id, job, repos):
+                    return review_result
+                reason = repair_outcome.get("reason") or "策划者未能完成审核修复"
+                outcome_status = repair_outcome.get("status", "")
+                await self._finish_review_failure(
+                    job, repos, review_result, reason, status="rejected",
+                    repair_round=repair_round,
+                    agent_type=(
+                        "worker" if outcome_status == "execution_failed"
+                        else "planner"
+                    ),
+                )
+                return review_result
+
+    async def _attempt_review_repair(self, job, repos, review_result: dict,
+                                     round_number: int,
+                                     proj_config: ProjectAgentConfig | None,
+                                     complexity: str) -> dict:
+        """Ask the Planner whether a rejection is repairable, then execute its plan."""
+        planner = self.get_agent("planner")
+        precondition_reason = ""
+        if proj_config is not None and not proj_config.auto_repair:
+            precondition_reason = (
+                "项目配置已关闭“失败自动修复”，因此审核未通过后不能自动修改"
+            )
+        elif proj_config is not None and not proj_config.planner.enabled:
+            precondition_reason = (
+                "项目配置未启用策划者，无法判断审核问题能否完成修改"
+            )
+        elif not planner or not hasattr(planner, "plan_review_repair"):
+            precondition_reason = "未注册支持审核修复判断的策划者"
+
+        if precondition_reason:
+            self.state_machine.transition(job.job_id, JobState.REWORK)
+            repos["job"].update_status(job.job_id, "rework")
+            repair_record = {
+                "round": round_number,
+                "review_summary": review_result.get("summary", ""),
+                "review_issues": review_result.get("issues", []),
+                "repairable": False,
+                "reason": precondition_reason,
+                "status": "unrepairable",
+                "plan": {"summary": "", "tasks": []},
+            }
+            repos["plan"].upsert_repair_round(job.id, repair_record)
+            await self.event_bus.publish(
+                "phase_summary",
+                phase="planner", agent_type="planner", status="rejected",
+                summary=f"无法进入自动修复：{precondition_reason}",
+                details={"reason": precondition_reason, "repair_round": round_number},
+                repair_round=round_number,
+            )
+            return {
+                "status": "unrepairable",
+                "reason": precondition_reason,
+            }
+
+        self.state_machine.transition(job.job_id, JobState.REWORK)
+        repos["job"].update_status(job.job_id, "rework")
+        repair_budget = self.model_router.cost_engine.reserve_repair_budget(
+            job.job_id, round_number
+        )
+        await self.event_bus.publish(
+            "review_repair_assessing",
+            job_id=job.job_id,
+            repair_round=round_number,
+            review_summary=review_result.get("summary", ""),
+        )
+        await self.event_bus.publish(
+            "budget_reserved",
+            job_id=job.job_id,
+            phase="review_repair",
+            round=round_number,
+            max_input_tokens=repair_budget.max_input_tokens,
+            max_cost_usd=repair_budget.max_cost_usd,
+        )
+
+        constitution = repos["constitution"].get_by_job(job.id)
+        try:
+            decision = await planner.plan_review_repair(
+                job, review_result, constitution=constitution,
+                round_number=round_number,
+            )
+        except BudgetExceededError as error:
+            reason = f"自动修复未启动：{error}"
+            repair_record = {
+                "round": round_number,
+                "review_summary": review_result.get("summary", ""),
+                "review_issues": review_result.get("issues", []),
+                "repairable": False,
+                "reason": reason,
+                "status": "assessment_failed",
+                "plan": {"summary": "", "tasks": []},
+            }
+            repos["plan"].upsert_repair_round(job.id, repair_record)
+            await self.event_bus.publish(
+                "review_repair_failed",
+                job_id=job.job_id,
+                repair_round=round_number,
+                reason=reason,
+            )
+            return {"status": "assessment_failed", "reason": reason}
+        if not isinstance(decision, dict):
+            decision = {
+                "repairable": False,
+                "reason": "策划者没有返回有效的可修复性判断",
+                "plan": {"summary": "", "tasks": []},
+                "assessment_error": True,
+            }
+        reason = str(decision.get("reason") or "").strip()
+        repair_record = {
+            "round": round_number,
+            "review_summary": review_result.get("summary", ""),
+            "review_issues": review_result.get("issues", []),
+            "repairable": bool(decision.get("repairable")),
+            "reason": reason,
+            "status": "assessed",
+            "plan": decision.get("plan") or {},
+        }
+
+        if not decision.get("repairable"):
+            repair_record["status"] = (
+                "assessment_failed" if decision.get("assessment_error")
+                else "unrepairable"
+            )
+            repos["plan"].upsert_repair_round(job.id, repair_record)
+            await self.event_bus.publish(
+                "phase_summary",
+                phase="planner", agent_type="planner",
+                status="failed" if decision.get("assessment_error") else "rejected",
+                summary=f"策划者判断无法自动完成修改：{reason}",
+                details={"reason": reason, "repair_round": round_number},
+                repair_round=round_number,
+            )
+            return {"status": repair_record["status"], "reason": reason}
+
+        plan_data = self._namespace_repair_plan(
+            decision.get("plan") or {}, round_number
+        )
+        self._serialize_overlapping_tasks(plan_data)
+        self._prune_transitive_dependencies(plan_data)
+        repair_record["plan"] = plan_data
+
+        self.state_machine.transition(job.job_id, JobState.PLANNING)
+        repos["job"].update_status(job.job_id, "planning")
+        await self.event_bus.publish(
+            "job_planning", job_id=job.job_id,
+            repair_round=round_number,
+        )
+        self.state_machine.transition(job.job_id, JobState.PLAN_CHECK)
+        errors = self.policy_engine.check_task_plan(
+            plan_data,
+            {"protected_paths": constitution.protected_paths if constitution else []},
+        )
+        if errors:
+            plan_reason = f"修复计划未通过约束检查：{errors[0]}"
+            repair_record.update({
+                "status": "plan_rejected",
+                "reason": plan_reason,
+                "validation_errors": errors,
+            })
+            repos["plan"].upsert_repair_round(job.id, repair_record)
+            await self.event_bus.publish(
+                "phase_summary",
+                phase="planner", agent_type="planner", status="rejected",
+                summary=plan_reason,
+                details={"errors": errors},
+                repair_round=round_number,
+            )
+            return {"status": "plan_rejected", "reason": plan_reason}
+
+        existing_tasks = repos["task"].list_by_job(job.id)
+        self._create_tasks_from_plan(
+            job, repos, plan_data, order_offset=len(existing_tasks)
+        )
+        repair_task_ids = {
+            task.get("id") for task in plan_data.get("tasks", []) if task.get("id")
+        }
+        repair_record["status"] = "planned"
+        repos["plan"].upsert_repair_round(job.id, repair_record)
+        self.state_machine.transition(job.job_id, JobState.READY)
+        await self.event_bus.publish(
+            "plan_ready", job_id=job.job_id,
+            repair_round=round_number,
+            task_ids=sorted(repair_task_ids),
+        )
+        await self.event_bus.publish(
+            "phase_summary",
+            phase="planner", agent_type="planner", status="success",
+            summary=f"策划者判断可以修复：{reason}",
+            details={"tasks": plan_data.get("tasks", [])},
+            repair_round=round_number,
+        )
+
+        project_root = job.project.root_path if job.project else "."
+        repair_baseline = self.test_manager.capture_snapshot(project_root)
+        repair_record["status"] = "executing"
+        repos["plan"].upsert_repair_round(job.id, repair_record)
+        execution_result = await self._run_execution(
+            job, repos, repair_baseline,
+            proj_config=proj_config,
+            complexity=complexity,
+            task_ids=repair_task_ids,
+            repair_round=round_number,
+        )
+        repos["_session"].refresh(job)
+        if not isinstance(execution_result, dict):
+            execution_result = {
+                "status": "failed",
+                "reason": "修复执行没有返回有效结果",
+            }
+        if execution_result.get("status") != "completed":
+            execution_reason = (
+                execution_result.get("reason")
+                or "修复任务执行后没有达到完成状态"
+            )
+            repair_record.update({
+                "status": "execution_failed",
+                "reason": execution_reason,
+            })
+            repos["plan"].upsert_repair_round(job.id, repair_record)
+            await self.event_bus.publish(
+                "review_repair_failed", job_id=job.job_id,
+                repair_round=round_number,
+                reason=execution_reason,
+            )
+            return {"status": "execution_failed", "reason": execution_reason}
+
+        repair_record["status"] = "executed"
+        repos["plan"].upsert_repair_round(job.id, repair_record)
+        await self.event_bus.publish(
+            "review_repair_executed", job_id=job.job_id,
+            repair_round=round_number,
+            task_ids=sorted(repair_task_ids),
+        )
+        return {"status": "completed", "task_ids": sorted(repair_task_ids)}
+
+    async def _finish_review_failure(self, job, repos, review_result: dict,
+                                     reason: str, status: str,
+                                     repair_round: int = 0,
+                                     agent_type: str = "reviewer"):
+        """Persist and publish a review failure with an actionable explanation."""
+        if self._is_cancelled(job.job_id, job, repos):
+            return
+        has_completed_work = any(
+            task.status == "done"
+            for task in repos["task"].list_by_job(job.id)
+        )
+        repos["job"].update_status(
+            job.job_id,
+            "needs_attention" if has_completed_work else "failed",
+        )
+        self._store_job_failure(repos, job.job_id, reason)
+        if self.state_machine.get_state(job.job_id) != JobState.FAILED:
+            if not self.state_machine.transition(job.job_id, JobState.FAILED):
+                logger.warning(
+                    "Could not transition %s to FAILED from %s",
+                    job.job_id,
+                    self.state_machine.get_state(job.job_id).name,
+                )
+        await self.event_bus.publish(
+            "phase_summary",
+            phase="reviewer", agent_type=agent_type, status=status,
+            summary=f"审核修复未完成：{reason[:300]}",
+            details={
+                "issues": review_result.get("issues", []),
+                "reason": reason,
+            },
+            repair_round=repair_round,
+        )
+        await self.event_bus.publish(
+            "job_failed", job_id=job.job_id, error=reason
+        )
+
+    @staticmethod
+    def _update_latest_repair_round(repos, job_id: int, **updates):
+        plan = repos["plan"].get_by_job(job_id)
+        rounds = list((plan.raw_output or {}).get("repair_rounds") or []) if plan else []
+        if not rounds:
+            return
+        latest = dict(rounds[-1])
+        latest.update(updates)
+        repos["plan"].upsert_repair_round(job_id, latest)
+
+    @classmethod
+    def _namespace_repair_plan(cls, plan_data: dict,
+                               round_number: int) -> dict:
+        """Give repair tasks unique IDs and retain only internal dependencies."""
+        tasks = [dict(task) for task in (plan_data.get("tasks") or [])]
+        id_map = {}
+        for index, task in enumerate(tasks):
+            old_id = str(task.get("id") or f"T{index + 1:03d}")
+            new_id = f"R{round_number:02d}T{index + 1:03d}"
+            id_map[old_id] = new_id
+            task["id"] = new_id
+            task.setdefault("title", f"审核修复步骤 {index + 1}")
+            task.setdefault("type", "coding")
+            task.setdefault("description", task["title"])
+            task.setdefault("allowed_paths", [])
+            task.setdefault("acceptance_command", "")
+
+        for task in tasks:
+            task["dependencies"] = [
+                id_map[dependency]
+                for dependency in (task.get("dependencies") or [])
+                if dependency in id_map
+            ]
+        return {
+            "summary": plan_data.get("summary", "审核修复计划"),
+            "tasks": tasks,
+        }
+
+    @staticmethod
+    def _friendly_provider_error(error: str) -> str:
+        """Translate common provider failures into concise user-facing reasons."""
+        normalized = (error or "").lower()
+        if "credit_balance_exhausted" in normalized or "no credits remaining" in normalized:
+            return (
+                "Platform API 账户无可用余额，或认证通道配置错误"
+                "（这不代表 ChatGPT/Codex 用量耗尽）"
+            )
+        if "insufficient_quota" in normalized:
+            return (
+                "Platform API 配额不足（HTTP 429，insufficient_quota；"
+                "与 ChatGPT/Codex 订阅用量无关）"
+            )
+        if "rate limit" in normalized or "too many requests" in normalized:
+            return "模型服务触发速率限制（HTTP 429）"
+        if "timed out" in normalized or "timeout" in normalized:
+            return "模型请求超时"
+        return (error or "未知错误")[:300]
+
+    @classmethod
+    def _failure_details(cls, error: str) -> tuple[str, str]:
+        normalized = (error or "").lower()
+        if cls._is_budget_error(error):
+            return (
+                "budget_exceeded",
+                "已保留完成步骤；检查 Token、调用次数或可计费 API 成本上限。"
+                "ChatGPT 登录的等价估算成本不会触发美元预算。",
+            )
+        if cls._is_provider_capability_error(error):
+            return (
+                "provider_capability",
+                "该供应商已熔断；继续时会切换到兼容工具调用的供应商。",
+            )
+        if any(marker in normalized for marker in (
+            "401", "402", "403", "api key", "authentication",
+            "insufficient balance", "quota", "billing", "credentials",
+        )):
+            return (
+                "provider_credentials",
+                "检查供应商登录、API Key、余额或配额；已有文件修改不会丢失。",
+            )
+        if "timeout" in normalized or "timed out" in normalized:
+            return (
+                "provider_timeout",
+                "继续时会优先使用其他可用供应商，并从最近检查点开始。",
+            )
+        if "acceptance" in normalized or "validation" in normalized or "test" in normalized:
+            return (
+                "validation_failed",
+                "修复验收输出中列出的具体问题后，仅重跑未通过的步骤。",
+            )
+        if "merge conflict" in normalized:
+            return (
+                "merge_conflict",
+                "先解决列出的冲突文件，再从失败步骤继续。",
+            )
+        if "without editing" in normalized or "no file changes" in normalized:
+            return (
+                "no_effective_edit",
+                "重新策划时会锁定目标文件并要求先修改、后验证。",
+            )
+        return (
+            "execution_failed",
+            "已保留任务检查点；可继续此需求，只重做失败和受阻步骤。",
+        )
+
+    def _store_job_failure(self, repos, job_id: str, error: str):
+        code, hint = self._failure_details(error)
+        repos["job"].set_failure(job_id, code, str(error)[:4000], hint)
+
+    def _checkpoint_task(self, repos, job, task, *, status: str,
+                         result: dict | None = None, error: str = ""):
+        """Persist resumable task evidence after every terminal task result."""
+        payload = json.loads(json.dumps(
+            result or {}, ensure_ascii=False, default=str
+        ))
+        summary = str(
+            payload.get("output") or payload.get("content")
+            or payload.get("reason") or error or status
+        )[:4000]
+        repos["task"].update_result(
+            task.id, summary=summary, data=payload,
+            failure_reason=error if status != "done" else "",
+        )
+        tasks = repos["task"].list_by_job(job.id)
+        repos["job"].update_checkpoint(job.job_id, {
+            "updated_at": datetime.now().astimezone().isoformat(),
+            "tasks": [{
+                "task_id": item.task_id,
+                "status": item.status,
+                "summary": (item.result_summary or "")[:1000],
+                "failure_reason": (item.failure_reason or "")[:1000],
+                "allowed_paths": item.allowed_paths or [],
+            } for item in tasks],
+        })
 
     async def _check_file_changes(self, project_root: str,
                                   baseline_snapshot: dict | None = None) -> bool:
@@ -1343,14 +2467,28 @@ class Engine:
         if not prev_job:
             return ""
 
-        # Get previous job's output files
         prev_tasks = repos["task"].list_by_job(prev_job.id)
         prev_files = set()
-        for t in prev_tasks:
-            for p in (t.allowed_paths or []):
+        task_lines = []
+        test_lines = []
+        for previous_task in prev_tasks:
+            for p in (previous_task.allowed_paths or []):
                 # Only include concrete files (not globs)
                 if "*" not in p and "." in p:
                     prev_files.add(p)
+            summary = (
+                previous_task.result_summary
+                or previous_task.failure_reason
+                or "无已保存摘要"
+            )[:800]
+            task_lines.append(
+                f"- {previous_task.task_id} [{previous_task.status}]: {summary}"
+            )
+            for test_run in repos["test_run"].list_by_task(previous_task.id)[:1]:
+                test_lines.append(
+                    f"- {previous_task.task_id}: {test_run.status} · "
+                    f"{test_run.command} · {(test_run.output or '')[:500]}"
+                )
 
         if not prev_files:
             # Try to find actual files in the project directory
@@ -1362,29 +2500,46 @@ class Engine:
                     if os.path.isfile(fp) and not f.startswith("."):
                         prev_files.add(f)
 
+        reviews = repos["review"].list_by_job(prev_job.id)
+        review_text = ""
+        if reviews:
+            latest = reviews[0]
+            review_text = (
+                f"Latest review: {latest.result} / {latest.severity} · "
+                f"{(latest.summary or '')[:1000]}"
+            )
+
         context = f"""
 === CONTINUATION CONTEXT ===
-This is a follow-up to a previous task. Do NOT restart — modify existing work.
+This follows an explicit earlier job. Preserve existing useful work.
+Do NOT repeat tasks marked done. Replan only failed, blocked, or newly requested work.
 
-Previous request: {prev_job.user_request[:200]}
+Previous job: {prev_job.job_id} [{prev_job.status}]
+Previous request: {prev_job.user_request[:500]}
+Failure code: {getattr(prev_job, 'failure_code', '') or 'none'}
+Failure reason: {(getattr(prev_job, 'failure_reason', '') or 'none')[:1200]}
+Recovery hint: {(getattr(prev_job, 'recovery_hint', '') or 'none')[:800]}
+
+=== Task Checkpoint ===
+{chr(10).join(task_lines) or '- No task checkpoint'}
+
+=== Latest Test Evidence ===
+{chr(10).join(test_lines) or '- No saved test result'}
+
+=== Review Evidence ===
+{review_text or 'No saved review'}
 
 === Target Files ===
-These files already exist and should be modified:
+Prefer these existing files when relevant:
 {chr(10).join('- ' + f for f in sorted(prev_files)[:8] if f)}
 
 === Your Workflow ===
-1. Use search_in_file to locate relevant sections by keyword
-2. Use read_file with start/end to read only the relevant range of lines
-3. Apply modifications with apply_patch (prefer patches over full rewrites)
-4. Verify changes with git_diff
-5. Do NOT read entire files from beginning — use targeted search + range reads
-6. Prefer editing existing files; create a new file only when the follow-up requires it
-
-=== Context Hints ===
-The current request sounds like it wants to add/modify content in the existing files.
-Focus on finding the right insertion point using search_in_file, then make targeted edits.
+1. Verify the current workspace state with targeted search/read.
+2. Reuse completed work; do not recreate or undo it.
+3. Address only failed/blocked checkpoints and the new request.
+4. Apply a focused patch, then run deterministic validation.
 """
-        return context
+        return context[:9000]
 
     def _continuation_context(self, job, repos, proj_config=None) -> str:
         if proj_config is not None and not proj_config.continuation_context:
@@ -1404,13 +2559,13 @@ Focus on finding the right insertion point using search_in_file, then make targe
         return job.user_request if not context else f"{job.user_request}\n{context}"
 
     async def _run_simple(self, job, repos, proj_config: ProjectAgentConfig | None = None):
-        """Fast path for simple tasks: skip Governor + Planner, run directly."""
+        """Low-risk/fast path: skip model governance and execute directly."""
         await self.event_bus.publish("phase_summary",
             phase="governor", agent_type="governor", status="skipped",
-            summary="简单任务，直接执行")
+            summary="低风险或快速模式：确定性预检后直接执行")
         await self.event_bus.publish("phase_summary",
             phase="planner", agent_type="planner", status="skipped",
-            summary="简单任务，直接创建单个编码任务")
+            summary="无需模型策划，直接创建单个聚焦任务")
 
         self.state_machine.transition(job.job_id, JobState.GOVERNING)
         self.state_machine.transition(job.job_id, JobState.GOVERNED)
@@ -1427,9 +2582,13 @@ Focus on finding the right insertion point using search_in_file, then make targe
         if cont_context:
             description = job.user_request + "\n" + cont_context
 
+        normalized_risk = (
+            "high" if job.risk_level == "critical" else job.risk_level
+        )
         repos["constitution"].create(
             job_id=job.id, goal=job.user_request, constraints=[],
-            acceptance_criteria=[], risk="low", protected_paths=[],
+            acceptance_criteria=["确定性验证通过"],
+            risk=normalized_risk or "low", protected_paths=[],
             requires_final_review=False,
         )
         repos["plan"].create(job_id=job.id, summary=job.user_request, raw_output={})
@@ -1461,38 +2620,70 @@ Focus on finding the right insertion point using search_in_file, then make targe
         if job.status == "cancelled":
             worker.max_turns = saved_turns
             return
-        if job.status == "failed":
+        if job.status in {"failed", "needs_attention"}:
             worker.max_turns = saved_turns
             return
 
         worker.max_turns = saved_turns
         await self.event_bus.publish("phase_summary",
             phase="reviewer", agent_type="reviewer", status="skipped",
-            summary="简单任务，跳过审核")
+            summary="低风险任务已通过确定性验证，跳过模型审核")
         self.state_machine.transition(job.job_id, JobState.REVIEWING)
         self.state_machine.transition(job.job_id, JobState.DONE)
         repos["job"].update_status(job.job_id, "done")
+        repos["job"].clear_failure(job.job_id)
         await self.event_bus.publish("job_done", job_id=job.job_id)
 
+    @staticmethod
+    def _project_output_files(project_root: str) -> list[str]:
+        """Return user-facing project files, including files in subdirectories."""
+        root = Path(project_root)
+        if not root.is_dir():
+            return []
+
+        ignored_dirs = {".git", ".ai", "__pycache__"}
+        output_files: list[str] = []
+        for path in root.rglob("*"):
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            if any(part in ignored_dirs or part.startswith(".") for part in relative.parts[:-1]):
+                continue
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            output_files.append(relative.as_posix())
+        return sorted(output_files)
+
     async def _finalize(self, job, repos):
-        # Output verification: check if project actually has files
+        """Publish one authoritative terminal status after diagnostic checks."""
+        repos["_session"].refresh(job)
         if job.status == "done" and job.project:
             root = job.project.root_path
-            import os
-            if os.path.isdir(root):
-                all_files = []
-                for f in os.listdir(root):
-                    fp = os.path.join(root, f)
-                    if os.path.isfile(fp) and not f.startswith("."):
-                        all_files.append(f)
-                logger.info(f"[output_verify] project={root} files={len(all_files)}: {all_files[:5]}")
-                if not all_files:
-                    logger.error(f"[output_verify] Job {job.job_id}: marked done but project directory is empty!")
-                    repos["job"].update_status(job.job_id, "failed")
-                    self.state_machine.transition(job.job_id, JobState.FAILED)
+            output_files = self._project_output_files(root)
+            logger.info(
+                "[output_verify] project=%s files=%s: %s",
+                root, len(output_files), output_files[:5],
+            )
+            if not output_files:
+                # Coding tasks already enforce and merge their required output,
+                # while analysis-only jobs may legitimately produce no file.
+                # A diagnostic check must not overwrite a reviewed DONE state.
+                logger.warning(
+                    "[output_verify] Job %s has no user-facing project files; "
+                    "keeping reviewed terminal status %s",
+                    job.job_id, job.status,
+                )
+                await self.event_bus.publish(
+                    "output_verification_warning",
+                    job_id=job.job_id,
+                    project_root=root,
+                    warning="项目中未检测到用户文件；已保留审核后的完成状态",
+                )
 
-        await self.event_bus.publish("job_finished", job_id=job.job_id,
-                                     status=job.status)
+        await self.event_bus.publish(
+            "job_finished", job_id=job.job_id, status=job.status
+        )
 
     async def pause_job(self, job_id: str):
         self.scheduler.pause()

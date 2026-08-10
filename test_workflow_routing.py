@@ -11,7 +11,7 @@ from orchestrator.engine import Engine
 from orchestrator.state_machine import JobState
 
 
-def test_auto_mode_keeps_full_workflow_for_simple_requests(tmp_path):
+def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         repos = engine._get_repos()
@@ -35,7 +35,7 @@ def test_auto_mode_keeps_full_workflow_for_simple_requests(tmp_path):
         async def execution(job, repos, baseline=None, **_kwargs):
             await record("worker")
 
-        async def reviewer(job, repos):
+        async def reviewer(job, repos, **_kwargs):
             await record("reviewer")
 
         async def simple(job, repos, config=None):
@@ -52,6 +52,89 @@ def test_auto_mode_keeps_full_workflow_for_simple_requests(tmp_path):
         engine._finalize = finalize
 
         assert engine._classify_request("创建一个简单 HTML 页面") == "simple"
+        await engine.run_job(result["job_id"], str(tmp_path))
+
+        assert calls == ["simple"]
+
+    asyncio.run(scenario())
+
+
+def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id, "修复 dashboard.py 的数据加载错误", str(tmp_path)
+        )
+        calls = []
+
+        async def skipped(_job, _repos, phase, reason=""):
+            calls.append(f"skip-{phase}")
+
+        async def planner(*_args, **_kwargs):
+            calls.append("planner")
+
+        async def execution(*_args, **_kwargs):
+            calls.append("worker")
+
+        async def skip_review(*_args, **_kwargs):
+            calls.append("skip-reviewer")
+
+        async def finalize(*_args, **_kwargs):
+            pass
+
+        engine._skip_phase = skipped
+        engine._run_planner = planner
+        engine._run_execution = execution
+        engine._skip_review = skip_review
+        engine._finalize = finalize
+        await engine.run_job(result["job_id"], str(tmp_path))
+
+        assert calls == ["skip-governor", "planner", "worker", "skip-reviewer"]
+
+    asyncio.run(scenario())
+
+
+def test_auto_mode_routes_high_risk_request_through_full_pipeline(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id, "修改数据库认证迁移和登录安全策略", str(tmp_path)
+        )
+        calls = []
+
+        async def record(name):
+            calls.append(name)
+
+        async def governor(*_args, **_kwargs):
+            await record("governor")
+
+        async def planner(*_args, **_kwargs):
+            await record("planner")
+
+        async def execution(*_args, **_kwargs):
+            await record("worker")
+
+        async def reviewer(*_args, **_kwargs):
+            await record("reviewer")
+
+        async def finalize(*_args, **_kwargs):
+            pass
+
+        engine._run_governor = governor
+        engine._run_planner = planner
+        engine._run_execution = execution
+        engine._run_reviewer = reviewer
+        engine._finalize = finalize
         await engine.run_job(result["job_id"], str(tmp_path))
 
         assert calls == ["governor", "planner", "worker", "reviewer"]

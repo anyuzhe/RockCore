@@ -1,4 +1,4 @@
-"""Settings dialog for API keys, model config, budgets, and scoring."""
+"""Settings dialog for provider credentials, role routing, and budgets."""
 
 import json
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QPushButton, QLabel, QTabWidget, QWidget, QMessageBox, QSpinBox,
-    QDoubleSpinBox, QTextEdit, QComboBox, QGroupBox, QToolButton
+    QDoubleSpinBox, QComboBox, QGroupBox, QToolButton
 )
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QPainter, QPainterPath, QPen
@@ -22,8 +22,25 @@ CONFIG_PATH = config_path()
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
+            config = json.loads(CONFIG_PATH.read_text())
+            if not isinstance(config, dict):
+                return {}
+            version = int(config.get("workflow_defaults_version", 1) or 1)
+            if version < 2:
+                provider_map = config.setdefault("agent_provider_map", {})
+                provider_map.update({
+                    "governor": "codex",
+                    "planner": "kimi",
+                    "worker": "deepseek",
+                    "reviewer": "codex",
+                    "emergency_coder": "codex",
+                })
+                kimi = config.setdefault("kimi", {})
+                if kimi.get("model") in {None, "", "kimi-k2.6"}:
+                    kimi["model"] = "kimi-k3"
+                config["workflow_defaults_version"] = 2
+            return config
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return {}
     return {}
 
@@ -87,15 +104,14 @@ def _password_field(field: QLineEdit) -> tuple[QWidget, PasswordRevealButton]:
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog for configuring API keys, budgets, and model scoring."""
+    """Settings dialog for configuring providers, roles, and budgets."""
 
-    def __init__(self, parent=None, model_scoring=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
         self.setMinimumWidth(600)
         self.setMinimumHeight(500)
         self._config = load_config()
-        self._model_scoring = model_scoring
         self._setup_ui()
 
     def _setup_ui(self):
@@ -116,7 +132,7 @@ class SettingsDialog(QDialog):
         self.kimi_model.setEditable(True)
         for model in PROVIDER_MODELS["kimi"]:
             self.kimi_model.addItem(model, model)
-        current_kimi_model = self._config.get("kimi", {}).get("model", "kimi-k2.6")
+        current_kimi_model = self._config.get("kimi", {}).get("model", "kimi-k3")
         model_index = self.kimi_model.findData(current_kimi_model)
         if model_index >= 0:
             self.kimi_model.setCurrentIndex(model_index)
@@ -134,11 +150,20 @@ class SettingsDialog(QDialog):
         ds_key_field, self.ds_api_key_reveal = _password_field(self.ds_api_key)
         ds_layout.addRow("API 密钥：", ds_key_field)
 
-        self.ds_model = QLineEdit(
-            self._config.get("deepseek", {}).get("model", "deepseek-v4-flash")
+        self.ds_model = QComboBox()
+        self.ds_model.setEditable(True)
+        for model in PROVIDER_MODELS["deepseek"]:
+            self.ds_model.addItem(model, model)
+        current_ds_model = self._config.get("deepseek", {}).get(
+            "model", "deepseek-v4-flash"
         )
+        ds_model_index = self.ds_model.findData(current_ds_model)
+        if ds_model_index >= 0:
+            self.ds_model.setCurrentIndex(ds_model_index)
+        else:
+            self.ds_model.setEditText(current_ds_model)
         ds_layout.addRow("模型：", self.ds_model)
-        self.tabs.addTab(ds_widget, "DeepSeek V4 Flash")
+        self.tabs.addTab(ds_widget, "DeepSeek")
 
         # ── Codex Tab ──
         codex_widget = QWidget()
@@ -148,25 +173,65 @@ class SettingsDialog(QDialog):
 
         codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
         auth_path = codex_home / "auth.json"
-        auth_status = get_codex_auth_status(auth_path)
+        configured_codex = self._config.get("codex", {})
+        auth_status = get_codex_auth_status(
+            auth_path,
+            configured_api_key=configured_codex.get("api_key", ""),
+        )
 
-        status_label = QLabel()
-        if auth_status["authenticated"]:
-            status_label.setText("✓ 已读取 Codex 本地登录凭据")
-            status_label.setStyleSheet("color: #4CAF50; font-weight: bold; padding: 8px;")
+        self.codex_chatgpt_status = QLabel()
+        if auth_status["chatgpt_authenticated"]:
+            self.codex_chatgpt_status.setText(
+                "✓ ChatGPT 登录有效 · 通过本机 codex exec 调用"
+            )
+            self.codex_chatgpt_status.setStyleSheet(
+                "color: #4CAF50; font-weight: bold; padding: 8px;"
+            )
         else:
-            status_label.setText("✗ 未找到可用的 Codex 登录凭据")
-            status_label.setStyleSheet("color: #f44336; font-weight: bold; padding: 8px;")
-        codex_layout.addWidget(status_label)
+            self.codex_chatgpt_status.setText(
+                "✗ 未检测到 ChatGPT 登录 · 请运行 codex login"
+            )
+            self.codex_chatgpt_status.setStyleSheet(
+                "color: #f44336; font-weight: bold; padding: 8px;"
+            )
+        codex_layout.addWidget(self.codex_chatgpt_status)
+
+        platform_group = QGroupBox("Platform API（按 API 用量计费，可选）")
+        platform_layout = QFormLayout(platform_group)
+        self.codex_api_key = QLineEdit()
+        self.codex_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.codex_api_key.setText(configured_codex.get("api_key", ""))
+        codex_key_field, self.codex_api_key_reveal = _password_field(
+            self.codex_api_key
+        )
+        platform_layout.addRow("OPENAI_API_KEY：", codex_key_field)
+        self.codex_platform_status = QLabel(
+            "已配置 · 公共 Platform API 通道"
+            if auth_status["platform_api_configured"]
+            else "未配置 · 不会调用公共 Platform API"
+        )
+        platform_layout.addRow("状态：", self.codex_platform_status)
+        codex_layout.addWidget(platform_group)
+
+        route_names = {
+            "chatgpt_cli": "ChatGPT 登录 → 本机 codex exec",
+            "platform_api": "OPENAI_API_KEY → Platform API",
+            "unavailable": "不可用",
+        }
+        self.codex_active_route = QLabel(
+            f"当前通道：{route_names[auth_status['authentication_mode']]}"
+        )
+        self.codex_active_route.setStyleSheet("font-weight: bold; padding: 4px 8px;")
+        codex_layout.addWidget(self.codex_active_route)
 
         info_label = QLabel(
-            "RockCore 会自动使用本地 Codex 登录信息，无需在这里重复填写密钥。\n"
-            f"认证来源：{auth_status['source']}\n"
-            f"提供商：{auth_status['provider']} · {auth_status['wire_api']}\n"
-            f"模型：{auth_status['model']}\n"
-            f"连接：{auth_status['base_url']}\n"
+            "两种认证互相独立：ChatGPT 登录不会被当作 API Key 发送到公共接口。\n"
+            f"ChatGPT：{auth_status['chatgpt_source']}\n"
+            f"Platform API：{auth_status['platform_api_source']}\n"
+            f"Codex 模型：{auth_status['model']}\n"
+            f"Codex CLI：{auth_status['codex_binary'] or '未找到'}\n"
             f"代理：{auth_status['proxy_source']}\n"
-            f"配置文件：{auth_path}"
+            f"认证文件：{auth_path}"
         )
         info_label.setStyleSheet("color: #888; padding: 4px 8px;")
         info_label.setWordWrap(True)
@@ -232,25 +297,17 @@ class SettingsDialog(QDialog):
         self.max_cost.setDecimals(2)
         self.max_cost.setPrefix("$")
         self.max_cost.setValue(self._config.get("budget", {}).get("max_cost_usd", 0.50))
-        budget_layout.addRow("最大成本：", self.max_cost)
+        budget_layout.addRow("可计费 API 成本上限：", self.max_cost)
+
+        budget_note = QLabel(
+            "仅限制通过 API Key 单独计费的调用。ChatGPT 登录下的 Codex "
+            "调用仍统计 Token 和等价估算成本，但不会消耗此美元预算。"
+        )
+        budget_note.setWordWrap(True)
+        budget_note.setStyleSheet("color: #888; padding: 4px 0;")
+        budget_layout.addRow("", budget_note)
 
         self.tabs.addTab(budget_widget, "预算")
-
-        # ── Model Scoring Tab (V6) ──
-        scoring_widget = QWidget()
-        scoring_layout = QVBoxLayout(scoring_widget)
-
-        self.scoring_text = QTextEdit()
-        self.scoring_text.setReadOnly(True)
-        self.scoring_text.setStyleSheet("font-family: monospace; font-size: 11px;")
-        scoring_layout.addWidget(self.scoring_text)
-
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self._refresh_scoring)
-        scoring_layout.addWidget(refresh_btn)
-
-        self.tabs.addTab(scoring_widget, "模型评分")
-        self._refresh_scoring()
 
         # ── General Tab ──
         general_widget = QWidget()
@@ -275,23 +332,20 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
-    def _refresh_scoring(self):
-        if self._model_scoring:
-            self.scoring_text.setPlainText(self._model_scoring.get_summary())
-        else:
-            self.scoring_text.setPlainText("模型评分模块未初始化")
-
     def _save(self):
         self._config["kimi"] = {
             "api_key": self.kimi_api_key.text().strip(),
-            "model": self.kimi_model.currentText().strip() or "kimi-k2.6",
+            "model": self.kimi_model.currentText().strip() or "kimi-k3",
         }
         self._config["deepseek"] = {
             "api_key": self.ds_api_key.text().strip(),
-            "model": self.ds_model.text().strip() or "deepseek-v4-flash",
+            "model": self.ds_model.currentText().strip() or "deepseek-v4-flash",
         }
+        previous_codex = self._config.get("codex", {})
         self._config["codex"] = {
-            "sandbox_mode": "read_only",
+            **previous_codex,
+            "api_key": self.codex_api_key.text().strip(),
+            "sandbox_mode": previous_codex.get("sandbox_mode", "read_only"),
         }
         self._config["max_concurrent_workers"] = self.max_workers.value()
         self._config["working_dir"] = self.working_dir.text().strip()
@@ -304,6 +358,7 @@ class SettingsDialog(QDialog):
             "max_api_calls": self.max_api_calls.value(),
             "max_cost_usd": self.max_cost.value(),
         }
+        self._config["workflow_defaults_version"] = 2
 
         save_config(self._config)
         QMessageBox.information(self, "设置", "设置已保存。")

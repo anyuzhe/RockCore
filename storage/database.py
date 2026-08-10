@@ -52,6 +52,10 @@ def _migrate_schema(engine):
         "usage_output_tokens": "INTEGER NOT NULL DEFAULT 0",
         "usage_calls": "INTEGER NOT NULL DEFAULT 0",
         "usage_cost": "FLOAT NOT NULL DEFAULT 0.0",
+        # Existing rows cannot be classified reliably after the fact. NULL is
+        # rendered as historical/unclassified instead of pretending it was
+        # either all billable or all subscription usage.
+        "usage_billable_cost": "FLOAT DEFAULT NULL",
     }
     missing_usage = [name for name in usage_columns if name not in columns]
     if missing_usage:
@@ -59,6 +63,62 @@ def _migrate_schema(engine):
             for name in missing_usage:
                 connection.exec_driver_sql(
                     f"ALTER TABLE jobs ADD COLUMN {name} {usage_columns[name]}"
+                )
+
+    job_failure_columns = {
+        "failure_code": "VARCHAR(64) NOT NULL DEFAULT ''",
+        "failure_reason": "TEXT NOT NULL DEFAULT ''",
+        "recovery_hint": "TEXT NOT NULL DEFAULT ''",
+        "last_checkpoint": "JSON NOT NULL DEFAULT '{}'",
+    }
+    missing_failure = [
+        name for name in job_failure_columns if name not in columns
+    ]
+    if missing_failure:
+        with engine.begin() as connection:
+            for name in missing_failure:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE jobs ADD COLUMN {name} "
+                    f"{job_failure_columns[name]}"
+                )
+
+    agent_run_columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("agent_runs")
+    }
+    agent_run_usage_columns = {
+        "billable_cost": "FLOAT DEFAULT NULL",
+        "billing_mode": "VARCHAR(32) NOT NULL DEFAULT 'unclassified'",
+    }
+    missing_agent_run_usage = [
+        name for name in agent_run_usage_columns
+        if name not in agent_run_columns
+    ]
+    if missing_agent_run_usage:
+        with engine.begin() as connection:
+            for name in missing_agent_run_usage:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE agent_runs ADD COLUMN {name} "
+                    f"{agent_run_usage_columns[name]}"
+                )
+
+    task_columns = {
+        column["name"] for column in inspect(engine).get_columns("tasks")
+    }
+    task_result_columns = {
+        "result_summary": "TEXT NOT NULL DEFAULT ''",
+        "result_data": "JSON NOT NULL DEFAULT '{}'",
+        "failure_reason": "TEXT NOT NULL DEFAULT ''",
+    }
+    missing_task_results = [
+        name for name in task_result_columns if name not in task_columns
+    ]
+    if missing_task_results:
+        with engine.begin() as connection:
+            for name in missing_task_results:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE tasks ADD COLUMN {name} "
+                    f"{task_result_columns[name]}"
                 )
 
     # Old project deletions could leave test runs behind. SQLite may then reuse

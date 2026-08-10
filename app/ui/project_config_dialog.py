@@ -8,13 +8,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from orchestrator.agent_config import (
-    ProjectAgentConfig, load_project_config, save_project_config, PROVIDER_MODELS
+    ProjectAgentConfig, load_project_config, save_project_config,
+    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS,
 )
 
 
 PROVIDERS = ["codex", "kimi", "deepseek"]
 MODES = [
-    ("auto", "自动（完整流程，按复杂度调节预算）"),
+    ("auto", "自动（确定性预检后按低/中/高风险路由）"),
     ("fast", "快速（仅执行者，跳过裁决/策划/审核）"),
     ("standard", "标准（完整流程）"),
     ("strict", "严格（完整流程 + 自动修复）"),
@@ -31,7 +32,7 @@ class ProjectConfigDialog(QDialog):
         self._config = load_project_config(project_root)
         self.setWindowTitle(f"项目 AI 配置 — {project_root}")
         self.setMinimumWidth(560)
-        self.setMinimumHeight(480)
+        self.setMinimumHeight(600)
         self._setup_ui()
         self._load_from_config()
 
@@ -61,10 +62,11 @@ class ProjectConfigDialog(QDialog):
         agents_layout = QVBoxLayout(agents_widget)
 
         self._agent_widgets = {}
-        for agent_type, label, default_provider, default_model in [
-            ("governor", "裁决者 (Governor)", "codex", "codex-sdk"),
-            ("planner", "策划者 (Planner)", "kimi", "kimi-k2.6"),
-            ("reviewer", "审核者 (Reviewer)", "codex", "codex-sdk"),
+        for agent_type, label, default_provider, default_model, default_effort in [
+            ("governor", "裁决者 (Governor)", "codex", "gpt-5.6-sol", "high"),
+            ("planner", "策划者 (Planner)", "kimi", "kimi-k3", "default"),
+            ("reviewer", "审核者 (Reviewer)", "codex", "gpt-5.6-sol", "high"),
+            ("emergency_coder", "紧急修复 (Emergency)", "codex", "gpt-5.6-sol", "max"),
         ]:
             gb = QGroupBox(label)
             form = QFormLayout(gb)
@@ -73,34 +75,51 @@ class ProjectConfigDialog(QDialog):
             enabled_cb.clicked.connect(self._mark_custom_mode)
             provider_combo = QComboBox()
             model_combo = QComboBox()
+            reasoning_combo = QComboBox()
             for p in PROVIDERS:
                 provider_combo.addItem(p.upper(), p)
             idx = provider_combo.findData(default_provider)
             if idx >= 0:
                 provider_combo.setCurrentIndex(idx)
 
-            def _refresh_models(pc=provider_combo, mc=model_combo):
+            def _refresh_models(
+                pc=provider_combo, mc=model_combo, rc=reasoning_combo
+            ):
                 provider = pc.currentData() or ""
                 models = PROVIDER_MODELS.get(provider, [provider])
                 mc.clear()
                 for m in models:
                     mc.addItem(m, m)
+                rc.clear()
+                for effort in PROVIDER_REASONING_LEVELS.get(provider, ["default"]):
+                    rc.addItem(
+                        "供应商默认" if effort == "default" else effort.upper(),
+                        effort,
+                    )
 
-            provider_combo.currentIndexChanged.connect(lambda _, pc=provider_combo, mc=model_combo: _refresh_models(pc, mc))
+            provider_combo.currentIndexChanged.connect(
+                lambda _, pc=provider_combo, mc=model_combo, rc=reasoning_combo:
+                _refresh_models(pc, mc, rc)
+            )
             _refresh_models(provider_combo, model_combo)
 
             midx = model_combo.findData(default_model)
             if midx >= 0:
                 model_combo.setCurrentIndex(midx)
+            ridx = reasoning_combo.findData(default_effort)
+            if ridx >= 0:
+                reasoning_combo.setCurrentIndex(ridx)
 
             form.addRow(enabled_cb)
             form.addRow("模型：", provider_combo)
             form.addRow("版本：", model_combo)
+            form.addRow("推理强度：", reasoning_combo)
             agents_layout.addWidget(gb)
             self._agent_widgets[agent_type] = {
                 "enabled": enabled_cb,
                 "provider": provider_combo,
                 "model": model_combo,
+                "reasoning": reasoning_combo,
             }
 
         self.tabs.addTab(agents_widget, "智能体")
@@ -113,6 +132,7 @@ class ProjectConfigDialog(QDialog):
         form = QFormLayout(gb)
         self.worker_provider = QComboBox()
         self.worker_model = QComboBox()
+        self.worker_reasoning = QComboBox()
         for p in PROVIDERS:
             self.worker_provider.addItem(p.upper(), p)
         self.worker_provider.setCurrentIndex(self.worker_provider.findData("deepseek"))
@@ -123,12 +143,19 @@ class ProjectConfigDialog(QDialog):
             self.worker_model.clear()
             for m in models:
                 self.worker_model.addItem(m, m)
+            self.worker_reasoning.clear()
+            for effort in PROVIDER_REASONING_LEVELS.get(provider, ["default"]):
+                self.worker_reasoning.addItem(
+                    "供应商默认" if effort == "default" else effort.upper(),
+                    effort,
+                )
 
         self.worker_provider.currentIndexChanged.connect(lambda _: _refresh_worker_models())
         _refresh_worker_models()
         self.worker_model.setCurrentIndex(self.worker_model.findData("deepseek-v4-flash"))
         form.addRow("模型：", self.worker_provider)
         form.addRow("版本：", self.worker_model)
+        form.addRow("推理强度：", self.worker_reasoning)
 
         self.worker_max_turns = QSpinBox()
         self.worker_max_turns.setRange(4, 50)
@@ -143,7 +170,39 @@ class ProjectConfigDialog(QDialog):
         self.worker_retry = QSpinBox()
         self.worker_retry.setRange(1, 5)
         self.worker_retry.setValue(2)
-        form.addRow("重试次数：", self.worker_retry)
+        form.addRow("同模型重试次数：", self.worker_retry)
+
+        self.worker_emergency_after = QSpinBox()
+        self.worker_emergency_after.setRange(1, 6)
+        self.worker_emergency_after.setValue(3)
+        self.worker_emergency_after.setToolTip(
+            "执行者连续失败达到该次数后，升级到 Emergency"
+        )
+        form.addRow("Emergency 前失败次数：", self.worker_emergency_after)
+
+        self.worker_fallback_provider = QComboBox()
+        self.worker_fallback_model = QComboBox()
+        for provider in PROVIDERS:
+            self.worker_fallback_provider.addItem(provider.upper(), provider)
+        self.worker_fallback_provider.setCurrentIndex(
+            self.worker_fallback_provider.findData("kimi")
+        )
+
+        def _refresh_fallback_models():
+            provider = self.worker_fallback_provider.currentData() or ""
+            self.worker_fallback_model.clear()
+            for model in PROVIDER_MODELS.get(provider, [provider]):
+                self.worker_fallback_model.addItem(model, model)
+
+        self.worker_fallback_provider.currentIndexChanged.connect(
+            lambda _: _refresh_fallback_models()
+        )
+        _refresh_fallback_models()
+        fallback_index = self.worker_fallback_model.findData("kimi-k2.7")
+        if fallback_index >= 0:
+            self.worker_fallback_model.setCurrentIndex(fallback_index)
+        form.addRow("供应商异常备用：", self.worker_fallback_provider)
+        form.addRow("备用模型：", self.worker_fallback_model)
 
         self.worker_patch_recovery = QSpinBox()
         self.worker_patch_recovery.setRange(0, 5)
@@ -180,8 +239,10 @@ class ProjectConfigDialog(QDialog):
         feat_layout.addWidget(self.auto_validate_cb)
 
         self.auto_repair_cb = QCheckBox("启用失败自动修复")
-        self.auto_repair_cb.setChecked(False)
-        self.auto_repair_cb.setToolTip("任务失败时自动尝试修复（会增加耗时）")
+        self.auto_repair_cb.setChecked(True)
+        self.auto_repair_cb.setToolTip(
+            "审核未通过时由策划者判断可修复性，并自动重新策划、执行和审核"
+        )
         feat_layout.addWidget(self.auto_repair_cb)
 
         feat_layout.addStretch()
@@ -241,7 +302,9 @@ class ProjectConfigDialog(QDialog):
             self.mode_combo.blockSignals(False)
 
         # Agents
-        for agent_type in ("governor", "planner", "reviewer"):
+        for agent_type in (
+            "governor", "planner", "reviewer", "emergency_coder"
+        ):
             if agent_type in self._agent_widgets:
                 profile = getattr(cfg, agent_type)
                 w = self._agent_widgets[agent_type]
@@ -252,6 +315,9 @@ class ProjectConfigDialog(QDialog):
                 midx = w["model"].findData(profile.model)
                 if midx >= 0:
                     w["model"].setCurrentIndex(midx)
+                ridx = w["reasoning"].findData(profile.reasoning_effort)
+                if ridx >= 0:
+                    w["reasoning"].setCurrentIndex(ridx)
 
         # Worker
         idx = self.worker_provider.findData(cfg.worker.provider)
@@ -260,9 +326,27 @@ class ProjectConfigDialog(QDialog):
         midx = self.worker_model.findData(cfg.worker.model)
         if midx >= 0:
             self.worker_model.setCurrentIndex(midx)
+        ridx = self.worker_reasoning.findData(cfg.worker.reasoning_effort)
+        if ridx >= 0:
+            self.worker_reasoning.setCurrentIndex(ridx)
         self.worker_max_turns.setValue(cfg.worker.max_turns or 24)
         self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 4)
         self.worker_retry.setValue(cfg.worker.retry_count or 2)
+        self.worker_emergency_after.setValue(
+            cfg.worker.emergency_after_failures or 3
+        )
+        fallback_provider_index = self.worker_fallback_provider.findData(
+            cfg.worker.fallback_provider
+        )
+        if fallback_provider_index >= 0:
+            self.worker_fallback_provider.setCurrentIndex(
+                fallback_provider_index
+            )
+        fallback_model_index = self.worker_fallback_model.findData(
+            cfg.worker.fallback_model
+        )
+        if fallback_model_index >= 0:
+            self.worker_fallback_model.setCurrentIndex(fallback_model_index)
         self.worker_patch_recovery.setValue(cfg.worker.patch_recovery_turns or 2)
 
         # Complexity
@@ -283,19 +367,34 @@ class ProjectConfigDialog(QDialog):
         cfg = self._config
         cfg.mode = self.mode_combo.currentData() or "auto"
 
-        for agent_type in ("governor", "planner", "reviewer"):
+        for agent_type in (
+            "governor", "planner", "reviewer", "emergency_coder"
+        ):
             if agent_type in self._agent_widgets:
                 profile = getattr(cfg, agent_type)
                 w = self._agent_widgets[agent_type]
                 profile.enabled = w["enabled"].isChecked()
                 profile.provider = w["provider"].currentData() or ""
                 profile.model = w["model"].currentData() or ""
+                profile.reasoning_effort = (
+                    w["reasoning"].currentData() or "default"
+                )
 
         cfg.worker.provider = self.worker_provider.currentData() or "deepseek"
         cfg.worker.model = self.worker_model.currentData() or "deepseek-v4-flash"
+        cfg.worker.reasoning_effort = (
+            self.worker_reasoning.currentData() or "default"
+        )
         cfg.worker.max_turns = self.worker_max_turns.value()
         cfg.worker.max_exploration_turns = self.worker_exploration.value()
         cfg.worker.retry_count = self.worker_retry.value()
+        cfg.worker.emergency_after_failures = self.worker_emergency_after.value()
+        cfg.worker.fallback_provider = (
+            self.worker_fallback_provider.currentData() or "kimi"
+        )
+        cfg.worker.fallback_model = (
+            self.worker_fallback_model.currentData() or "kimi-k2.7"
+        )
         cfg.worker.patch_recovery_turns = self.worker_patch_recovery.value()
 
         for key in ("simple", "normal", "complex"):

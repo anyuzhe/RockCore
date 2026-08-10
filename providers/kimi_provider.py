@@ -18,6 +18,7 @@ class KimiProvider(BaseProvider):
     # Per-model temperature constraints
     MODEL_TEMPERATURES = {
         "kimi-k3": 1.0,
+        "kimi-k2.7": 1.0,
         "kimi-k2.6": 1.0,   # API only accepts 1
         "kimi-k2.5": 1.0,
         "moonshot-v1-8k": 0.3,
@@ -36,7 +37,9 @@ class KimiProvider(BaseProvider):
         """Return model-appropriate temperature. Explicit kwargs take priority."""
         if "temperature" in kwargs:
             return kwargs["temperature"]
-        return self.MODEL_TEMPERATURES.get(self.model, 1.0)
+        return self.MODEL_TEMPERATURES.get(
+            kwargs.get("model", self.model), 1.0
+        )
 
     def _get_client(self):
         if self._client is None:
@@ -53,7 +56,7 @@ class KimiProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             temperature=self._resolve_temperature(**kwargs),
             max_tokens=kwargs.get("max_tokens", 8192),
@@ -78,7 +81,7 @@ class KimiProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             tools=tools if tools else None,
             temperature=self._resolve_temperature(**kwargs),

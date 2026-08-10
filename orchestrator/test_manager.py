@@ -4,8 +4,11 @@ import logging
 import os
 import fnmatch
 import hashlib
+import ast
+import json
 import shlex
 import subprocess
+import sys
 import time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -92,16 +95,64 @@ class TestManager:
         return "git" in [Path(token).name for token in tokens]
 
     @staticmethod
-    def should_validate_locally(task: Any) -> bool:
+    def is_test_authoring_task(task: Any) -> bool:
+        """Distinguish writing tests from merely running/inspecting them."""
+        if getattr(task, "task_type", "") != "testing":
+            return False
+        text = " ".join((
+            getattr(task, "title", "") or "",
+            getattr(task, "description", "") or "",
+        )).lower()
+        markers = (
+            "write test", "add test", "create test", "update test",
+            "modify test", "implement test", "test coverage",
+            "编写测试", "新增测试", "添加测试", "创建测试", "修改测试",
+            "补充测试", "测试用例",
+        )
+        return any(marker in text for marker in markers)
+
+    @classmethod
+    def should_validate_locally(cls, task: Any) -> bool:
         command = (getattr(task, "acceptance_command", "") or "").lower()
         title = (getattr(task, "title", "") or "").lower()
         description = (getattr(task, "description", "") or "").lower()
         return (
             getattr(task, "task_type", "") == "review"
+            or (
+                getattr(task, "task_type", "") == "testing"
+                and not cls.is_test_authoring_task(task)
+            )
             or "review diff" in title
             or "检查差异" in title
             or ("git diff" in command and ("structure" in description or "结构" in description))
         )
+
+    @classmethod
+    def discover_test_command(cls, root: str | Path) -> str:
+        """Choose a deterministic project test command when one is available."""
+        root_path = Path(root)
+        package_json = root_path / "package.json"
+        if package_json.is_file():
+            try:
+                package = json.loads(package_json.read_text(encoding="utf-8"))
+                scripts = package.get("scripts") or {}
+                if scripts.get("test"):
+                    return "npm test"
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                pass
+        if (
+            (root_path / "pytest.ini").exists()
+            or (root_path / "pyproject.toml").exists()
+            or (root_path / "setup.cfg").exists()
+            or (root_path / "tests").is_dir()
+            or list(root_path.glob("test_*.py"))
+        ):
+            return f"{shlex.quote(sys.executable)} -m pytest -q"
+        if (root_path / "Cargo.toml").is_file():
+            return "cargo test"
+        if (root_path / "go.mod").is_file():
+            return "go test ./..."
+        return ""
 
     @staticmethod
     def _is_shell_command(cmd: str) -> bool:
@@ -185,6 +236,17 @@ class TestManager:
             )
             return {"status": "failed", "error": str(e)}
 
+    async def validate_project(self, task: Any, repos: dict,
+                               event_bus: EventBus | None = None,
+                               baseline_snapshot: dict | None = None,
+                               project_root: str | Path | None = None) -> dict:
+        """Public deterministic validation entry point for coding tasks."""
+        return await self._validate_project(
+            task, repos, event_bus,
+            baseline_snapshot=baseline_snapshot,
+            project_root=project_root,
+        )
+
     async def _validate_output(self, task: Any, repos: dict,
                                 event_bus: EventBus | None = None) -> dict:
         """Validate task output by checking file existence/contents — no shell execution."""
@@ -232,16 +294,27 @@ class TestManager:
         ))
         diff = self.snapshot_diff(root, baseline_snapshot)
         allowed = task.allowed_paths or []
+        supported = {".html", ".htm", ".json", ".py", ".js", ".mjs", ".cjs"}
         candidates: list[Path] = []
-        for path in root.rglob("*.html"):
-            relative = path.relative_to(root).as_posix()
-            if not allowed or any(fnmatch.fnmatch(relative, pattern) for pattern in allowed):
+        changed_paths = [root / relative for relative in diff["changed"]]
+        for path in changed_paths:
+            if path.is_file() and path.suffix.lower() in supported:
                 candidates.append(path)
+        if not candidates:
+            for path in root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in supported:
+                    continue
+                relative = path.relative_to(root).as_posix()
+                if not allowed or any(
+                    fnmatch.fnmatch(relative, pattern) for pattern in allowed
+                ):
+                    candidates.append(path)
+        candidates = sorted(set(candidates))[:200]
 
         issues = []
         checked = []
         for path in candidates:
-            result = self._validate_html(path)
+            result = self._validate_source(path)
             checked.append(path.relative_to(root).as_posix())
             issues.extend(result["issues"])
 
@@ -250,8 +323,37 @@ class TestManager:
         if baseline_snapshot is not None and not changed:
             issues.append("No file changes detected from the job baseline")
 
+        test_command = ""
+        test_output = ""
+        if not issues:
+            requested = getattr(task, "acceptance_command", "") or ""
+            if self._is_shell_command(requested) and not self._uses_git(requested):
+                test_command = requested
+            else:
+                test_command = self.discover_test_command(root)
+            if test_command:
+                try:
+                    proc = subprocess.run(
+                        test_command, shell=True, capture_output=True, text=True,
+                        timeout=self.DEFAULT_TIMEOUT, cwd=str(root),
+                    )
+                    test_output = (proc.stdout + "\n" + proc.stderr).strip()
+                    if proc.returncode != 0:
+                        issues.append(
+                            f"Test command failed ({test_command}): "
+                            f"{test_output[-1000:]}"
+                        )
+                except subprocess.TimeoutExpired:
+                    issues.append(f"Test command timed out: {test_command}")
+                except OSError as error:
+                    issues.append(f"Cannot run test command {test_command}: {error}")
+
         status = "passed" if not issues else "failed"
-        summary_parts = [f"changed={len(changed)}", f"html_checked={len(checked)}"]
+        summary_parts = [
+            f"changed={len(changed)}", f"files_checked={len(checked)}"
+        ]
+        if test_command:
+            summary_parts.append(f"tests={test_command}")
         if issues:
             summary_parts.append("issues=" + "; ".join(issues[:5]))
         output = "Local validation: " + ", ".join(summary_parts)
@@ -265,7 +367,41 @@ class TestManager:
                 "test_result", task_id=task.task_id, status=status, output=output[:500]
             )
         return {"status": status, "passed": 1 if status == "passed" else 0,
-                "failed": len(issues), "output": output, "changes": diff}
+                "failed": len(issues), "output": output, "changes": diff,
+                "command": test_command, "test_output": test_output[:2000]}
+
+    @classmethod
+    def _validate_source(cls, path: Path) -> dict:
+        """Run syntax/structure checks without asking a model."""
+        suffix = path.suffix.lower()
+        if suffix in {".html", ".htm"}:
+            return cls._validate_html(path)
+        issues = []
+        try:
+            content = path.read_text(encoding="utf-8")
+            if suffix == ".json":
+                json.loads(content)
+            elif suffix == ".py":
+                ast.parse(content, filename=str(path))
+            elif suffix in {".js", ".mjs", ".cjs"}:
+                proc = subprocess.run(
+                    ["node", "--check", str(path)], capture_output=True,
+                    text=True, timeout=15,
+                )
+                if proc.returncode != 0:
+                    issues.append(
+                        f"{path.name}: JavaScript syntax error: "
+                        f"{(proc.stderr or proc.stdout).strip()[:500]}"
+                    )
+        except FileNotFoundError as error:
+            if suffix in {".js", ".mjs", ".cjs"}:
+                logger.info("Node is unavailable; skipping JavaScript syntax check: %s", error)
+            else:
+                issues.append(f"{path.name}: cannot validate: {error}")
+        except (OSError, UnicodeError, ValueError, SyntaxError,
+                json.JSONDecodeError) as error:
+            issues.append(f"{path.name}: syntax/parse error: {error}")
+        return {"status": "passed" if not issues else "failed", "issues": issues}
 
     @staticmethod
     def _validate_html(path: Path) -> dict:
@@ -291,7 +427,11 @@ class TestManager:
                     f"{path.name}: duplicate id(s): {', '.join(duplicates[:8])}"
                 )
             lower = content.lower()
-            if "<html" not in lower or "<body" not in lower:
+            # HTML fragments are valid project assets. Only flag an incomplete
+            # document wrapper when the file started using one of these tags.
+            has_html = "<html" in lower
+            has_body = "<body" in lower
+            if has_html != has_body:
                 issues.append(f"{path.name}: missing html/body structure")
         except (OSError, UnicodeError, ValueError) as error:
             issues.append(f"{path.name}: cannot parse HTML: {error}")

@@ -22,12 +22,15 @@ from PyQt6.QtWidgets import (
 )
 
 from app.branding import COMPANY_NAME, PRODUCT_NAME, logo_path
+from app.ui.time_utils import format_local_timestamp
 
 
 JOB_STATUS = {
     "done": ("#55a86b", "已完成"),
     "failed": ("#d96868", "失败"),
     "cancelled": ("#8f8f98", "已停止"),
+    "interrupted": ("#d9914f", "已中断，可继续"),
+    "needs_attention": ("#d9914f", "需处理"),
     "governing": ("#d4a94f", "分析中"),
     "planning": ("#d4a94f", "规划中"),
     "executing": ("#d4a94f", "执行中"),
@@ -322,12 +325,6 @@ class ProjectPanel(QWidget):
 
     @staticmethod
     def _format_time(value: str) -> str:
-        if not value:
-            return "刚刚"
-        try:
-            from datetime import datetime
-
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return parsed.strftime("%m-%d %H:%M")
-        except (ValueError, TypeError):
-            return value[:16]
+        return format_local_timestamp(
+            value, fmt="%m-%d %H:%M", unknown="刚刚"
+        )

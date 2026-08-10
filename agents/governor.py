@@ -79,6 +79,7 @@ Output ONLY valid JSON."""
                 self.agent_type,
                 GOVERNOR_SYSTEM_PROMPT,
                 messages,
+                project_root=project.root_path if project else ".",
             )
 
             content = response.get("content", "{}")

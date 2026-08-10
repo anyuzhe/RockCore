@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AI Engineering Studio — Entry Point.
 
-Architecture: ChatGPT Plus → Codex SDK + Kimi K2.6 + DeepSeek V4 Flash
+Architecture: ChatGPT Plus → Codex SDK + Kimi + DeepSeek V4
   Codex SDK → Governor / Reviewer
 """
 
@@ -36,7 +36,6 @@ async def main():
     from orchestrator.model_router import ModelRouter
     from orchestrator.risk_engine import RiskEngine
     from orchestrator.cost_engine import CostEngine, JobBudget
-    from orchestrator.model_scoring import ModelScoring
     from tools.tool_broker import ToolBroker
     from orchestrator.policy_engine import PolicyEngine
     from agents.governor import GovernorAgent
@@ -52,26 +51,24 @@ async def main():
     # ── Initialize V6 engines ──
     risk_engine = RiskEngine()
     cost_engine = CostEngine()
-    model_scoring = ModelScoring()
 
     # Configure default budget
     budget_cfg = config.get("budget", {})
-    default_budget = JobBudget(
-        max_total_tokens=budget_cfg.get("max_total_tokens", 1_000_000),
-        max_api_calls=budget_cfg.get("max_api_calls", 100),
-        max_cost_usd=budget_cfg.get("max_cost_usd", 0.50),
-    )
+    default_budget = CostEngine.budget_from_config(budget_cfg)
+    cost_engine.set_default_budget(default_budget)
 
-    engine = Engine()
+    engine = Engine(
+        max_concurrent_workers=config.get("max_concurrent_workers", 3)
+    )
     # Replace default ModelRouter with V6 smart router
     agent_provider_map = config.get("agent_provider_map", {})
     engine.model_router = ModelRouter(
         risk_engine=risk_engine,
         cost_engine=cost_engine,
-        model_scoring=model_scoring,
         provider_map=agent_provider_map,
         event_bus=engine.event_bus,
     )
+    engine.apply_runtime_config(config)
     await engine.start()
 
     # ── Initialize context manager (V5) ──
@@ -89,15 +86,18 @@ async def main():
     if codex_provider.is_authenticated:
         logger.info(
             "Codex provider registered "
-            f"(provider={codex_provider.model_provider}, "
+            f"(auth_mode={codex_provider.authentication_mode}, "
+            f"provider={codex_provider.model_provider}, "
             f"wire_api={codex_provider.wire_api}, model={codex_provider.model}, "
             f"proxy={codex_provider.proxy_source})"
         )
     else:
-        logger.warning("Codex SDK provider registered but no auth token —"
-                       " login via Codex CLI first")
+        logger.warning(
+            "Codex provider registered but neither ChatGPT login nor "
+            "OPENAI_API_KEY is available"
+        )
 
-    # Kimi K2.6: Planner
+    # Kimi K3: Planner (K2.7 is reserved for provider-failure fallback)
     if config.get("kimi", {}).get("api_key"):
         from providers.kimi_provider import KimiProvider
         kimi_provider = KimiProvider(config.get("kimi", {}))
@@ -106,7 +106,7 @@ async def main():
     else:
         logger.warning("No Kimi API key configured — Planner will use defaults")
 
-    # DeepSeek V4 Flash: Worker
+    # DeepSeek V4: Worker
     if config.get("deepseek", {}).get("api_key"):
         from providers.deepseek_provider import DeepSeekProvider
         ds_provider = DeepSeekProvider(config.get("deepseek", {}))

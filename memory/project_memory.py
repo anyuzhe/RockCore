@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,14 +67,14 @@ class ProjectMemory:
             return
         path = self.ai_dir / filename
         header = f"# {name.replace('_', ' ').title()}\n\n"
-        timestamp = f"\n\n---\n*Updated: {datetime.now(timezone.utc).isoformat()}*\n"
+        timestamp = f"\n\n---\n*Updated: {datetime.now().astimezone().isoformat()}*\n"
         path.write_text(header + content.strip() + timestamp)
         logger.info(f"Updated memory: {name}")
 
     def append_memory(self, name: str, entry: str):
         """Append an entry to a memory file."""
         existing = self.read_memory(name)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         new_entry = f"\n- [{timestamp}] {entry}\n"
         self.write_memory(name, existing + new_entry)
 

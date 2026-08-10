@@ -1,6 +1,7 @@
 """Codex-style requirement conversation and inline execution trace."""
 
 import json
+import re
 from datetime import datetime
 
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
@@ -18,6 +19,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.time_utils import format_local_timestamp
+
 
 STATUS_STYLE = {
     "done": {"icon": "✓", "color": "#55a86b", "text": "已完成"},
@@ -28,6 +31,8 @@ STATUS_STYLE = {
     "rejected": {"icon": "!", "color": "#d9914f", "text": "未通过"},
     "fallback": {"icon": "!", "color": "#d9914f", "text": "已降级"},
     "cancelled": {"icon": "×", "color": "#8f8f98", "text": "已停止"},
+    "interrupted": {"icon": "!", "color": "#d9914f", "text": "已中断，可继续"},
+    "needs_attention": {"icon": "!", "color": "#d9914f", "text": "需处理"},
     "skipped": {"icon": "−", "color": "#8f8f98", "text": "已跳过"},
     "executing": {"icon": "●", "color": "#d4a94f", "text": "执行中"},
     "reviewing": {"icon": "●", "color": "#d4a94f", "text": "审核中"},
@@ -268,6 +273,9 @@ class TaskPanel(QWidget):
         self._current_job: dict | None = None
         self._tasks: list[dict] = []
         self._worker_outputs: list[str] = []
+        self._repair_rounds: list[dict] = []
+        self._reviews: list[dict] = []
+        self._active_repair_round = 0
         self._usage = self._empty_usage()
         self._setup_ui()
 
@@ -291,7 +299,10 @@ class TaskPanel(QWidget):
         header_layout.addLayout(names, 1)
         self.usage_label = QLabel("")
         self.usage_label.setObjectName("mutedLabel")
-        self.usage_label.setToolTip("本需求的模型用量为估算值")
+        self.usage_label.setToolTip(
+            "等价估算用于比较模型用量；可计费 API 估算才参与美元预算。"
+            "ChatGPT 登录调用不计入可计费 API 成本。"
+        )
         header_layout.addWidget(self.usage_label)
         self.job_status_indicator = StatusIndicator()
         self.job_status_indicator.clear()
@@ -381,11 +392,16 @@ class TaskPanel(QWidget):
         trace_label = QLabel("执行过程")
         trace_label.setObjectName("traceLabel")
         agent_layout.addWidget(trace_label)
+        self.trace_layout = QVBoxLayout()
+        self.trace_layout.setContentsMargins(0, 0, 0, 0)
+        self.trace_layout.setSpacing(0)
         self.stages: dict[str, WorkflowStage] = {}
         for key, title, subtitle in self.STAGES:
             stage = WorkflowStage(key, title, subtitle)
             self.stages[key] = stage
-            agent_layout.addWidget(stage)
+            self.trace_layout.addWidget(stage)
+        self.repair_stages: dict[str, WorkflowStage] = {}
+        agent_layout.addLayout(self.trace_layout)
 
         details_label = QLabel("结果详情")
         details_label.setObjectName("traceLabel")
@@ -414,7 +430,13 @@ class TaskPanel(QWidget):
 
     @staticmethod
     def _empty_usage() -> dict:
-        return {"input_tokens": 0, "output_tokens": 0, "calls": 0, "cost": 0.0}
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "calls": 0,
+            "cost": 0.0,
+            "billable_cost": 0.0,
+        }
 
     @staticmethod
     def _format_usage(usage: dict, prefix: str = "用量") -> str:
@@ -422,11 +444,21 @@ class TaskPanel(QWidget):
         output_tokens = int(usage.get("output_tokens", 0) or 0)
         calls = int(usage.get("calls", 0) or 0)
         cost = float(usage.get("cost", 0.0) or 0.0)
+        raw_billable_cost = usage.get("billable_cost")
         if not calls and not input_tokens and not output_tokens:
             return ""
+        if raw_billable_cost is None:
+            cost_text = (
+                f"等价估算 ${cost:.4f} · 可计费 API：历史记录未区分"
+            )
+        else:
+            billable_cost = float(raw_billable_cost or 0.0)
+            cost_text = (
+                f"等价估算 ${cost:.4f} · 可计费 API ${billable_cost:.4f}"
+            )
         return (
             f"{prefix}：输入 {input_tokens:,} · 输出 {output_tokens:,} tokens"
-            f" · ${cost:.4f} 估算 · {calls} 次调用"
+            f" · {cost_text} · {calls} 次调用"
         )
 
     def _set_usage(self, usage: dict | None):
@@ -436,6 +468,187 @@ class TaskPanel(QWidget):
     def begin_new_request(self, project_name: str = "", root_path: str = ""):
         self.clear_workflow()
         self.set_project_context(project_name, root_path)
+
+    @staticmethod
+    def _repair_round_from_task_id(task_id: str) -> int:
+        match = re.match(r"^R(\d+)T", task_id or "")
+        return int(match.group(1)) if match else 0
+
+    def _clear_repair_stages(self):
+        for stage in self.repair_stages.values():
+            self.trace_layout.removeWidget(stage)
+            stage.setParent(None)
+            stage.deleteLater()
+        self.repair_stages.clear()
+
+    def _ensure_repair_stage(self, round_number: int,
+                             agent_type: str) -> WorkflowStage:
+        key = f"repair_{round_number}_{agent_type}"
+        stage = self.repair_stages.get(key)
+        if stage:
+            return stage
+        metadata = {
+            "planner": ("策划者", f"第 {round_number} 轮 · 判断与修复计划"),
+            "worker": ("执行者", f"第 {round_number} 轮 · 执行修复与验证"),
+            "reviewer": ("审核者", f"第 {round_number} 轮 · 修复结果复审"),
+        }
+        title, subtitle = metadata[agent_type]
+        stage = WorkflowStage(key, title, subtitle)
+        self.repair_stages[key] = stage
+        self.trace_layout.addWidget(stage)
+        return stage
+
+    def _stage_for(self, key: str, repair_round: int = 0) -> WorkflowStage | None:
+        if repair_round and key in {"planner", "worker", "reviewer"}:
+            return self._ensure_repair_stage(repair_round, key)
+        return self.stages.get(key)
+
+    @staticmethod
+    def _review_status(result: str) -> str:
+        if result == "pass":
+            return "success"
+        if result == "error":
+            return "failed"
+        return "rejected"
+
+    def _set_review_stage(self, stage: WorkflowStage,
+                          review: dict | None,
+                          *, fallback: str = "审核未通过"):
+        review = review or {}
+        result = review.get("result", "pending")
+        if result == "pending":
+            stage.set_status("running")
+        else:
+            stage.set_status(self._review_status(result))
+        summary = review.get("summary", "") or (
+            "审核通过" if result == "pass" else fallback
+        )
+        lines = [summary]
+        issues = review.get("issues") or []
+        if issues:
+            lines.append(
+                "问题：\n" + "\n".join(
+                    f"- {self._issue_text(issue)}" for issue in issues
+                )
+            )
+        stage.set_output("\n\n".join(lines))
+
+    def _repair_tasks(self, repair: dict) -> list[dict]:
+        plan_tasks = (repair.get("plan") or {}).get("tasks") or []
+        actual_by_id = {
+            task.get("task_id"): task for task in self._tasks
+            if task.get("task_id")
+        }
+        merged = []
+        for planned in plan_tasks:
+            task = dict(planned)
+            actual = actual_by_id.get(planned.get("id")) or {}
+            task.update({key: value for key, value in actual.items() if value is not None})
+            task.setdefault("task_id", planned.get("id", "?"))
+            task.setdefault("title", planned.get("title", ""))
+            merged.append(task)
+        return merged
+
+    def _set_repair_worker_stage(self, stage: WorkflowStage,
+                                 repair: dict):
+        repair_status = repair.get("status", "planned")
+        if repair_status == "executing":
+            stage_status = "running"
+        elif repair_status == "execution_failed":
+            stage_status = "failed"
+        elif repair_status == "planned":
+            stage_status = "pending"
+        else:
+            stage_status = "success"
+        stage.set_status(stage_status)
+        lines = []
+        for task in self._repair_tasks(repair):
+            task_status = task.get("status", "pending")
+            style = STATUS_STYLE.get(task_status, STATUS_STYLE["pending"])
+            lines.append(
+                f"{style['icon']} {task.get('task_id', '?')} · "
+                f"{task.get('title', '')} · {style['text']}"
+            )
+        if repair.get("reason") and repair_status == "execution_failed":
+            lines.append(f"失败原因：{repair['reason']}")
+        stage.set_output("\n".join(lines) or "等待执行修复任务")
+
+    def _populate_repair_timeline(self, repair_rounds: list[dict],
+                                  reviews: list[dict]):
+        self._clear_repair_stages()
+        self._repair_rounds = list(repair_rounds or [])
+        self._reviews = list(reviews or [])
+        self._active_repair_round = 0
+        chronological_reviews = list(reversed(self._reviews))
+        terminal_repair_statuses = {
+            "unrepairable", "assessment_failed", "plan_rejected",
+            "execution_failed", "review_rejected", "review_error", "passed",
+        }
+
+        for repair in self._repair_rounds:
+            round_number = int(repair.get("round", 0) or 0)
+            if not round_number:
+                continue
+            repair_status = repair.get("status", "assessed")
+            planner = self._ensure_repair_stage(round_number, "planner")
+            if repair_status == "assessment_failed":
+                planner_status = "failed"
+            elif repair_status in {"unrepairable", "plan_rejected"}:
+                planner_status = "rejected"
+            elif repair_status == "assessed":
+                planner_status = "running"
+            else:
+                planner_status = "success"
+            planner.set_status(planner_status)
+            planner_lines = [
+                f"审核未通过后，进入第 {round_number} 轮修复判断。"
+            ]
+            if repair.get("reason"):
+                planner_lines.append(f"判断说明：{repair['reason']}")
+            repair_tasks = (repair.get("plan") or {}).get("tasks") or []
+            if repair_tasks:
+                planner_lines.append(
+                    "修复步骤：\n" + "\n".join(
+                        f"- {task.get('id', '?')} · {task.get('title', '')}"
+                        for task in repair_tasks
+                    )
+                )
+            planner.set_output("\n\n".join(planner_lines))
+
+            worker_statuses = {
+                "planned", "executing", "execution_failed", "executed",
+                "review_rejected", "review_error", "passed",
+            }
+            if repair_status in worker_statuses:
+                worker = self._ensure_repair_stage(round_number, "worker")
+                self._set_repair_worker_stage(worker, repair)
+
+            post_review = (
+                chronological_reviews[round_number]
+                if len(chronological_reviews) > round_number else None
+            )
+            review_statuses = {"executed", "review_rejected", "review_error", "passed"}
+            if post_review or repair_status in review_statuses:
+                reviewer = self._ensure_repair_stage(round_number, "reviewer")
+                if post_review:
+                    self._set_review_stage(reviewer, post_review)
+                elif repair_status == "review_error":
+                    reviewer.set_status("failed")
+                    reviewer.set_output(repair.get("reason", "修复后审核无法完成"))
+                elif repair_status == "review_rejected":
+                    reviewer.set_status("rejected")
+                    reviewer.set_output(repair.get("reason", "修复后审核仍未通过"))
+                elif repair_status == "passed":
+                    reviewer.set_status("success")
+                    reviewer.set_output(
+                        repair.get("final_review_summary", "修复后审核通过")
+                    )
+                else:
+                    reviewer.set_status("running")
+                    reviewer.set_output("修复已执行，正在再次审核")
+
+            if repair_status not in terminal_repair_statuses:
+                self._active_repair_round = round_number
 
     def set_workflow(self, job: dict, constitution: dict | None = None,
                      plan: dict | None = None, tasks: list[dict] | None = None,
@@ -447,6 +660,7 @@ class TaskPanel(QWidget):
                 disclosure.clear()
         self._current_job = job
         self._tasks = tasks or []
+        self._reviews = reviews or []
         self._worker_outputs = worker_outputs
         self._set_usage(job.get("usage"))
         self.empty_state.hide()
@@ -464,7 +678,9 @@ class TaskPanel(QWidget):
             meta += f"  ·  承接 {source}"
         self.job_meta_label.setText(meta)
         self._set_header_status(status)
-        self.followup_btn.setEnabled(status in {"done", "failed", "cancelled"})
+        self.followup_btn.setEnabled(status in {
+            "done", "failed", "cancelled", "interrupted", "needs_attention"
+        })
         self.user_output.setText(request)
         self.user_source_label.setText(f"继续自 {source}" if source else "")
         self.user_source_label.setVisible(bool(source))
@@ -477,6 +693,7 @@ class TaskPanel(QWidget):
             and plan
             and not plan.get("raw_output")
         )
+        last_repair = None
         if constitution and not fast_path:
             lines = [f"目标：{constitution.get('goal', '')}"]
             constraints = constitution.get("constraints") or []
@@ -491,18 +708,26 @@ class TaskPanel(QWidget):
                 "fallback" if governor_fallback else "success"
             )
             if governor_fallback:
+                fallback_error = (constitution.get("raw_output") or {}).get("error", "")
                 lines.append("注意：模型调用失败，本阶段使用了默认约束。")
+                lines.append(
+                    "降级原因：" + self._friendly_provider_error(fallback_error)
+                )
             self.stages["governor"].set_output("\n\n".join(lines))
         elif status == "governing":
             self.stages["governor"].set_status("running")
 
         if plan and not fast_path:
             lines = [plan.get("summary", "已生成执行计划")]
-            plan_tasks = (plan.get("raw_output") or {}).get("tasks", [])
+            raw_plan = plan.get("raw_output") or {}
+            plan_tasks = raw_plan.get("tasks", [])
             if plan_tasks:
                 lines.append("\n".join(
                     f"{task.get('id', '?')} · {task.get('title', '')}" for task in plan_tasks
                 ))
+            repair_rounds = raw_plan.get("repair_rounds") or []
+            if repair_rounds:
+                last_repair = repair_rounds[-1]
             self.stages["planner"].set_status("success")
             self.stages["planner"].set_output("\n\n".join(lines))
         elif status == "planning":
@@ -512,22 +737,20 @@ class TaskPanel(QWidget):
         self._populate_test_details()
 
         if reviews:
-            review = reviews[0]
-            result = review.get("result", "pending")
-            review_stage_status = (
-                "success" if result == "pass" else
-                "failed" if result == "error" else "rejected"
-            )
-            self.stages["reviewer"].set_status(review_stage_status)
-            lines = [review.get("summary", "") or ("审核通过" if result == "pass" else "审核未通过")]
-            issues = review.get("issues") or []
-            if issues:
-                lines.append("问题：\n" + "\n".join(f"- {self._issue_text(issue)}" for issue in issues))
-            self.stages["reviewer"].set_output("\n\n".join(lines))
+            # Reviews are loaded newest-first; the fixed stage represents the
+            # initial review, while repair reviews are appended below it.
+            self._set_review_stage(self.stages["reviewer"], reviews[-1])
         elif status == "reviewing":
             self.stages["reviewer"].set_status("running")
 
-        if fast_path or status in {"done", "failed", "cancelled"}:
+        self._populate_repair_timeline(
+            (plan.get("raw_output") or {}).get("repair_rounds", []) if plan else [],
+            reviews or [],
+        )
+
+        if fast_path or status in {
+            "done", "failed", "cancelled", "interrupted", "needs_attention"
+        }:
             if fast_path or not constitution:
                 self.stages["governor"].set_status("skipped")
                 self.stages["governor"].set_output("简单任务使用快速流程，已跳过独立裁决。")
@@ -541,7 +764,18 @@ class TaskPanel(QWidget):
         if status == "done":
             self.agent_summary.setText("需求已完成。你可以查看执行过程、代码变更和验收结果，或继续提出修改。")
         elif status == "failed":
-            self.agent_summary.setText("本次执行未完成。失败原因保留在对应步骤中，可以直接继续提出修复要求。")
+            if last_repair and last_repair.get("reason"):
+                self.agent_summary.setText(
+                    f"本次自动修复未完成：{last_repair['reason']}"
+                )
+            else:
+                reason = job.get("failure_reason") or "失败原因保留在对应步骤中"
+                hint = job.get("recovery_hint") or "可以直接继续提出修复要求"
+                self.agent_summary.setText(f"本次执行未完成：{reason}。{hint}")
+        elif status in {"interrupted", "needs_attention"}:
+            reason = job.get("failure_reason") or "上次运行未正常结束"
+            hint = job.get("recovery_hint") or "可以从检查点继续"
+            self.agent_summary.setText(f"{reason}。{hint}")
         elif status == "cancelled":
             self.agent_summary.setText("执行已停止。当前结果仍然保留，可以从这里继续。")
         else:
@@ -555,6 +789,10 @@ class TaskPanel(QWidget):
         self._current_job = None
         self._tasks = []
         self._worker_outputs = []
+        self._repair_rounds = []
+        self._reviews = []
+        self._active_repair_round = 0
+        self._clear_repair_stages()
         self._set_usage(self._empty_usage())
         self.workflow_title.setText("新需求")
         self.job_meta_label.setText("选择项目后即可开始")
@@ -570,10 +808,13 @@ class TaskPanel(QWidget):
             disclosure.clear()
 
     def update_stage(self, key: str, status: str, summary: str = "",
-                     details: dict | None = None):
-        stage = self.stages.get(key)
+                     details: dict | None = None,
+                     repair_round: int = 0):
+        stage = self._stage_for(key, repair_round)
         if not stage:
             return
+        if repair_round:
+            self._active_repair_round = repair_round
         stage.set_status(status)
         if summary:
             stage.append_output(summary)
@@ -582,19 +823,32 @@ class TaskPanel(QWidget):
         self.agent_summary.setText(summary or "工作流正在继续执行。")
         QTimer.singleShot(0, self._scroll_to_bottom)
 
-    def append_stage_output(self, key: str, text: str):
-        stage = self.stages.get(key)
+    def append_stage_output(self, key: str, text: str,
+                            repair_round: int = 0):
+        stage = self._stage_for(key, repair_round)
         if stage:
             stage.append_output(text)
 
     def add_model_output(self, agent_type: str, provider: str, response: str,
                          error: str | None, duration_ms: int,
                          input_tokens: int = 0, output_tokens: int = 0,
-                         task_id: str = "", estimated_cost: float = 0.0):
+                         task_id: str = "", estimated_cost: float = 0.0,
+                         billable_cost: float | None = None,
+                         billing_mode: str = "api"):
+        equivalent_cost = max(0.0, float(estimated_cost or 0.0))
+        api_cost = (
+            0.0
+            if billing_mode == "chatgpt_cli"
+            else equivalent_cost
+            if billable_cost is None
+            else max(0.0, float(billable_cost or 0.0))
+        )
         self._usage["input_tokens"] += max(0, int(input_tokens or 0))
         self._usage["output_tokens"] += max(0, int(output_tokens or 0))
         self._usage["calls"] += 1
-        self._usage["cost"] += max(0.0, float(estimated_cost or 0.0))
+        self._usage["cost"] += equivalent_cost
+        if self._usage.get("billable_cost") is not None:
+            self._usage["billable_cost"] += api_cost
         self.usage_label.setText(self._format_usage(self._usage, "总用量"))
         if task_id:
             task = next((item for item in self._tasks if item.get("task_id") == task_id), None)
@@ -603,9 +857,14 @@ class TaskPanel(QWidget):
                 task_usage["input_tokens"] += max(0, int(input_tokens or 0))
                 task_usage["output_tokens"] += max(0, int(output_tokens or 0))
                 task_usage["calls"] += 1
-                task_usage["cost"] += max(0.0, float(estimated_cost or 0.0))
+                task_usage["cost"] += equivalent_cost
+                if task_usage.get("billable_cost") is not None:
+                    task_usage["billable_cost"] += api_cost
         key = "worker" if agent_type.startswith("worker") else agent_type
-        stage = self.stages.get(key)
+        repair_round = self._repair_round_from_task_id(task_id)
+        if not repair_round and key in {"planner", "reviewer"}:
+            repair_round = self._active_repair_round
+        stage = self._stage_for(key, repair_round)
         if not stage:
             return
         duration = f"{duration_ms / 1000:.1f}s" if duration_ms >= 1000 else f"{duration_ms}ms"
@@ -616,12 +875,22 @@ class TaskPanel(QWidget):
             content = self._normalize_model_output(response)
             if not content:
                 return
+            if billing_mode == "chatgpt_cli":
+                cost_text = (
+                    f"等价估算 ${equivalent_cost:.4f} · "
+                    "ChatGPT 登录不计入 API 成本"
+                )
+            else:
+                cost_text = (
+                    f"等价估算 ${equivalent_cost:.4f} · "
+                    f"可计费 API ${api_cost:.4f}"
+                )
             text = (
                 f"{provider.upper()} · {duration} · "
-                f"{input_tokens}+{output_tokens} tokens · ${estimated_cost:.4f} 估算\n"
+                f"{input_tokens}+{output_tokens} tokens · {cost_text}\n"
                 f"{content}"
             )
-        if key == "worker":
+        if key == "worker" and not repair_round:
             self._worker_outputs.append(text)
             self._refresh_worker_stage()
         else:
@@ -630,6 +899,7 @@ class TaskPanel(QWidget):
     def set_tasks(self, tasks: list[dict]):
         self._tasks = tasks
         self._refresh_worker_stage()
+        self._populate_repair_timeline(self._repair_rounds, self._reviews)
         self._populate_test_details()
 
     def update_task_status(self, task_id: str, status: str):
@@ -637,7 +907,17 @@ class TaskPanel(QWidget):
             if task.get("task_id") == task_id:
                 task["status"] = status
                 break
-        self._refresh_worker_stage()
+        repair_round = self._repair_round_from_task_id(task_id)
+        if repair_round:
+            repair = next((
+                item for item in self._repair_rounds
+                if int(item.get("round", 0) or 0) == repair_round
+            ), None)
+            if repair:
+                stage = self._ensure_repair_stage(repair_round, "worker")
+                self._set_repair_worker_stage(stage, repair)
+        else:
+            self._refresh_worker_stage()
 
     def has_task(self, task_id: str) -> bool:
         return any(task.get("task_id") == task_id for task in self._tasks)
@@ -647,7 +927,9 @@ class TaskPanel(QWidget):
             return
         self._current_job["status"] = status
         self._set_header_status(status)
-        self.followup_btn.setEnabled(status in {"done", "failed", "cancelled"})
+        self.followup_btn.setEnabled(status in {
+            "done", "failed", "cancelled", "interrupted", "needs_attention"
+        })
 
     def log(self, message: str, tab: str = "log"):
         if tab.lower() == "test":
@@ -701,12 +983,16 @@ class TaskPanel(QWidget):
 
     def _refresh_worker_stage(self):
         stage = self.stages["worker"]
-        if not self._tasks:
+        base_tasks = [
+            task for task in self._tasks
+            if not self._repair_round_from_task_id(task.get("task_id", ""))
+        ]
+        if not base_tasks:
             stage.set_status("pending")
             if self._worker_outputs:
                 stage.set_output("\n\n".join(self._worker_outputs[-10:]), expand=True)
             return
-        statuses = [task.get("status", "pending") for task in self._tasks]
+        statuses = [task.get("status", "pending") for task in base_tasks]
         if any(status == "failed" for status in statuses):
             overall = "failed"
         elif any(status in {"running", "executing"} for status in statuses):
@@ -721,7 +1007,7 @@ class TaskPanel(QWidget):
             overall = "pending"
         stage.set_status(overall)
         lines = []
-        for task in self._tasks:
+        for task in base_tasks:
             style = STATUS_STYLE.get(task.get("status", "pending"), STATUS_STYLE["pending"])
             lines.append(f"{style['icon']} {task.get('task_id', '?')} · {task.get('title', '')} · {style['text']}")
             description = task.get("description", "").strip()
@@ -767,13 +1053,32 @@ class TaskPanel(QWidget):
 
     @staticmethod
     def _format_time(value: str) -> str:
-        return value.replace("T", " ")[:16] if value else "时间未知"
+        return format_local_timestamp(value, include_offset=True)
 
     @staticmethod
     def _issue_text(issue) -> str:
         if isinstance(issue, dict):
             return str(issue.get("problem") or issue.get("message") or issue)
         return str(issue)
+
+    @staticmethod
+    def _friendly_provider_error(error: str) -> str:
+        normalized = (error or "").lower()
+        if "credit_balance_exhausted" in normalized or "no credits remaining" in normalized:
+            return (
+                "Platform API 账户无可用余额，或认证通道配置错误"
+                "（这不代表 ChatGPT/Codex 用量耗尽）"
+            )
+        if "insufficient_quota" in normalized:
+            return (
+                "Platform API 配额不足（HTTP 429，insufficient_quota；"
+                "与 ChatGPT/Codex 订阅用量无关）"
+            )
+        if "rate limit" in normalized or "too many requests" in normalized:
+            return "模型服务触发速率限制（HTTP 429）"
+        if "timed out" in normalized or "timeout" in normalized:
+            return "模型请求超时"
+        return (error or "未知错误")[:500]
 
     @staticmethod
     def _format_details(details: dict) -> str:

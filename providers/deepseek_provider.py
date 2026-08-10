@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSeekProvider(BaseProvider):
-    """Provider for DeepSeek V4 Flash (Worker role, high-frequency execution)."""
+    """Provider for DeepSeek V4 models used by the Worker role."""
 
     DEFAULT_MODEL = "deepseek-v4-flash"
     BASE_URL = "https://api.deepseek.com/v1"
@@ -31,13 +31,32 @@ class DeepSeekProvider(BaseProvider):
             )
         return self._client
 
+    @staticmethod
+    def _resolve_tool_choice(tools: list[dict], requested: Any) -> Any:
+        """Return a tool choice supported by DeepSeek thinking mode.
+
+        The thinking API accepts automatic tool selection but rejects the
+        OpenAI-compatible ``required`` mode. Keep the tools available and let
+        the model select one instead of sending a request that will fail with
+        HTTP 400.
+        """
+        if not tools:
+            return None
+        if requested == "required":
+            logger.info(
+                "DeepSeek thinking mode does not support tool_choice=required; "
+                "using auto"
+            )
+            return "auto"
+        return requested or "auto"
+
     async def chat(self, system_prompt: str, messages: list[dict],
                    **kwargs) -> dict:
         client = self._get_client()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             temperature=kwargs.get("temperature", 0.3),
             max_tokens=kwargs.get("max_tokens", 8192),
@@ -59,15 +78,18 @@ class DeepSeekProvider(BaseProvider):
                               tools: list[dict], **kwargs) -> dict:
         client = self._get_client()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
+        tool_choice = self._resolve_tool_choice(
+            tools, kwargs.get("tool_choice", "auto")
+        )
 
         response = await client.chat.completions.create(
-            model=self.model,
+            model=kwargs.get("model", self.model),
             messages=full_messages,
             tools=tools if tools else None,
             temperature=kwargs.get("temperature", 0.3),
             max_tokens=kwargs.get("max_tokens", 16384),
             parallel_tool_calls=kwargs.get("parallel_tool_calls", True),
-            tool_choice=kwargs.get("tool_choice", "auto") if tools else None,
+            tool_choice=tool_choice,
         )
 
         choice = response.choices[0]

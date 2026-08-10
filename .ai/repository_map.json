@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-07 10:28:18.417342+00:00",
+  "generated_at": "2026-08-10 07:12:46.315573+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -7,14 +7,19 @@
       "symbols": 5
     },
     {
+      "path": "test_review_repair_workflow.py",
+      "category": "source",
+      "symbols": 11
+    },
+    {
       "path": "test_codex_style_ui.py",
       "category": "source",
-      "symbols": 8
+      "symbols": 13
     },
     {
       "path": "test_worker_completion.py",
       "category": "source",
-      "symbols": 51
+      "symbols": 66
     },
     {
       "path": "requirements.txt",
@@ -32,9 +37,19 @@
       "symbols": 5
     },
     {
+      "path": "test_deepseek_models.py",
+      "category": "source",
+      "symbols": 4
+    },
+    {
       "path": "__init__.py",
       "category": "source",
       "symbols": 0
+    },
+    {
+      "path": "test_pathlike_tools.py",
+      "category": "source",
+      "symbols": 2
     },
     {
       "path": "test_t003_static_compliance.py",
@@ -44,7 +59,12 @@
     {
       "path": "test_codex_auth.py",
       "category": "source",
-      "symbols": 5
+      "symbols": 10
+    },
+    {
+      "path": "test_output_finalization.py",
+      "category": "source",
+      "symbols": 2
     },
     {
       "path": "world_cup_2022_knockout.json",
@@ -60,6 +80,11 @@
       "path": "README.md",
       "category": "markup",
       "symbols": 0
+    },
+    {
+      "path": "test_emergency_coder.py",
+      "category": "source",
+      "symbols": 3
     },
     {
       "path": "requirements-build.txt",
@@ -92,6 +117,11 @@
       "symbols": 7
     },
     {
+      "path": "test_phase_optimizations.py",
+      "category": "source",
+      "symbols": 18
+    },
+    {
       "path": "weekday.html",
       "category": "markup",
       "symbols": 0
@@ -109,12 +139,17 @@
     {
       "path": "test_usage_metrics.py",
       "category": "source",
-      "symbols": 2
+      "symbols": 5
     },
     {
       "path": "test_reviewer_recovery.py",
       "category": "source",
-      "symbols": 8
+      "symbols": 14
+    },
+    {
+      "path": "test_planning_grounding.py",
+      "category": "source",
+      "symbols": 6
     },
     {
       "path": "test_workflow_routing.py",
@@ -202,6 +237,11 @@
       "symbols": 0
     },
     {
+      "path": "app/ui/time_utils.py",
+      "category": "source",
+      "symbols": 3
+    },
+    {
       "path": "app/ui/settings_dialog.py",
       "category": "source",
       "symbols": 13
@@ -214,7 +254,7 @@
     {
       "path": "app/ui/task_panel.py",
       "category": "source",
-      "symbols": 54
+      "symbols": 64
     },
     {
       "path": "memory/repo_map.py",
@@ -239,12 +279,12 @@
     {
       "path": "providers/codex_provider.py",
       "category": "source",
-      "symbols": 9
+      "symbols": 15
     },
     {
       "path": "providers/deepseek_provider.py",
       "category": "source",
-      "symbols": 3
+      "symbols": 4
     },
     {
       "path": "providers/__init__.py",
@@ -269,7 +309,7 @@
     {
       "path": "agents/worker.py",
       "category": "source",
-      "symbols": 5
+      "symbols": 10
     },
     {
       "path": "agents/planner.py",
@@ -294,7 +334,7 @@
     {
       "path": "agents/reviewer.py",
       "category": "source",
-      "symbols": 4
+      "symbols": 8
     },
     {
       "path": "backend/server.py",
@@ -329,7 +369,7 @@
     {
       "path": "storage/repositories.py",
       "category": "source",
-      "symbols": 52
+      "symbols": 59
     },
     {
       "path": "scripts/build_windows.ps1",
@@ -449,7 +489,7 @@
     {
       "path": "orchestrator/engine.py",
       "category": "source",
-      "symbols": 22
+      "symbols": 36
     },
     {
       "path": "orchestrator/scheduler.py",
@@ -464,12 +504,12 @@
     {
       "path": "orchestrator/test_manager.py",
       "category": "source",
-      "symbols": 11
+      "symbols": 14
     },
     {
       "path": "orchestrator/model_router.py",
       "category": "source",
-      "symbols": 9
+      "symbols": 18
     },
     {
       "path": "orchestrator/merge_manager.py",
@@ -479,7 +519,7 @@
     {
       "path": "orchestrator/cost_engine.py",
       "category": "source",
-      "symbols": 9
+      "symbols": 16
     }
   ],
   "symbols": [
@@ -514,357 +554,543 @@
       "file": "test_workflow_followup.py"
     },
     {
+      "name": "_SequenceReviewer",
+      "type": "class",
+      "line": 39,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "_RepairPlanner",
+      "type": "class",
+      "line": 49,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "_PlannerRouter",
+      "type": "class",
+      "line": 59,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "test_planner_parses_review_repair_decision_and_plan",
+      "type": "function",
+      "line": 67,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "test_default_project_config_enables_review_auto_repair",
+      "type": "function",
+      "line": 84,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "test_rejected_review_is_replanned_executed_and_reviewed_again",
+      "type": "function",
+      "line": 89,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "test_planner_explains_when_rejected_review_cannot_be_repaired",
+      "type": "function",
+      "line": 176,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "test_two_repair_rounds_are_recorded_then_stop_with_clear_reason",
+      "type": "function",
+      "line": 222,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 40,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 50,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 60,
+      "file": "test_review_repair_workflow.py"
+    },
+    {
       "name": "_app",
       "type": "function",
-      "line": 19,
+      "line": 25,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_naive_database_time_is_treated_as_utc_then_shown_locally",
+      "type": "function",
+      "line": 31,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_database_datetime_serialization_keeps_explicit_utc_marker",
+      "type": "function",
+      "line": 44,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_running_request_can_queue_a_followup",
       "type": "function",
-      "line": 25,
+      "line": 50,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_live_stage_updates_expand_inside_the_conversation",
       "type": "function",
-      "line": 42,
+      "line": 67,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_workflow_shows_governor_fallback_and_unrepairable_reason",
+      "type": "function",
+      "line": 95,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_review_repairs_are_appended_in_conversation_order",
+      "type": "function",
+      "line": 151,
+      "file": "test_codex_style_ui.py"
+    },
+    {
+      "name": "test_job_finished_keeps_sidebar_and_header_on_same_terminal_status",
+      "type": "function",
+      "line": 224,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_switching_from_fast_to_auto_restores_the_full_pipeline",
       "type": "function",
-      "line": 70,
+      "line": 246,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_sidebar_settings_and_context_project_removal",
       "type": "function",
-      "line": 87,
+      "line": 263,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_sidebar_primary_action_creates_a_project",
       "type": "function",
-      "line": 110,
+      "line": 286,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_api_key_fields_have_reveal_buttons",
       "type": "function",
-      "line": 121,
+      "line": 297,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "test_sidebar_uses_rock_innovation_branding",
       "type": "function",
-      "line": 140,
+      "line": 317,
       "file": "test_codex_style_ui.py"
     },
     {
       "name": "_task",
       "type": "function",
-      "line": 13,
+      "line": 14,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ToolSequenceRouter",
       "type": "class",
-      "line": 24,
+      "line": 25,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_RecordingBroker",
       "type": "class",
-      "line": 49,
+      "line": 50,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_PrematureThenEditingRouter",
       "type": "class",
-      "line": 63,
+      "line": 64,
       "file": "test_worker_completion.py"
     },
     {
-      "name": "_ReviewSequenceRouter",
+      "name": "_AlreadySatisfiedRouter",
       "type": "class",
-      "line": 90,
+      "line": 91,
       "file": "test_worker_completion.py"
     },
     {
-      "name": "_MalformedResponseRouter",
+      "name": "_UnverifiedAlreadySatisfiedRouter",
       "type": "class",
       "line": 119,
       "file": "test_worker_completion.py"
     },
     {
+      "name": "_ReviewSequenceRouter",
+      "type": "class",
+      "line": 128,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_MalformedResponseRouter",
+      "type": "class",
+      "line": 157,
+      "file": "test_worker_completion.py"
+    },
+    {
       "name": "_ToolFailureRouter",
       "type": "class",
-      "line": 130,
+      "line": 168,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ToolExceptionRouter",
       "type": "class",
-      "line": 162,
+      "line": 200,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ThrowingBroker",
       "type": "class",
-      "line": 182,
+      "line": 220,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_InvalidResultBroker",
       "type": "class",
-      "line": 195,
+      "line": 233,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_InvalidResultRouter",
       "type": "class",
-      "line": 206,
+      "line": 244,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "_RejectedPathBroker",
+      "type": "class",
+      "line": 267,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_coding_worker_corrects_premature_no_tool_completion",
       "type": "function",
-      "line": 229,
+      "line": 276,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_coding_worker_accepts_verified_already_satisfied_state",
+      "type": "function",
+      "line": 292,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_coding_worker_rejects_unverified_already_satisfied_state",
+      "type": "function",
+      "line": 309,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_conditional_coding_worker_can_complete_without_changes",
       "type": "function",
-      "line": 245,
+      "line": 323,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_read_only_review_stops_after_evidence_and_returns_report",
       "type": "function",
-      "line": 273,
+      "line": 351,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_never_crashes_on_a_malformed_provider_response",
       "type": "function",
-      "line": 290,
+      "line": 368,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_returns_tool_argument_errors_to_the_model",
       "type": "function",
-      "line": 301,
+      "line": 379,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_continues_after_a_tool_exception",
       "type": "function",
-      "line": 314,
+      "line": 392,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_converts_an_invalid_tool_result_to_recoverable_error",
       "type": "function",
-      "line": 327,
+      "line": 405,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_surfaces_allowed_path_rejection_without_spending_all_turns",
+      "type": "function",
+      "line": 417,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_worker_enforces_edit_after_exploration_budget",
       "type": "function",
-      "line": 339,
+      "line": 431,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_AlwaysPartialWorker",
       "type": "class",
-      "line": 357,
+      "line": 449,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_partial_changes_at_turn_limit_do_not_auto_pass",
       "type": "function",
-      "line": 366,
+      "line": 458,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_RecoveringWorker",
       "type": "class",
-      "line": 390,
+      "line": 482,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_TransientProviderWorker",
       "type": "class",
-      "line": 401,
+      "line": 493,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_ThrowingProviderWorker",
       "type": "class",
-      "line": 412,
+      "line": 504,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_no_change_turn_limit_switches_to_kimi_repair",
       "type": "function",
-      "line": 423,
+      "line": 515,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_connection_failure_switches_to_kimi_immediately",
       "type": "function",
-      "line": 453,
+      "line": 545,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_thrown_provider_failure_skips_same_provider_retries",
       "type": "function",
-      "line": 473,
+      "line": 565,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_transient_provider_error_is_classified_for_fallback",
       "type": "function",
-      "line": 493,
+      "line": 585,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_tool_choice_capability_error_is_not_provider_unavailability",
+      "type": "function",
+      "line": 591,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_tool_choice_capability_error_switches_to_kimi_once",
+      "type": "function",
+      "line": 598,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_SlowProvider",
       "type": "class",
-      "line": 499,
+      "line": 628,
       "file": "test_worker_completion.py"
     },
     {
       "name": "_SyncMalformedProvider",
       "type": "class",
-      "line": 509,
+      "line": 638,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_model_router_translates_provider_timeout",
       "type": "function",
-      "line": 517,
+      "line": 646,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_model_router_normalizes_sync_and_malformed_provider_output",
       "type": "function",
-      "line": 533,
+      "line": 662,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_default_worker_budgets_use_reliable_soft_limits",
       "type": "function",
-      "line": 553,
+      "line": 682,
       "file": "test_worker_completion.py"
     },
     {
       "name": "test_large_existing_task_receives_a_dynamic_budget",
       "type": "function",
-      "line": 564,
+      "line": 693,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_worker_compacts_history_without_splitting_recent_tool_pair",
+      "type": "function",
+      "line": 710,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_model_router_raises_structured_budget_error_before_provider_call",
+      "type": "function",
+      "line": 752,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "test_budget_error_stops_worker_escalation_immediately",
+      "type": "function",
+      "line": 783,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 25,
+      "line": 26,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 52,
+      "line": 53,
       "file": "test_worker_completion.py"
     },
     {
       "name": "get_tool_definitions",
       "type": "function",
-      "line": 55,
+      "line": 56,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 64,
+      "line": 65,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 91,
+      "line": 92,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 120,
+      "line": 129,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 131,
+      "line": 158,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 183,
+      "line": 169,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 196,
+      "line": 221,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 207,
+      "line": 234,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 358,
+      "line": 245,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 391,
+      "line": 450,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 402,
+      "line": 483,
       "file": "test_worker_completion.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 413,
+      "line": 494,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 505,
       "file": "test_worker_completion.py"
     },
     {
       "name": "chat",
       "type": "function",
-      "line": 510,
+      "line": 639,
       "file": "test_worker_completion.py"
     },
     {
       "name": "chat_with_tools",
       "type": "function",
-      "line": 513,
+      "line": 642,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "Provider",
+      "type": "class",
+      "line": 753,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "BudgetWorker",
+      "type": "class",
+      "line": 784,
       "file": "test_worker_completion.py"
     },
     {
       "name": "NoChangeRouter",
       "type": "class",
-      "line": 247,
+      "line": 325,
+      "file": "test_worker_completion.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 785,
       "file": "test_worker_completion.py"
     },
     {
@@ -902,6 +1128,42 @@
       "type": "function",
       "line": 23,
       "file": "test_kimi_models.py"
+    },
+    {
+      "name": "test_deepseek_downgrades_required_tool_choice_to_auto",
+      "type": "function",
+      "line": 9,
+      "file": "test_deepseek_models.py"
+    },
+    {
+      "name": "test_deepseek_preserves_supported_tool_choice",
+      "type": "function",
+      "line": 38,
+      "file": "test_deepseek_models.py"
+    },
+    {
+      "name": "_Completions",
+      "type": "class",
+      "line": 10,
+      "file": "test_deepseek_models.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 11,
+      "file": "test_deepseek_models.py"
+    },
+    {
+      "name": "test_tools_accept_pathlib_project_roots",
+      "type": "function",
+      "line": 11,
+      "file": "test_pathlike_tools.py"
+    },
+    {
+      "name": "test_tool_broker_normalizes_pathlike_roots_when_switched",
+      "type": "function",
+      "line": 23,
+      "file": "test_pathlike_tools.py"
     },
     {
       "name": "load_content",
@@ -948,32 +1210,92 @@
     {
       "name": "test_reads_current_top_level_codex_auth_format",
       "type": "function",
-      "line": 13,
+      "line": 18,
       "file": "test_codex_auth.py"
     },
     {
-      "name": "test_reads_nested_codex_auth_format",
+      "name": "test_never_uses_nested_chatgpt_access_token_as_platform_key",
       "type": "function",
-      "line": 25,
+      "line": 38,
       "file": "test_codex_auth.py"
     },
     {
       "name": "test_environment_credentials_take_precedence",
       "type": "function",
-      "line": 35,
+      "line": 48,
+      "file": "test_codex_auth.py"
+    },
+    {
+      "name": "test_chatgpt_login_is_detected_through_codex_status_without_reading_token",
+      "type": "function",
+      "line": 60,
+      "file": "test_codex_auth.py"
+    },
+    {
+      "name": "test_provider_uses_codex_exec_for_chatgpt_login",
+      "type": "function",
+      "line": 78,
+      "file": "test_codex_auth.py"
+    },
+    {
+      "name": "test_explicit_platform_key_takes_the_api_channel_even_when_chatgpt_is_logged_in",
+      "type": "function",
+      "line": 127,
       "file": "test_codex_auth.py"
     },
     {
       "name": "test_reads_active_codex_provider_and_wire_protocol",
       "type": "function",
-      "line": 47,
+      "line": 141,
       "file": "test_codex_auth.py"
     },
     {
       "name": "test_environment_proxy_is_detected_without_exposing_credentials",
       "type": "function",
-      "line": 65,
+      "line": 159,
       "file": "test_codex_auth.py"
+    },
+    {
+      "name": "runner",
+      "type": "function",
+      "line": 61,
+      "file": "test_codex_auth.py"
+    },
+    {
+      "name": "runner",
+      "type": "function",
+      "line": 79,
+      "file": "test_codex_auth.py"
+    },
+    {
+      "name": "test_project_output_discovery_includes_nested_files_and_ignores_metadata",
+      "type": "function",
+      "line": 9,
+      "file": "test_output_finalization.py"
+    },
+    {
+      "name": "test_finalize_does_not_overwrite_reviewed_done_status_for_empty_analysis_project",
+      "type": "function",
+      "line": 19,
+      "file": "test_output_finalization.py"
+    },
+    {
+      "name": "_Router",
+      "type": "class",
+      "line": 9,
+      "file": "test_emergency_coder.py"
+    },
+    {
+      "name": "test_emergency_coder_passes_agent_type_only_once",
+      "type": "function",
+      "line": 23,
+      "file": "test_emergency_coder.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 10,
+      "file": "test_emergency_coder.py"
     },
     {
       "name": "_AnalysisWorker",
@@ -1090,6 +1412,114 @@
       "file": "test_resilient_validation.py"
     },
     {
+      "name": "_NoopScoring",
+      "type": "class",
+      "line": 15,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_visible_total_token_budget_has_no_hidden_component_cap",
+      "type": "function",
+      "line": 23,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_runtime_settings_update_scheduler_and_default_budget",
+      "type": "function",
+      "line": 36,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_simple_plan_collapses_analysis_and_overlapping_coding",
+      "type": "function",
+      "line": 56,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_validation_only_testing_task_stays_local",
+      "type": "function",
+      "line": 91,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_test_authoring_task_still_uses_worker",
+      "type": "function",
+      "line": 107,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_tool_schema_is_pruned_by_task_type",
+      "type": "function",
+      "line": 117,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_provider_capability_error_immediately_falls_back",
+      "type": "function",
+      "line": 134,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_project_routing_overrides_global_route_and_model",
+      "type": "function",
+      "line": 169,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_start_marks_stale_job_as_resumable_interruption",
+      "type": "function",
+      "line": 202,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_continuation_includes_task_failure_checkpoint",
+      "type": "function",
+      "line": 225,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_review_failure_after_completed_work_is_needs_attention",
+      "type": "function",
+      "line": 258,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "test_early_pipeline_failure_still_emits_authoritative_finished_event",
+      "type": "function",
+      "line": 286,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "get_best_model",
+      "type": "function",
+      "line": 19,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "BrokenProvider",
+      "type": "class",
+      "line": 135,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "WorkingProvider",
+      "type": "class",
+      "line": 141,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "Provider",
+      "type": "class",
+      "line": 170,
+      "file": "test_phase_optimizations.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 173,
+      "file": "test_phase_optimizations.py"
+    },
+    {
       "name": "test",
       "type": "function",
       "line": 153,
@@ -1120,52 +1550,142 @@
       "file": "test_usage_metrics.py"
     },
     {
+      "name": "test_usage_event_uses_a_separate_session_from_job_lifecycle",
+      "type": "function",
+      "line": 59,
+      "file": "test_usage_metrics.py"
+    },
+    {
+      "name": "test_repeated_task_ids_are_scoped_to_the_current_job",
+      "type": "function",
+      "line": 85,
+      "file": "test_usage_metrics.py"
+    },
+    {
+      "name": "test_review_and_repair_budget_reservations_are_idempotent",
+      "type": "function",
+      "line": 119,
+      "file": "test_usage_metrics.py"
+    },
+    {
       "name": "_ReviewRouter",
       "type": "class",
-      "line": 10,
+      "line": 11,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "test_reviewer_retries_an_empty_codex_response",
       "type": "function",
-      "line": 24,
+      "line": 25,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "test_reviewer_falls_back_to_kimi_after_invalid_codex_output",
       "type": "function",
-      "line": 39,
+      "line": 40,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "test_reviewer_reports_empty_output_clearly_when_all_attempts_fail",
       "type": "function",
-      "line": 55,
+      "line": 56,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "test_reviewer_reads_changes_from_commits_for_the_current_job",
       "type": "function",
-      "line": 69,
+      "line": 70,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_uses_final_net_diff_across_multiple_job_commits",
+      "type": "function",
+      "line": 95,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_diff_chunks_preserve_every_original_character",
+      "type": "function",
+      "line": 125,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_validates_complete_es_module_instead_of_diff_tail",
+      "type": "function",
+      "line": 144,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_suppresses_chunk_boundary_syntax_false_positive",
+      "type": "function",
+      "line": 157,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_reviewer_keeps_non_syntax_findings_after_full_file_validation",
+      "type": "function",
+      "line": 181,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 11,
+      "line": 12,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "has_provider",
       "type": "function",
-      "line": 16,
+      "line": 17,
       "file": "test_reviewer_recovery.py"
     },
     {
       "name": "git",
       "type": "function",
-      "line": 70,
+      "line": 71,
       "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "git",
+      "type": "function",
+      "line": 96,
+      "file": "test_reviewer_recovery.py"
+    },
+    {
+      "name": "test_static_project_repository_map_is_loaded_and_lists_real_files",
+      "type": "function",
+      "line": 12,
+      "file": "test_planning_grounding.py"
+    },
+    {
+      "name": "test_same_project_context_refreshes_files_added_by_previous_job",
+      "type": "function",
+      "line": 30,
+      "file": "test_planning_grounding.py"
+    },
+    {
+      "name": "_AnalysisAwareWorker",
+      "type": "class",
+      "line": 41,
+      "file": "test_planning_grounding.py"
+    },
+    {
+      "name": "test_analysis_report_refines_dependent_task_paths_before_execution",
+      "type": "function",
+      "line": 73,
+      "file": "test_planning_grounding.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 46,
+      "file": "test_planning_grounding.py"
+    },
+    {
+      "name": "scoped_to",
+      "type": "function",
+      "line": 51,
+      "file": "test_planning_grounding.py"
     },
     {
       "name": "test_auto_mode_keeps_full_workflow_for_simple_requests",
@@ -1218,13 +1738,13 @@
     {
       "name": "ShellTools",
       "type": "class",
-      "line": 10,
+      "line": 11,
       "file": "tools/shell_tools.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 13,
+      "line": 14,
       "file": "tools/shell_tools.py"
     },
     {
@@ -1266,31 +1786,31 @@
     {
       "name": "ToolBroker",
       "type": "class",
-      "line": 17,
+      "line": 18,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 20,
+      "line": 21,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "get_tool_definitions",
       "type": "function",
-      "line": 45,
+      "line": 49,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "set_project_root",
       "type": "function",
-      "line": 282,
+      "line": 306,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "get_available_tools",
       "type": "function",
-      "line": 308,
+      "line": 334,
       "file": "tools/tool_broker.py"
     },
     {
@@ -1308,7 +1828,7 @@
     {
       "name": "_resolve_path",
       "type": "function",
-      "line": 22,
+      "line": 24,
       "file": "tools/file_tools.py"
     },
     {
@@ -1392,344 +1912,362 @@
     {
       "name": "SignalBridge",
       "type": "class",
-      "line": 24,
+      "line": 25,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "MainWindow",
       "type": "class",
-      "line": 35,
+      "line": 36,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 38,
+      "line": 39,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 59,
+      "line": 60,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_setup_menu",
       "type": "function",
-      "line": 186,
+      "line": 187,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_connect_signals",
       "type": "function",
-      "line": 210,
+      "line": 211,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 226,
+      "line": 227,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 244,
+      "line": 245,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_followup_requested",
       "type": "function",
-      "line": 324,
+      "line": 328,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_clear_followup_source",
       "type": "function",
-      "line": 335,
+      "line": 339,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_start_new_request",
       "type": "function",
-      "line": 342,
+      "line": 346,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_project_deleted",
       "type": "function",
-      "line": 353,
+      "line": 357,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_create_project",
       "type": "function",
-      "line": 374,
+      "line": 378,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_submit_request",
       "type": "function",
-      "line": 415,
+      "line": 419,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_submit_queued_followup",
       "type": "function",
-      "line": 523,
+      "line": 527,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_cancel_queued_request",
       "type": "function",
-      "line": 537,
+      "line": 541,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_update_send_state",
       "type": "function",
-      "line": 543,
+      "line": 547,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_run",
       "type": "function",
-      "line": 552,
+      "line": 556,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_pause",
       "type": "function",
-      "line": 559,
+      "line": 563,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_stop",
       "type": "function",
-      "line": 566,
+      "line": 570,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_event",
       "type": "function",
-      "line": 574,
+      "line": 578,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_capture_diff",
       "type": "function",
-      "line": 726,
+      "line": 798,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_reload_selected_workflow",
       "type": "function",
-      "line": 778,
+      "line": 850,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_refresh_job_list",
       "type": "function",
-      "line": 783,
+      "line": 855,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_status",
       "type": "function",
-      "line": 807,
+      "line": 882,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_poll_events",
       "type": "function",
-      "line": 811,
+      "line": 886,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_project_config",
       "type": "function",
-      "line": 818,
+      "line": 893,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_settings",
       "type": "function",
-      "line": 830,
+      "line": 905,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_switch_tab",
       "type": "function",
-      "line": 837,
+      "line": 916,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_show_about",
       "type": "function",
-      "line": 840,
+      "line": 919,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 849,
+      "line": 928,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_task_usage",
       "type": "function",
-      "line": 870,
+      "line": 949,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_job_usage",
       "type": "function",
-      "line": 879,
+      "line": 958,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 887,
+      "line": 966,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "closeEvent",
       "type": "function",
-      "line": 890,
+      "line": 969,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "ProjectDialog",
       "type": "class",
-      "line": 39,
+      "line": 42,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "ProjectPanel",
       "type": "class",
-      "line": 95,
+      "line": 98,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 42,
+      "line": 45,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_browse",
       "type": "function",
-      "line": 82,
+      "line": 85,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "get_data",
       "type": "function",
-      "line": 87,
+      "line": 90,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 103,
+      "line": 106,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 110,
+      "line": 113,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_projects",
       "type": "function",
-      "line": 178,
+      "line": 181,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "set_jobs",
       "type": "function",
-      "line": 197,
+      "line": 200,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_job",
       "type": "function",
-      "line": 221,
+      "line": 224,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "clear_job_selection",
       "type": "function",
-      "line": 229,
+      "line": 232,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "select_project",
       "type": "function",
-      "line": 233,
+      "line": 236,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_job_id",
       "type": "function",
-      "line": 241,
+      "line": 244,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "current_project_name",
       "type": "function",
-      "line": 246,
+      "line": 249,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "update_job_status",
       "type": "function",
-      "line": 251,
+      "line": 254,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "remove_project",
       "type": "function",
-      "line": 266,
+      "line": 269,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_project_selected",
       "type": "function",
-      "line": 274,
+      "line": 277,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_on_job_selected",
       "type": "function",
-      "line": 278,
+      "line": 281,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_add_project",
       "type": "function",
-      "line": 282,
+      "line": 285,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_show_project_menu",
       "type": "function",
-      "line": 295,
+      "line": 298,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_delete_project",
       "type": "function",
-      "line": 308,
+      "line": 311,
       "file": "app/ui/project_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 324,
+      "line": 327,
       "file": "app/ui/project_panel.py"
+    },
+    {
+      "name": "as_utc_isoformat",
+      "type": "function",
+      "line": 7,
+      "file": "app/ui/time_utils.py"
+    },
+    {
+      "name": "to_local_datetime",
+      "type": "function",
+      "line": 23,
+      "file": "app/ui/time_utils.py"
+    },
+    {
+      "name": "format_local_timestamp",
+      "type": "function",
+      "line": 39,
+      "file": "app/ui/time_utils.py"
     },
     {
       "name": "load_config",
@@ -1794,19 +2332,19 @@
     {
       "name": "_refresh_scoring",
       "type": "function",
-      "line": 278,
+      "line": 318,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "_save",
       "type": "function",
-      "line": 284,
+      "line": 324,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "get_config",
       "type": "function",
-      "line": 312,
+      "line": 355,
       "file": "app/ui/settings_dialog.py"
     },
     {
@@ -1830,31 +2368,31 @@
     {
       "name": "_on_mode_changed",
       "type": "function",
-      "line": 214,
+      "line": 216,
       "file": "app/ui/project_config_dialog.py"
     },
     {
       "name": "_mark_custom_mode",
       "type": "function",
-      "line": 225,
+      "line": 227,
       "file": "app/ui/project_config_dialog.py"
     },
     {
       "name": "_apply_preset",
       "type": "function",
-      "line": 230,
+      "line": 232,
       "file": "app/ui/project_config_dialog.py"
     },
     {
       "name": "_load_from_config",
       "type": "function",
-      "line": 234,
+      "line": 236,
       "file": "app/ui/project_config_dialog.py"
     },
     {
       "name": "_save",
       "type": "function",
-      "line": 282,
+      "line": 284,
       "file": "app/ui/project_config_dialog.py"
     },
     {
@@ -1872,325 +2410,385 @@
     {
       "name": "StatusIndicator",
       "type": "class",
-      "line": 45,
+      "line": 50,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "WorkflowStage",
       "type": "class",
-      "line": 100,
+      "line": 105,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "ExecutionDisclosure",
       "type": "class",
-      "line": 192,
+      "line": 197,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "TaskPanel",
       "type": "class",
-      "line": 253,
+      "line": 258,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 48,
+      "line": 53,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "is_spinning",
       "type": "function",
-      "line": 59,
+      "line": 64,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_status",
       "type": "function",
-      "line": 62,
+      "line": 67,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "clear",
       "type": "function",
-      "line": 74,
+      "line": 79,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_advance",
       "type": "function",
-      "line": 78,
+      "line": 83,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "paintEvent",
       "type": "function",
-      "line": 82,
+      "line": 87,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 103,
+      "line": 108,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_toggle_output",
       "type": "function",
-      "line": 150,
+      "line": 155,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_expanded",
       "type": "function",
-      "line": 153,
+      "line": 158,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "reset",
       "type": "function",
-      "line": 159,
+      "line": 164,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_status",
       "type": "function",
-      "line": 166,
+      "line": 171,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_output",
       "type": "function",
-      "line": 175,
+      "line": 180,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "append_output",
       "type": "function",
-      "line": 182,
+      "line": 187,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 195,
+      "line": 200,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "toggle",
       "type": "function",
-      "line": 223,
+      "line": 228,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_expanded",
       "type": "function",
-      "line": 226,
+      "line": 231,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "clear",
       "type": "function",
-      "line": 232,
+      "line": 237,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_text",
       "type": "function",
-      "line": 237,
+      "line": 242,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "append",
       "type": "function",
-      "line": 242,
+      "line": 247,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 266,
+      "line": 271,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_setup_ui",
       "type": "function",
-      "line": 274,
+      "line": 282,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_project_context",
       "type": "function",
-      "line": 405,
+      "line": 418,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_empty_usage",
       "type": "function",
-      "line": 416,
+      "line": 429,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_usage",
       "type": "function",
-      "line": 420,
+      "line": 433,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_set_usage",
       "type": "function",
-      "line": 432,
+      "line": 445,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "begin_new_request",
       "type": "function",
-      "line": 436,
+      "line": 449,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_repair_round_from_task_id",
+      "type": "function",
+      "line": 454,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_clear_repair_stages",
+      "type": "function",
+      "line": 458,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_ensure_repair_stage",
+      "type": "function",
+      "line": 465,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_stage_for",
+      "type": "function",
+      "line": 482,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_review_status",
+      "type": "function",
+      "line": 488,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_set_review_stage",
+      "type": "function",
+      "line": 495,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_repair_tasks",
+      "type": "function",
+      "line": 517,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_set_repair_worker_stage",
+      "type": "function",
+      "line": 533,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_populate_repair_timeline",
+      "type": "function",
+      "line": 557,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_workflow",
       "type": "function",
-      "line": 440,
+      "line": 634,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "clear_workflow",
       "type": "function",
-      "line": 554,
+      "line": 769,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_stage",
       "type": "function",
-      "line": 572,
+      "line": 791,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "append_stage_output",
       "type": "function",
-      "line": 585,
+      "line": 807,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "add_model_output",
       "type": "function",
-      "line": 590,
+      "line": 813,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_tasks",
       "type": "function",
-      "line": 630,
+      "line": 856,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_task_status",
       "type": "function",
-      "line": 635,
+      "line": 862,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "has_task",
       "type": "function",
-      "line": 642,
+      "line": 879,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "update_job_status",
       "type": "function",
-      "line": 645,
+      "line": 882,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log",
       "type": "function",
-      "line": 652,
+      "line": 891,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log_event",
       "type": "function",
-      "line": 659,
+      "line": 898,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "log_test_result",
       "type": "function",
-      "line": 672,
+      "line": 911,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_diff",
       "type": "function",
-      "line": 678,
+      "line": 917,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "expand_detail",
       "type": "function",
-      "line": 681,
+      "line": 920,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_request_followup",
       "type": "function",
-      "line": 692,
+      "line": 931,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_set_header_status",
       "type": "function",
-      "line": 696,
+      "line": 935,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_refresh_worker_stage",
       "type": "function",
-      "line": 702,
+      "line": 941,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_populate_test_details",
       "type": "function",
-      "line": 747,
+      "line": 990,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_bottom",
       "type": "function",
-      "line": 761,
+      "line": 1004,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_top",
       "type": "function",
-      "line": 765,
+      "line": 1008,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 769,
+      "line": 1012,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_issue_text",
       "type": "function",
-      "line": 773,
+      "line": 1016,
+      "file": "app/ui/task_panel.py"
+    },
+    {
+      "name": "_friendly_provider_error",
+      "type": "function",
+      "line": 1022,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_details",
       "type": "function",
-      "line": 779,
+      "line": 1041,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_normalize_model_output",
       "type": "function",
-      "line": 792,
+      "line": 1054,
       "file": "app/ui/task_panel.py"
     },
     {
@@ -2268,7 +2866,7 @@
     {
       "name": "is_loaded",
       "type": "function",
-      "line": 184,
+      "line": 194,
       "file": "memory/repo_map.py"
     },
     {
@@ -2286,13 +2884,13 @@
     {
       "name": "_find_relevant_files",
       "type": "function",
-      "line": 62,
+      "line": 68,
       "file": "memory/context_manager.py"
     },
     {
       "name": "get_full_context",
       "type": "function",
-      "line": 107,
+      "line": 116,
       "file": "memory/context_manager.py"
     },
     {
@@ -2352,55 +2950,91 @@
     {
       "name": "_load_codex_runtime_config",
       "type": "function",
-      "line": 19,
+      "line": 22,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_detect_proxy",
       "type": "function",
-      "line": 51,
+      "line": 54,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_load_platform_api_key",
+      "type": "function",
+      "line": 71,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_load_codex_token",
       "type": "function",
-      "line": 66,
+      "line": 91,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_find_codex_binary",
+      "type": "function",
+      "line": 97,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_detect_chatgpt_login",
+      "type": "function",
+      "line": 114,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "get_codex_auth_status",
       "type": "function",
-      "line": 94,
+      "line": 144,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "CodexProvider",
       "type": "class",
-      "line": 114,
+      "line": 196,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 127,
+      "line": 201,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "is_authenticated",
       "type": "function",
-      "line": 145,
+      "line": 245,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "_get_sandbox_mode",
       "type": "function",
-      "line": 192,
+      "line": 271,
       "file": "providers/codex_provider.py"
     },
     {
       "name": "get_allowed_sandbox_modes",
       "type": "function",
-      "line": 200,
+      "line": 280,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_format_cli_prompt",
+      "type": "function",
+      "line": 284,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_parse_codex_jsonl",
+      "type": "function",
+      "line": 302,
+      "file": "providers/codex_provider.py"
+    },
+    {
+      "name": "_resolve_cwd",
+      "type": "function",
+      "line": 391,
       "file": "providers/codex_provider.py"
     },
     {
@@ -2419,6 +3053,12 @@
       "name": "_get_client",
       "type": "function",
       "line": 25,
+      "file": "providers/deepseek_provider.py"
+    },
+    {
+      "name": "_resolve_tool_choice",
+      "type": "function",
+      "line": 35,
       "file": "providers/deepseek_provider.py"
     },
     {
@@ -2460,7 +3100,7 @@
     {
       "name": "_get_client",
       "type": "function",
-      "line": 41,
+      "line": 43,
       "file": "providers/kimi_provider.py"
     },
     {
@@ -2484,49 +3124,79 @@
     {
       "name": "WorkerAgent",
       "type": "class",
-      "line": 68,
+      "line": 77,
       "file": "agents/worker.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 71,
+      "line": 80,
       "file": "agents/worker.py"
     },
     {
       "name": "scoped_to",
       "type": "function",
-      "line": 81,
+      "line": 90,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "_compact_messages",
+      "type": "function",
+      "line": 533,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "_tool_definitions",
+      "type": "function",
+      "line": 623,
       "file": "agents/worker.py"
     },
     {
       "name": "_failure",
       "type": "function",
-      "line": 484,
+      "line": 636,
       "file": "agents/worker.py"
     },
     {
       "name": "_allows_no_change",
       "type": "function",
-      "line": 496,
+      "line": 648,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "size",
+      "type": "function",
+      "line": 536,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "trim_text",
+      "type": "function",
+      "line": 539,
+      "file": "agents/worker.py"
+    },
+    {
+      "name": "compact_history_message",
+      "type": "function",
+      "line": 549,
       "file": "agents/worker.py"
     },
     {
       "name": "PlannerAgent",
       "type": "class",
-      "line": 57,
+      "line": 110,
       "file": "agents/planner.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 60,
+      "line": 113,
       "file": "agents/planner.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 186,
+      "line": 344,
       "file": "agents/planner.py"
     },
     {
@@ -2562,31 +3232,55 @@
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 101,
+      "line": 102,
       "file": "agents/governor.py"
     },
     {
       "name": "ReviewerAgent",
       "type": "class",
-      "line": 46,
+      "line": 54,
       "file": "agents/reviewer.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 49,
+      "line": 57,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_collect_job_changes",
       "type": "function",
-      "line": 142,
+      "line": 168,
+      "file": "agents/reviewer.py"
+    },
+    {
+      "name": "_split_diff",
+      "type": "function",
+      "line": 232,
+      "file": "agents/reviewer.py"
+    },
+    {
+      "name": "_validate_changed_files",
+      "type": "function",
+      "line": 273,
+      "file": "agents/reviewer.py"
+    },
+    {
+      "name": "_merge_reviews",
+      "type": "function",
+      "line": 329,
+      "file": "agents/reviewer.py"
+    },
+    {
+      "name": "_suppress_false_syntax_issues",
+      "type": "function",
+      "line": 362,
       "file": "agents/reviewer.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 189,
+      "line": 410,
       "file": "agents/reviewer.py"
     },
     {
@@ -2658,55 +3352,55 @@
     {
       "name": "Constitution",
       "type": "class",
-      "line": 58,
+      "line": 62,
       "file": "storage/models.py"
     },
     {
       "name": "Plan",
       "type": "class",
-      "line": 75,
+      "line": 79,
       "file": "storage/models.py"
     },
     {
       "name": "Task",
       "type": "class",
-      "line": 90,
+      "line": 94,
       "file": "storage/models.py"
     },
     {
       "name": "PlanTasks",
       "type": "class",
-      "line": 114,
+      "line": 121,
       "file": "storage/models.py"
     },
     {
       "name": "AgentRun",
       "type": "class",
-      "line": 120,
+      "line": 127,
       "file": "storage/models.py"
     },
     {
       "name": "ToolCall",
       "type": "class",
-      "line": 141,
+      "line": 148,
       "file": "storage/models.py"
     },
     {
       "name": "TestRun",
       "type": "class",
-      "line": 156,
+      "line": 163,
       "file": "storage/models.py"
     },
     {
       "name": "Review",
       "type": "class",
-      "line": 173,
+      "line": 180,
       "file": "storage/models.py"
     },
     {
       "name": "GitSnapshot",
       "type": "class",
-      "line": 190,
+      "line": 197,
       "file": "storage/models.py"
     },
     {
@@ -2730,7 +3424,7 @@
     {
       "name": "create_session_factory",
       "type": "function",
-      "line": 78,
+      "line": 114,
       "file": "storage/database.py"
     },
     {
@@ -2748,43 +3442,43 @@
     {
       "name": "ConstitutionRepository",
       "type": "class",
-      "line": 96,
+      "line": 127,
       "file": "storage/repositories.py"
     },
     {
       "name": "PlanRepository",
       "type": "class",
-      "line": 122,
+      "line": 153,
       "file": "storage/repositories.py"
     },
     {
       "name": "TaskRepository",
       "type": "class",
-      "line": 149,
+      "line": 200,
       "file": "storage/repositories.py"
     },
     {
       "name": "AgentRunRepository",
       "type": "class",
-      "line": 224,
+      "line": 310,
       "file": "storage/repositories.py"
     },
     {
       "name": "ToolCallRepository",
       "type": "class",
-      "line": 254,
+      "line": 340,
       "file": "storage/repositories.py"
     },
     {
       "name": "TestRunRepository",
       "type": "class",
-      "line": 269,
+      "line": 355,
       "file": "storage/repositories.py"
     },
     {
       "name": "ReviewRepository",
       "type": "class",
-      "line": 299,
+      "line": 385,
       "file": "storage/repositories.py"
     },
     {
@@ -2866,183 +3560,225 @@
       "file": "storage/repositories.py"
     },
     {
-      "name": "add_usage",
+      "name": "set_failure",
       "type": "function",
-      "line": 83,
+      "line": 86,
       "file": "storage/repositories.py"
     },
     {
-      "name": "__init__",
+      "name": "clear_failure",
       "type": "function",
       "line": 97,
       "file": "storage/repositories.py"
     },
     {
-      "name": "create",
+      "name": "update_checkpoint",
       "type": "function",
-      "line": 100,
+      "line": 106,
       "file": "storage/repositories.py"
     },
     {
-      "name": "get_by_job",
+      "name": "add_usage",
       "type": "function",
-      "line": 116,
+      "line": 114,
       "file": "storage/repositories.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 123,
+      "line": 128,
       "file": "storage/repositories.py"
     },
     {
       "name": "create",
       "type": "function",
-      "line": 126,
+      "line": 131,
       "file": "storage/repositories.py"
     },
     {
       "name": "get_by_job",
       "type": "function",
-      "line": 134,
+      "line": 147,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 154,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "create",
+      "type": "function",
+      "line": 157,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "get_by_job",
+      "type": "function",
+      "line": 165,
       "file": "storage/repositories.py"
     },
     {
       "name": "update_validation",
       "type": "function",
-      "line": 139,
+      "line": 170,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "upsert_repair_round",
+      "type": "function",
+      "line": 179,
       "file": "storage/repositories.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 150,
+      "line": 201,
       "file": "storage/repositories.py"
     },
     {
       "name": "create",
       "type": "function",
-      "line": 153,
+      "line": 204,
       "file": "storage/repositories.py"
     },
     {
       "name": "get_by_id",
       "type": "function",
-      "line": 176,
+      "line": 227,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "get_by_job_and_id",
+      "type": "function",
+      "line": 232,
       "file": "storage/repositories.py"
     },
     {
       "name": "get_by_pk",
       "type": "function",
-      "line": 181,
+      "line": 239,
       "file": "storage/repositories.py"
     },
     {
       "name": "list_by_job",
       "type": "function",
-      "line": 184,
+      "line": 242,
       "file": "storage/repositories.py"
     },
     {
       "name": "update_status",
       "type": "function",
-      "line": 189,
+      "line": 247,
       "file": "storage/repositories.py"
     },
     {
       "name": "update_status_by_pk",
       "type": "function",
-      "line": 193,
+      "line": 251,
       "file": "storage/repositories.py"
     },
     {
-      "name": "_set_status",
-      "type": "function",
-      "line": 197,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "get_next_pending",
-      "type": "function",
-      "line": 206,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "__init__",
-      "type": "function",
-      "line": 225,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "create",
-      "type": "function",
-      "line": 228,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "update_status",
-      "type": "function",
-      "line": 235,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "list_by_task",
-      "type": "function",
-      "line": 248,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "__init__",
+      "name": "update_definition",
       "type": "function",
       "line": 255,
       "file": "storage/repositories.py"
     },
     {
-      "name": "create",
+      "name": "update_result",
       "type": "function",
-      "line": 258,
+      "line": 271,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "_set_status",
+      "type": "function",
+      "line": 283,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "get_next_pending",
+      "type": "function",
+      "line": 292,
       "file": "storage/repositories.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 270,
+      "line": 311,
       "file": "storage/repositories.py"
     },
     {
       "name": "create",
       "type": "function",
-      "line": 273,
+      "line": 314,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "update_status",
+      "type": "function",
+      "line": 321,
       "file": "storage/repositories.py"
     },
     {
       "name": "list_by_task",
       "type": "function",
-      "line": 279,
-      "file": "storage/repositories.py"
-    },
-    {
-      "name": "update_result",
-      "type": "function",
-      "line": 284,
+      "line": 334,
       "file": "storage/repositories.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 300,
+      "line": 341,
       "file": "storage/repositories.py"
     },
     {
       "name": "create",
       "type": "function",
-      "line": 303,
+      "line": 344,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 356,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "create",
+      "type": "function",
+      "line": 359,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "list_by_task",
+      "type": "function",
+      "line": 365,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "update_result",
+      "type": "function",
+      "line": 370,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 386,
+      "file": "storage/repositories.py"
+    },
+    {
+      "name": "create",
+      "type": "function",
+      "line": 389,
       "file": "storage/repositories.py"
     },
     {
       "name": "list_by_job",
       "type": "function",
-      "line": 315,
+      "line": 401,
       "file": "storage/repositories.py"
     },
     {
@@ -3222,49 +3958,49 @@
     {
       "name": "PolicyViolation",
       "type": "class",
-      "line": 10,
+      "line": 11,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "PolicyEngine",
       "type": "class",
-      "line": 17,
+      "line": 18,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 11,
+      "line": 12,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 44,
+      "line": 45,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_path",
       "type": "function",
-      "line": 47,
+      "line": 48,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_command",
       "type": "function",
-      "line": 95,
+      "line": 96,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_task_plan",
       "type": "function",
-      "line": 117,
+      "line": 118,
       "file": "orchestrator/policy_engine.py"
     },
     {
       "name": "check_tool_call",
       "type": "function",
-      "line": 132,
+      "line": 146,
       "file": "orchestrator/policy_engine.py"
     },
     {
@@ -3312,13 +4048,13 @@
     {
       "name": "load_project_config",
       "type": "function",
-      "line": 154,
+      "line": 156,
       "file": "orchestrator/agent_config.py"
     },
     {
       "name": "save_project_config",
       "type": "function",
-      "line": 185,
+      "line": 187,
       "file": "orchestrator/agent_config.py"
     },
     {
@@ -3354,13 +4090,13 @@
     {
       "name": "standard_preset",
       "type": "function",
-      "line": 125,
+      "line": 126,
       "file": "orchestrator/agent_config.py"
     },
     {
       "name": "strict_preset",
       "type": "function",
-      "line": 139,
+      "line": 141,
       "file": "orchestrator/agent_config.py"
     },
     {
@@ -3480,133 +4216,217 @@
     {
       "name": "Engine",
       "type": "class",
-      "line": 46,
+      "line": 49,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 49,
+      "line": 52,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "apply_runtime_config",
+      "type": "function",
+      "line": 78,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 72,
+      "line": 102,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 87,
+      "line": 117,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "register_agent",
       "type": "function",
-      "line": 90,
+      "line": 120,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "get_agent",
       "type": "function",
-      "line": 130,
+      "line": 160,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_on_state_change_sync",
       "type": "function",
-      "line": 141,
+      "line": 171,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_classify_request",
       "type": "function",
-      "line": 177,
+      "line": 231,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_direct_plan_data",
       "type": "function",
-      "line": 481,
+      "line": 584,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_tasks_from_plan",
       "type": "function",
-      "line": 497,
+      "line": 600,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_optimize_plan",
+      "type": "function",
+      "line": 619,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_serialize_overlapping_tasks",
       "type": "function",
-      "line": 515,
+      "line": 684,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_prune_transitive_dependencies",
       "type": "function",
-      "line": 535,
+      "line": 704,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_path_patterns_overlap",
       "type": "function",
-      "line": 567,
+      "line": 736,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_estimate_task_budget",
       "type": "function",
-      "line": 591,
+      "line": 760,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_direct_plan",
       "type": "function",
-      "line": 680,
+      "line": 849,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_collect_analysis_dependency_reports",
+      "type": "function",
+      "line": 1256,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_is_budget_error",
+      "type": "function",
+      "line": 1554,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_is_task_path_mismatch",
+      "type": "function",
+      "line": 1566,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_is_provider_capability_error",
+      "type": "function",
+      "line": 1574,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 1109,
+      "line": 1585,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_update_latest_repair_round",
+      "type": "function",
+      "line": 2183,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_namespace_repair_plan",
+      "type": "function",
+      "line": 2193,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_friendly_provider_error",
+      "type": "function",
+      "line": 2221,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_failure_details",
+      "type": "function",
+      "line": 2241,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_store_job_failure",
+      "type": "function",
+      "line": 2286,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_checkpoint_task",
+      "type": "function",
+      "line": 2290,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 1320,
+      "line": 2357,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 1335,
+      "line": 2372,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 1389,
+      "line": 2457,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 1394,
+      "line": 2462,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 1402,
+      "line": 2470,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_project_output_files",
+      "type": "function",
+      "line": 2547,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "reaches",
       "type": "function",
-      "line": 543,
+      "line": 712,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "visit",
+      "type": "function",
+      "line": 1265,
       "file": "orchestrator/engine.py"
     },
     {
@@ -3732,67 +4552,85 @@
     {
       "name": "TestManager",
       "type": "class",
-      "line": 29,
+      "line": 32,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "is_git_repo",
       "type": "function",
-      "line": 36,
+      "line": 39,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "capture_snapshot",
       "type": "function",
-      "line": 50,
+      "line": 53,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "snapshot_diff",
       "type": "function",
-      "line": 74,
+      "line": 77,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_uses_git",
       "type": "function",
-      "line": 87,
+      "line": 90,
+      "file": "orchestrator/test_manager.py"
+    },
+    {
+      "name": "is_test_authoring_task",
+      "type": "function",
+      "line": 98,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "should_validate_locally",
       "type": "function",
-      "line": 95,
+      "line": 115,
+      "file": "orchestrator/test_manager.py"
+    },
+    {
+      "name": "discover_test_command",
+      "type": "function",
+      "line": 131,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_is_shell_command",
       "type": "function",
-      "line": 107,
+      "line": 158,
+      "file": "orchestrator/test_manager.py"
+    },
+    {
+      "name": "_validate_source",
+      "type": "function",
+      "line": 374,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "_validate_html",
       "type": "function",
-      "line": 271,
+      "line": 407,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "StructureParser",
       "type": "class",
-      "line": 272,
+      "line": 408,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 273,
+      "line": 409,
       "file": "orchestrator/test_manager.py"
     },
     {
       "name": "handle_starttag",
       "type": "function",
-      "line": 277,
+      "line": 413,
       "file": "orchestrator/test_manager.py"
     },
     {
@@ -3810,43 +4648,97 @@
     {
       "name": "set_job_id",
       "type": "function",
-      "line": 51,
-      "file": "orchestrator/model_router.py"
-    },
-    {
-      "name": "register_provider",
-      "type": "function",
       "line": 54,
       "file": "orchestrator/model_router.py"
     },
     {
-      "name": "get_provider",
+      "name": "set_provider_map",
       "type": "function",
       "line": 57,
       "file": "orchestrator/model_router.py"
     },
     {
+      "name": "set_job_routing",
+      "type": "function",
+      "line": 61,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "register_provider",
+      "type": "function",
+      "line": 68,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "get_provider",
+      "type": "function",
+      "line": 71,
+      "file": "orchestrator/model_router.py"
+    },
+    {
       "name": "has_provider",
       "type": "function",
-      "line": 63,
+      "line": 77,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_configured_provider",
+      "type": "function",
+      "line": 80,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_configured_model",
+      "type": "function",
+      "line": 84,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_circuit_is_open",
+      "type": "function",
+      "line": 87,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_failure_kind",
+      "type": "function",
+      "line": 92,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_record_provider_success",
+      "type": "function",
+      "line": 122,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_record_provider_failure",
+      "type": "function",
+      "line": 125,
+      "file": "orchestrator/model_router.py"
+    },
+    {
+      "name": "_fallback_provider",
+      "type": "function",
+      "line": 139,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "_normalize_response",
       "type": "function",
-      "line": 75,
+      "line": 176,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "_normalize_token_count",
       "type": "function",
-      "line": 97,
+      "line": 198,
       "file": "orchestrator/model_router.py"
     },
     {
       "name": "get_route",
       "type": "function",
-      "line": 104,
+      "line": 205,
       "file": "orchestrator/model_router.py"
     },
     {
@@ -3880,71 +4772,120 @@
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "UsageRecord",
+      "name": "BudgetExceededError",
       "type": "class",
-      "line": 22,
+      "line": 21,
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "CostEngine",
+      "name": "UsageRecord",
       "type": "class",
       "line": 30,
       "file": "orchestrator/cost_engine.py"
     },
     {
+      "name": "CostEngine",
+      "type": "class",
+      "line": 39,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
       "name": "__init__",
       "type": "function",
-      "line": 53,
+      "line": 24,
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "set_budget",
-      "type": "function",
-      "line": 58,
-      "file": "orchestrator/cost_engine.py"
-    },
-    {
-      "name": "get_budget",
+      "name": "__init__",
       "type": "function",
       "line": 62,
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "get_usage_summary",
+      "name": "set_default_budget",
       "type": "function",
-      "line": 107,
+      "line": 69,
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "_cost_rates",
+      "name": "budget_from_config",
+      "type": "function",
+      "line": 74,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "set_budget",
+      "type": "function",
+      "line": 92,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "reserve_repair_budget",
+      "type": "function",
+      "line": 104,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "reserve_review_budget",
+      "type": "function",
+      "line": 117,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "_ensure_job_budget",
+      "type": "function",
+      "line": 130,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "get_budget",
       "type": "function",
       "line": 137,
       "file": "orchestrator/cost_engine.py"
     },
     {
+      "name": "get_usage_summary",
+      "type": "function",
+      "line": 202,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
+      "name": "_cost_rates",
+      "type": "function",
+      "line": 232,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
       "name": "estimate_cost",
       "type": "function",
-      "line": 144,
+      "line": 239,
       "file": "orchestrator/cost_engine.py"
     }
   ],
   "categories": {
     "source": {
-      "count": 73,
+      "count": 81,
       "files": [
         "test_workflow_followup.py",
+        "test_review_repair_workflow.py",
         "test_codex_style_ui.py",
         "test_worker_completion.py",
         "test_storage_integrity.py",
         "test_kimi_models.py",
+        "test_deepseek_models.py",
         "__init__.py",
+        "test_pathlike_tools.py",
         "test_t003_static_compliance.py",
         "test_codex_auth.py",
+        "test_output_finalization.py",
+        "test_emergency_coder.py",
         "test_analysis_tasks.py",
         "test_resilient_validation.py",
+        "test_phase_optimizations.py",
         "test_pipeline.py",
         "test_usage_metrics.py",
         "test_reviewer_recovery.py",
+        "test_planning_grounding.py",
         "test_workflow_routing.py",
         "tools/shell_tools.py",
         "tools/git_tools.py",
@@ -3961,6 +4902,7 @@
         "app/ui/main_window.py",
         "app/ui/project_panel.py",
         "app/ui/__init__.py",
+        "app/ui/time_utils.py",
         "app/ui/settings_dialog.py",
         "app/ui/project_config_dialog.py",
         "app/ui/task_panel.py",
@@ -3973,15 +4915,7 @@
         "providers/__init__.py",
         "providers/openai_provider.py",
         "providers/kimi_provider.py",
-        "providers/base.py",
-        "agents/worker.py",
-        "agents/planner.py",
-        "agents/emergency_coder.py",
-        "agents/__init__.py",
-        "agents/governor.py",
-        "agents/reviewer.py",
-        "backend/server.py",
-        "backend/__init__.py"
+        "providers/base.py"
       ]
     },
     "other": {

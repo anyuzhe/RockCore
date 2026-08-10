@@ -46,9 +46,10 @@ class ToolBroker:
             "git_diff": self.git_tools.git_diff,
         }
 
-    def get_tool_definitions(self) -> list[dict]:
-        """Return tool definitions for OpenAI-compatible function calling."""
-        return [
+    def get_tool_definitions(self, task_type: str | None = None,
+                             test_authoring: bool = False) -> list[dict]:
+        """Return only the tools needed by this task type."""
+        definitions = [
             {
                 "type": "function",
                 "function": {
@@ -240,6 +241,25 @@ class ToolBroker:
                     },
                 },
             },
+        ]
+        if task_type in {"analysis", "review"}:
+            allowed = {
+                "list_files", "read_file", "search_in_file", "search_code",
+                "git_status", "git_diff", "read_log",
+            }
+        elif task_type == "testing" and not test_authoring:
+            allowed = {"run_tests", "run_command", "git_diff", "git_status"}
+        elif task_type in {"coding", "testing"}:
+            allowed = {
+                "list_files", "read_file", "search_in_file", "search_code",
+                "write_file", "apply_patch", "insert_before", "insert_after",
+                "run_command", "run_tests", "git_status", "git_diff",
+            }
+        else:
+            return definitions
+        return [
+            definition for definition in definitions
+            if definition["function"]["name"] in allowed
         ]
 
     async def execute(self, task, tool_name: str, args: dict) -> dict:
