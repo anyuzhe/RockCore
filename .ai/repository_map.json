@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-10 08:31:46.039048+00:00",
+  "generated_at": "2026-08-10 09:15:49.146093+00:00",
   "files": [
     {
       "path": "test_workflow_followup.py",
@@ -40,6 +40,11 @@
       "path": "test_deepseek_models.py",
       "category": "source",
       "symbols": 5
+    },
+    {
+      "path": "test_document_workflow.py",
+      "category": "source",
+      "symbols": 25
     },
     {
       "path": "__init__.py",
@@ -154,7 +159,7 @@
     {
       "path": "test_workflow_routing.py",
       "category": "source",
-      "symbols": 10
+      "symbols": 14
     },
     {
       "path": "today_weekday.html",
@@ -329,7 +334,7 @@
     {
       "path": "agents/governor.py",
       "category": "source",
-      "symbols": 3
+      "symbols": 4
     },
     {
       "path": "agents/reviewer.py",
@@ -489,7 +494,7 @@
     {
       "path": "orchestrator/engine.py",
       "category": "source",
-      "symbols": 37
+      "symbols": 42
     },
     {
       "path": "orchestrator/scheduler.py",
@@ -514,7 +519,7 @@
     {
       "path": "orchestrator/cost_engine.py",
       "category": "source",
-      "symbols": 19
+      "symbols": 20
     }
   ],
   "symbols": [
@@ -1221,6 +1226,156 @@
       "file": "test_deepseek_models.py"
     },
     {
+      "name": "_task",
+      "type": "function",
+      "line": 16,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_document_request_is_not_misclassified_by_generic_one_phrase",
+      "type": "function",
+      "line": 28,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_document_budget_scales_with_source_size",
+      "type": "function",
+      "line": 37,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_document_reservation_keeps_paid_api_cost_limit_unchanged",
+      "type": "function",
+      "line": 57,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_pdf_tool_is_available_without_shell_commands",
+      "type": "function",
+      "line": 69,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_extracts_a_bounded_page_range",
+      "type": "function",
+      "line": 85,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_reports_encryption_without_repeated_attempts",
+      "type": "function",
+      "line": 115,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_read_pdf_distinguishes_blank_front_matter_from_scanned_pdf",
+      "type": "function",
+      "line": 136,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_worker_stops_immediately_when_pdf_needs_user_action",
+      "type": "function",
+      "line": 169,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_pdf_user_action_has_a_specific_recovery_hint",
+      "type": "function",
+      "line": 214,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "test_escalation_does_not_retry_a_user_input_requirement",
+      "type": "function",
+      "line": 223,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Page",
+      "type": "class",
+      "line": 88,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 95,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 118,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Page",
+      "type": "class",
+      "line": 141,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Reader",
+      "type": "class",
+      "line": 148,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Router",
+      "type": "class",
+      "line": 170,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Broker",
+      "type": "class",
+      "line": 187,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "Worker",
+      "type": "class",
+      "line": 224,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 89,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "extract_text",
+      "type": "function",
+      "line": 92,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "decrypt",
+      "type": "function",
+      "line": 122,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "__init__",
+      "type": "function",
+      "line": 142,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "extract_text",
+      "type": "function",
+      "line": 145,
+      "file": "test_document_workflow.py"
+    },
+    {
+      "name": "get_tool_definitions",
+      "type": "function",
+      "line": 191,
+      "file": "test_document_workflow.py"
+    },
+    {
       "name": "test_tools_accept_pathlib_project_roots",
       "type": "function",
       "line": 11,
@@ -1815,63 +1970,87 @@
       "file": "test_planning_grounding.py"
     },
     {
+      "name": "test_governor_returns_structured_risk_score_and_reasons",
+      "type": "function",
+      "line": 16,
+      "file": "test_workflow_routing.py"
+    },
+    {
       "name": "test_auto_mode_routes_low_risk_request_directly_to_worker",
       "type": "function",
-      "line": 14,
+      "line": 37,
       "file": "test_workflow_routing.py"
     },
     {
       "name": "test_auto_mode_routes_medium_risk_through_planner_without_reviewer",
       "type": "function",
-      "line": 62,
+      "line": 89,
       "file": "test_workflow_routing.py"
     },
     {
       "name": "test_auto_mode_routes_high_risk_request_through_full_pipeline",
       "type": "function",
-      "line": 102,
+      "line": 133,
       "file": "test_workflow_routing.py"
     },
     {
-      "name": "test_fast_mode_is_the_only_direct_worker_route",
+      "name": "test_governor_assessment_overrides_the_rule_precheck_in_auto_mode",
       "type": "function",
-      "line": 145,
+      "line": 180,
       "file": "test_workflow_routing.py"
     },
     {
-      "name": "test_missing_planner_creates_an_executable_fallback_plan",
-      "type": "function",
-      "line": 181,
-      "file": "test_workflow_routing.py"
-    },
-    {
-      "name": "test_named_modes_cannot_persist_contradictory_phase_flags",
-      "type": "function",
-      "line": 205,
-      "file": "test_workflow_routing.py"
-    },
-    {
-      "name": "test_overlapping_task_paths_are_serialized",
+      "name": "test_rule_precheck_is_used_only_when_governor_is_unavailable",
       "type": "function",
       "line": 223,
       "file": "test_workflow_routing.py"
     },
     {
+      "name": "test_fast_mode_is_the_only_direct_worker_route",
+      "type": "function",
+      "line": 262,
+      "file": "test_workflow_routing.py"
+    },
+    {
+      "name": "test_missing_planner_creates_an_executable_fallback_plan",
+      "type": "function",
+      "line": 298,
+      "file": "test_workflow_routing.py"
+    },
+    {
+      "name": "test_named_modes_cannot_persist_contradictory_phase_flags",
+      "type": "function",
+      "line": 322,
+      "file": "test_workflow_routing.py"
+    },
+    {
+      "name": "test_overlapping_task_paths_are_serialized",
+      "type": "function",
+      "line": 340,
+      "file": "test_workflow_routing.py"
+    },
+    {
       "name": "test_transitive_dependencies_are_pruned_after_serialization",
       "type": "function",
-      "line": 247,
+      "line": 364,
       "file": "test_workflow_routing.py"
     },
     {
       "name": "test_unavailable_reviewer_cannot_auto_pass_a_job",
       "type": "function",
-      "line": 265,
+      "line": 382,
+      "file": "test_workflow_routing.py"
+    },
+    {
+      "name": "Router",
+      "type": "class",
+      "line": 17,
       "file": "test_workflow_routing.py"
     },
     {
       "name": "FailedReviewer",
       "type": "class",
-      "line": 280,
+      "line": 397,
       "file": "test_workflow_routing.py"
     },
     {
@@ -1937,19 +2116,19 @@
     {
       "name": "get_tool_definitions",
       "type": "function",
-      "line": 49,
+      "line": 50,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "set_project_root",
       "type": "function",
-      "line": 306,
+      "line": 341,
       "file": "tools/tool_broker.py"
     },
     {
       "name": "get_available_tools",
       "type": "function",
-      "line": 334,
+      "line": 370,
       "file": "tools/tool_broker.py"
     },
     {
@@ -2177,85 +2356,85 @@
     {
       "name": "_capture_diff",
       "type": "function",
-      "line": 816,
+      "line": 821,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_reload_selected_workflow",
       "type": "function",
-      "line": 868,
+      "line": 873,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_refresh_job_list",
       "type": "function",
-      "line": 873,
+      "line": 878,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_on_job_status",
       "type": "function",
-      "line": 900,
+      "line": 905,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_poll_events",
       "type": "function",
-      "line": 904,
+      "line": 909,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_project_config",
       "type": "function",
-      "line": 911,
+      "line": 916,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_open_settings",
       "type": "function",
-      "line": 923,
+      "line": 928,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_switch_tab",
       "type": "function",
-      "line": 933,
+      "line": 938,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_show_about",
       "type": "function",
-      "line": 936,
+      "line": 941,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 945,
+      "line": 950,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_task_usage",
       "type": "function",
-      "line": 966,
+      "line": 971,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_job_usage",
       "type": "function",
-      "line": 987,
+      "line": 992,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 999,
+      "line": 1004,
       "file": "app/ui/main_window.py"
     },
     {
       "name": "closeEvent",
       "type": "function",
-      "line": 1002,
+      "line": 1007,
       "file": "app/ui/main_window.py"
     },
     {
@@ -2471,13 +2650,13 @@
     {
       "name": "_save",
       "type": "function",
-      "line": 354,
+      "line": 357,
       "file": "app/ui/settings_dialog.py"
     },
     {
       "name": "get_config",
       "type": "function",
-      "line": 387,
+      "line": 390,
       "file": "app/ui/settings_dialog.py"
     },
     {
@@ -2849,85 +3028,85 @@
     {
       "name": "log_test_result",
       "type": "function",
-      "line": 976,
+      "line": 978,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "set_diff",
       "type": "function",
-      "line": 982,
+      "line": 984,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "expand_detail",
       "type": "function",
-      "line": 985,
+      "line": 987,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_request_followup",
       "type": "function",
-      "line": 996,
+      "line": 998,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_set_header_status",
       "type": "function",
-      "line": 1000,
+      "line": 1002,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_refresh_worker_stage",
       "type": "function",
-      "line": 1006,
+      "line": 1008,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_populate_test_details",
       "type": "function",
-      "line": 1055,
+      "line": 1057,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_bottom",
       "type": "function",
-      "line": 1069,
+      "line": 1071,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_scroll_to_top",
       "type": "function",
-      "line": 1073,
+      "line": 1075,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_time",
       "type": "function",
-      "line": 1077,
+      "line": 1079,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_issue_text",
       "type": "function",
-      "line": 1081,
+      "line": 1083,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_friendly_provider_error",
       "type": "function",
-      "line": 1087,
+      "line": 1089,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_format_details",
       "type": "function",
-      "line": 1106,
+      "line": 1108,
       "file": "app/ui/task_panel.py"
     },
     {
       "name": "_normalize_model_output",
       "type": "function",
-      "line": 1119,
+      "line": 1121,
       "file": "app/ui/task_panel.py"
     },
     {
@@ -3287,61 +3466,61 @@
     {
       "name": "WorkerAgent",
       "type": "class",
-      "line": 77,
+      "line": 81,
       "file": "agents/worker.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 80,
+      "line": 84,
       "file": "agents/worker.py"
     },
     {
       "name": "scoped_to",
       "type": "function",
-      "line": 90,
+      "line": 94,
       "file": "agents/worker.py"
     },
     {
       "name": "_compact_messages",
       "type": "function",
-      "line": 538,
+      "line": 577,
       "file": "agents/worker.py"
     },
     {
       "name": "_tool_definitions",
       "type": "function",
-      "line": 628,
+      "line": 667,
       "file": "agents/worker.py"
     },
     {
       "name": "_failure",
       "type": "function",
-      "line": 641,
+      "line": 680,
       "file": "agents/worker.py"
     },
     {
       "name": "_allows_no_change",
       "type": "function",
-      "line": 653,
+      "line": 692,
       "file": "agents/worker.py"
     },
     {
       "name": "size",
       "type": "function",
-      "line": 541,
+      "line": 580,
       "file": "agents/worker.py"
     },
     {
       "name": "trim_text",
       "type": "function",
-      "line": 544,
+      "line": 583,
       "file": "agents/worker.py"
     },
     {
       "name": "compact_history_message",
       "type": "function",
-      "line": 554,
+      "line": 593,
       "file": "agents/worker.py"
     },
     {
@@ -3383,19 +3562,25 @@
     {
       "name": "GovernorAgent",
       "type": "class",
-      "line": 38,
+      "line": 51,
       "file": "agents/governor.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 41,
+      "line": 54,
       "file": "agents/governor.py"
     },
     {
       "name": "_parse_json",
       "type": "function",
-      "line": 102,
+      "line": 126,
+      "file": "agents/governor.py"
+    },
+    {
+      "name": "_normalize_risk_assessment",
+      "type": "function",
+      "line": 135,
       "file": "agents/governor.py"
     },
     {
@@ -4397,223 +4582,253 @@
     {
       "name": "Engine",
       "type": "class",
-      "line": 49,
+      "line": 57,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "__init__",
       "type": "function",
-      "line": 52,
+      "line": 60,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "apply_runtime_config",
       "type": "function",
-      "line": 78,
+      "line": 86,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_get_repos",
       "type": "function",
-      "line": 102,
+      "line": 110,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_close_repos",
       "type": "function",
-      "line": 117,
+      "line": 125,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "register_agent",
       "type": "function",
-      "line": 120,
+      "line": 128,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "get_agent",
       "type": "function",
-      "line": 178,
+      "line": 186,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_on_state_change_sync",
       "type": "function",
-      "line": 189,
+      "line": 197,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_classify_request",
       "type": "function",
-      "line": 251,
+      "line": 259,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_is_document_request",
+      "type": "function",
+      "line": 279,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_document_task_profile",
+      "type": "function",
+      "line": 284,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_precheck_constitution",
       "type": "function",
-      "line": 517,
+      "line": 644,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_normalized_risk_level",
+      "type": "function",
+      "line": 661,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_risk_route",
+      "type": "function",
+      "line": 675,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_direct_plan_data",
       "type": "function",
-      "line": 664,
+      "line": 880,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_tasks_from_plan",
       "type": "function",
-      "line": 680,
+      "line": 896,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_optimize_plan",
       "type": "function",
-      "line": 699,
+      "line": 915,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_serialize_overlapping_tasks",
       "type": "function",
-      "line": 764,
+      "line": 980,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_prune_transitive_dependencies",
       "type": "function",
-      "line": 784,
+      "line": 1000,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_path_patterns_overlap",
       "type": "function",
-      "line": 816,
+      "line": 1032,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_estimate_task_budget",
       "type": "function",
-      "line": 840,
+      "line": 1056,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_create_direct_plan",
       "type": "function",
-      "line": 929,
+      "line": 1145,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_collect_analysis_dependency_reports",
       "type": "function",
-      "line": 1351,
+      "line": 1631,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_budget_error",
       "type": "function",
-      "line": 1638,
+      "line": 1922,
+      "file": "orchestrator/engine.py"
+    },
+    {
+      "name": "_is_user_input_required",
+      "type": "function",
+      "line": 1934,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_task_path_mismatch",
       "type": "function",
-      "line": 1650,
+      "line": 1938,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_capability_error",
       "type": "function",
-      "line": 1658,
+      "line": 1946,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_provider_unavailable",
       "type": "function",
-      "line": 1669,
+      "line": 1957,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_update_latest_repair_round",
       "type": "function",
-      "line": 2275,
+      "line": 2563,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_namespace_repair_plan",
       "type": "function",
-      "line": 2285,
+      "line": 2573,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_friendly_provider_error",
       "type": "function",
-      "line": 2313,
+      "line": 2601,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_failure_details",
       "type": "function",
-      "line": 2333,
+      "line": 2621,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_store_job_failure",
       "type": "function",
-      "line": 2379,
+      "line": 2682,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_checkpoint_task",
       "type": "function",
-      "line": 2383,
+      "line": 2686,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_normalize_paths",
       "type": "function",
-      "line": 2450,
+      "line": 2753,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_build_continuation_context",
       "type": "function",
-      "line": 2465,
+      "line": 2768,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_continuation_context",
       "type": "function",
-      "line": 2550,
+      "line": 2853,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_is_cancelled",
       "type": "function",
-      "line": 2555,
+      "line": 2858,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_request_with_context",
       "type": "function",
-      "line": 2563,
+      "line": 2866,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "_project_output_files",
       "type": "function",
-      "line": 2644,
+      "line": 2953,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "reaches",
       "type": "function",
-      "line": 792,
+      "line": 1008,
       "file": "orchestrator/engine.py"
     },
     {
       "name": "visit",
       "type": "function",
-      "line": 1360,
+      "line": 1640,
       "file": "orchestrator/engine.py"
     },
     {
@@ -4995,51 +5210,57 @@
       "file": "orchestrator/cost_engine.py"
     },
     {
-      "name": "_ensure_job_budget",
+      "name": "reserve_document_budget",
       "type": "function",
       "line": 182,
       "file": "orchestrator/cost_engine.py"
     },
     {
+      "name": "_ensure_job_budget",
+      "type": "function",
+      "line": 202,
+      "file": "orchestrator/cost_engine.py"
+    },
+    {
       "name": "get_budget",
       "type": "function",
-      "line": 189,
+      "line": 209,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "get_usage_summary",
       "type": "function",
-      "line": 280,
+      "line": 300,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "_cost_rates",
       "type": "function",
-      "line": 335,
+      "line": 355,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "estimate_cost",
       "type": "function",
-      "line": 353,
+      "line": 373,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "is_billable_api_mode",
       "type": "function",
-      "line": 372,
+      "line": 392,
       "file": "orchestrator/cost_engine.py"
     },
     {
       "name": "estimate_billable_cost",
       "type": "function",
-      "line": 377,
+      "line": 397,
       "file": "orchestrator/cost_engine.py"
     }
   ],
   "categories": {
     "source": {
-      "count": 80,
+      "count": 81,
       "files": [
         "test_workflow_followup.py",
         "test_review_repair_workflow.py",
@@ -5048,6 +5269,7 @@
         "test_storage_integrity.py",
         "test_kimi_models.py",
         "test_deepseek_models.py",
+        "test_document_workflow.py",
         "__init__.py",
         "test_pathlike_tools.py",
         "test_t003_static_compliance.py",
@@ -5089,8 +5311,7 @@
         "providers/deepseek_provider.py",
         "providers/__init__.py",
         "providers/openai_provider.py",
-        "providers/kimi_provider.py",
-        "providers/base.py"
+        "providers/kimi_provider.py"
       ]
     },
     "other": {

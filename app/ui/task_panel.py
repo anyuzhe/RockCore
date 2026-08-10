@@ -965,7 +965,9 @@ class TaskPanel(QWidget):
         useful = []
         for key in (
             "task_id", "title", "status", "summary", "error", "command",
-            "max_turns", "exploration_limit", "budget_reason",
+            "max_turns", "exploration_limit", "input_token_budget",
+            "document_level", "task_input_budget", "job_input_budget",
+            "budget_reason",
         ):
             value = data.get(key)
             if value not in (None, ""):

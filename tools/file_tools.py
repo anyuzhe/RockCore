@@ -111,6 +111,192 @@ class FileTools:
 
         return result
 
+    async def read_pdf(self, path: str, start_page: int = 1,
+                       end_page: int = 0, max_chars: int = 16_000,
+                       **kwargs) -> dict:
+        """Extract a bounded page range from a PDF inside the project.
+
+        Page ranges are intentionally limited so a model can process a long
+        document incrementally without putting the entire book in one prompt.
+        """
+        resolved = self._resolve_path(path)
+        relative_path = str(resolved.relative_to(self.project_root))
+        if not resolved.exists():
+            return {
+                "status": "error", "error_code": "file_not_found",
+                "error": f"File not found: {path}", "path": relative_path,
+            }
+        if not resolved.is_file():
+            return {
+                "status": "error", "error_code": "not_a_file",
+                "error": f"Not a file: {path}", "path": relative_path,
+            }
+        if resolved.suffix.lower() != ".pdf":
+            return {
+                "status": "error", "error_code": "not_a_pdf",
+                "error": f"Not a PDF file: {path}", "path": relative_path,
+            }
+
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return {
+                "status": "error", "error_code": "pdf_dependency_missing",
+                "error": (
+                    "Built-in PDF support is unavailable. Install RockCore's "
+                    "declared dependencies and restart the application."
+                ),
+                "path": relative_path,
+            }
+
+        try:
+            reader = PdfReader(str(resolved))
+        except Exception as error:
+            return {
+                "status": "error", "error_code": "pdf_invalid",
+                "error": f"PDF could not be opened: {error}",
+                "path": relative_path,
+            }
+
+        encrypted = bool(getattr(reader, "is_encrypted", False))
+        if encrypted:
+            try:
+                unlocked = bool(reader.decrypt(""))
+            except Exception:
+                unlocked = False
+            if not unlocked:
+                return {
+                    "status": "password_required",
+                    "error_code": "pdf_password_required",
+                    "error": (
+                        "PDF is encrypted and requires a password. Provide an "
+                        "unlocked copy of the file, then continue this task."
+                    ),
+                    "path": relative_path,
+                    "encrypted": True,
+                }
+
+        try:
+            total_pages = len(reader.pages)
+        except Exception as error:
+            return {
+                "status": "error", "error_code": "pdf_read_failed",
+                "error": f"PDF pages could not be read: {error}",
+                "path": relative_path, "encrypted": encrypted,
+            }
+        if total_pages == 0:
+            return {
+                "status": "error", "error_code": "pdf_empty",
+                "error": "PDF contains no pages.", "path": relative_path,
+                "page_count": 0, "encrypted": encrypted,
+            }
+
+        start_page = max(1, int(start_page or 1))
+        if start_page > total_pages:
+            return {
+                "status": "error", "error_code": "page_out_of_range",
+                "error": (
+                    f"Start page {start_page} exceeds the PDF page count "
+                    f"({total_pages})."
+                ),
+                "path": relative_path, "page_count": total_pages,
+            }
+        requested_end = int(end_page or 0)
+        if requested_end <= 0:
+            requested_end = start_page + 7
+        requested_end = max(start_page, requested_end)
+        # At most 8 pages and 16k characters per call keeps page extraction
+        # predictable while still being efficient for long-form reading.
+        requested_end = min(total_pages, requested_end, start_page + 7)
+        max_chars = max(2_000, min(16_000, int(max_chars or 16_000)))
+
+        chunks: list[str] = []
+        extracted_chars = 0
+        truncated = False
+        last_page = start_page - 1
+        for page_number in range(start_page, requested_end + 1):
+            try:
+                page_text = reader.pages[page_number - 1].extract_text() or ""
+            except Exception as error:
+                page_text = f"[Page extraction failed: {error}]"
+            page_chunk = f"\n--- Page {page_number} ---\n{page_text.strip()}"
+            remaining = max_chars - extracted_chars
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(page_chunk) > remaining:
+                page_chunk = page_chunk[:remaining]
+                truncated = True
+            chunks.append(page_chunk)
+            extracted_chars += len(page_chunk)
+            last_page = page_number
+            if truncated:
+                break
+
+        content = "".join(chunks).lstrip()
+        has_more = last_page < total_pages or truncated
+        next_page = last_page + 1 if last_page < total_pages else None
+        if not content or not any(
+            line.strip() and not line.startswith("--- Page")
+            for line in content.splitlines()
+        ):
+            # A blank cover/front-matter range is not proof that the whole PDF
+            # needs OCR. Sample the beginning, middle, and end before stopping
+            # the workflow for user action.
+            sample_indexes = {0, total_pages // 2, total_pages - 1}
+            sampled_text = False
+            for page_index in sample_indexes:
+                try:
+                    if (reader.pages[page_index].extract_text() or "").strip():
+                        sampled_text = True
+                        break
+                except Exception:
+                    continue
+            if sampled_text:
+                return {
+                    "status": "empty_page_range",
+                    "message": (
+                        "This page range contains no text, but other sampled "
+                        "pages are extractable. Continue with next_page when present."
+                    ),
+                    "path": relative_path,
+                    "page_start": start_page,
+                    "page_end": last_page,
+                    "page_count": total_pages,
+                    "has_more": has_more,
+                    "next_page": next_page,
+                    "encrypted": encrypted,
+                }
+            return {
+                "status": "no_extractable_text",
+                "error_code": "pdf_ocr_required",
+                "error": (
+                    "No extractable text was found in this page range. The PDF "
+                    "may be scanned or image-only and requires OCR."
+                ),
+                "path": relative_path,
+                "page_start": start_page,
+                "page_end": last_page,
+                "page_count": total_pages,
+                "has_more": has_more,
+                "next_page": next_page,
+                "encrypted": encrypted,
+            }
+
+        return {
+            "status": "success",
+            "content": content,
+            "path": relative_path,
+            "page_start": start_page,
+            "page_end": last_page,
+            "page_count": total_pages,
+            "has_more": has_more,
+            "next_page": next_page,
+            "truncated": truncated,
+            "extracted_chars": extracted_chars,
+            "encrypted": encrypted,
+        }
+
     async def write_file(self, path: str, content: str, **kwargs) -> dict:
         """Write content to a file (overwrite)."""
         resolved = self._resolve_path(path)

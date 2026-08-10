@@ -15,7 +15,7 @@ WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
 REPORT_TASK_TYPES = {"analysis", "review", "testing"}
 ALREADY_SATISFIED_MARKER = "[ALREADY_SATISFIED]"
 STATE_VERIFICATION_TOOLS = {
-    "read_file", "search_in_file", "search_code", "git_diff",
+    "read_file", "read_pdf", "search_in_file", "search_code", "git_diff",
 }
 # Some review-oriented coding tasks intentionally edit files only when a defect
 # is found. Keep this narrow so a worker that forgot to edit a normal coding
@@ -27,7 +27,7 @@ NO_CHANGE_MARKERS = (
     "if no issues", "if there are no issues", "skip when no",
 )
 EXPLORATION_TOOLS = {
-    "list_files", "read_file", "search_in_file", "search_code",
+    "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
     "git_status", "git_diff", "read_log",
 }
 MAX_CONVERSATION_CHARS = 14_000
@@ -53,10 +53,14 @@ CRITICAL RULES:
 11. If a coding task's requested state is already present before your first edit,
     inspect the relevant code and verify it. Then return [ALREADY_SATISFIED]
     followed by concrete evidence. Do not make a meaningless rewrite.
+12. For PDF input, use read_pdf with page ranges. Never install PDF packages and
+    never call pdftotext through run_command. For long documents, process pages
+    incrementally and write/update the requested artifact as you go.
 
 Available tools:
 - list_files: List files in the project directory
 - read_file: Read a file's contents with start/end line pagination
+- read_pdf: Extract PDF text with start_page/end_page pagination
 - write_file: Write content to a file — USE THIS, do not output code in chat
 - apply_patch: Search and replace text in a file
 - insert_before / insert_after: Insert text at a specific anchor point
@@ -138,6 +142,19 @@ Acceptance Command: {task.acceptance_command or 'none'}
             task_context += "\nRead existing code, then implement the changes. Verify with git_diff."
         elif task.task_type == "testing":
             task_context += "\nWrite tests and verify they pass."
+        document_text = (
+            f"{task.title} {task.description} {task.allowed_paths}"
+        ).lower()
+        is_document_task = any(marker in document_text for marker in (
+            ".pdf", "pdf", "文档", "书籍", "全书", "document", "book",
+        ))
+        if is_document_task:
+            task_context += (
+                "\nThis is a document-processing task. Use read_pdf directly "
+                "and paginate with next_page. Do not install dependencies or "
+                "retry shell-based PDF extraction. For a long source, write "
+                "the output incrementally so completed page ranges are preserved."
+            )
         if recovery_context:
             task_context += (
                 "\n\nThis is a focused continuation after an earlier attempt. "
@@ -191,7 +208,10 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     })
                     progress_warning_sent = True
 
-                messages = self._compact_messages(messages)
+                messages = self._compact_messages(
+                    messages,
+                    max_chars=26_000 if is_document_task else MAX_CONVERSATION_CHARS,
+                )
                 model_kwargs = (
                     {"model": model_override} if model_override else {}
                 )
@@ -432,6 +452,22 @@ Acceptance Command: {task.acceptance_command or 'none'}
                                     "expected a JSON object"
                                 ),
                             }
+                        if result.get("status") in {
+                            "password_required", "no_extractable_text",
+                        }:
+                            tool_calls_made.append({
+                                "tool": func_name,
+                                "args": args,
+                                "result_status": result.get("status"),
+                            })
+                            reason = str(result.get("error") or "PDF cannot be read")
+                            source_path = str(result.get("path") or args.get("path") or "PDF")
+                            return self._failure(
+                                f"USER_INPUT_REQUIRED: {source_path}: {reason}",
+                                tool_calls_made,
+                                total_input,
+                                total_output,
+                            )
                         if (
                             task.task_type == "coding"
                             and func_name in WRITE_TOOLS
@@ -477,7 +513,10 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     })
 
                     # Format result for the model
-                    result_str = json.dumps(result, ensure_ascii=False, default=str)[:1800]
+                    result_limit = 18_000 if func_name == "read_pdf" else 1_800
+                    result_str = json.dumps(
+                        result, ensure_ascii=False, default=str
+                    )[:result_limit]
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],

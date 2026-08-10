@@ -13,6 +13,7 @@ VERSION_FILE = ROOT / "build" / "version_info.generated.txt"
 
 hiddenimports = ["qasync", "PyQt6.QtSvg", "PyQt6.QtSvgWidgets"]
 hiddenimports += collect_submodules("sqlalchemy")
+hiddenimports += collect_submodules("pypdf")
 
 a = Analysis(
     [str(APP)],

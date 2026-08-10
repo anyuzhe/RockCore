@@ -179,6 +179,26 @@ class CostEngine:
             self._review_reservations.add(reservation_key)
         return budget
 
+    def reserve_document_budget(self, job_id: str,
+                                task_input_tokens: int) -> JobBudget:
+        """Ensure a document task has token headroom without raising cost limits.
+
+        Long-document reading legitimately repeats a sizeable context across
+        page ranges. The visible paid-API cost ceiling remains authoritative;
+        only token and call safety ceilings are enlarged for this workload.
+        """
+        budget = self._ensure_job_budget(job_id)
+        task_input_tokens = max(0, int(task_input_tokens or 0))
+        budget.max_input_tokens = max(
+            budget.max_input_tokens, task_input_tokens + 250_000
+        )
+        budget.max_total_tokens = max(
+            budget.max_total_tokens, budget.max_input_tokens + 200_000
+        )
+        budget.max_output_tokens = max(budget.max_output_tokens, 150_000)
+        budget.max_api_calls = max(budget.max_api_calls, 160)
+        return budget
+
     def _ensure_job_budget(self, job_id: str) -> JobBudget:
         budget = self._budgets.get(job_id)
         if budget is None:

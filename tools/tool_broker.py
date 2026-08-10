@@ -33,6 +33,7 @@ class ToolBroker:
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
             "read_file": self.file_tools.read_file,
+            "read_pdf": self.file_tools.read_pdf,
             "write_file": self.file_tools.write_file,
             "apply_patch": self.file_tools.apply_patch,
             "insert_before": self.file_tools.insert_before,
@@ -75,6 +76,40 @@ class ToolBroker:
                             "path": {"type": "string", "description": "File path relative to project root"},
                             "start": {"type": "integer", "description": "Start line (1-indexed). Omit for beginning."},
                             "end": {"type": "integer", "description": "End line (1-indexed). Omit for end."},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_pdf",
+                    "description": (
+                        "Extract text from a PDF by page range. Use this instead "
+                        "of shell commands or installing PDF packages. Returns "
+                        "page_count, has_more, and next_page for pagination; "
+                        "reports encrypted or scanned PDFs explicitly."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "PDF path relative to project root",
+                            },
+                            "start_page": {
+                                "type": "integer",
+                                "description": "First page to extract (1-indexed)",
+                            },
+                            "end_page": {
+                                "type": "integer",
+                                "description": "Last page to extract; max 8 pages per call",
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "Maximum extracted characters (2000-16000)",
+                            },
                         },
                         "required": ["path"],
                     },
@@ -244,14 +279,14 @@ class ToolBroker:
         ]
         if task_type in {"analysis", "review"}:
             allowed = {
-                "list_files", "read_file", "search_in_file", "search_code",
+                "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
                 "git_status", "git_diff", "read_log",
             }
         elif task_type == "testing" and not test_authoring:
             allowed = {"run_tests", "run_command", "git_diff", "git_status"}
         elif task_type in {"coding", "testing"}:
             allowed = {
-                "list_files", "read_file", "search_in_file", "search_code",
+                "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
                 "write_file", "apply_patch", "insert_before", "insert_after",
                 "run_command", "run_tests", "git_status", "git_diff",
             }
@@ -317,6 +352,7 @@ class ToolBroker:
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
             "read_file": self.file_tools.read_file,
+            "read_pdf": self.file_tools.read_pdf,
             "write_file": self.file_tools.write_file,
             "apply_patch": self.file_tools.apply_patch,
             "insert_before": self.file_tools.insert_before,

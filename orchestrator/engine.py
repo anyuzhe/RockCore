@@ -22,9 +22,17 @@ COMPLEX_KEYWORDS = [
 ]
 SIMPLE_KEYWORDS = [
     "html", "HTML", "网页", "页面", "css", "CSS", "静态",
-    "修改", "fix", "修复", "bug", "小", "简单", "一个",
+    "修改", "fix", "修复", "bug", "小", "简单",
     "显示", "展示", "调整", "改一下", "加个",
 ]
+DOCUMENT_KEYWORDS = (
+    ".pdf", "pdf", "文档", "书籍", "全书", "长文档", "电子书",
+    "document", "book", "ebook",
+)
+LONG_DOCUMENT_KEYWORDS = (
+    "整本", "全书", "书籍", "长文档", "电子书", "整份文档",
+    "entire book", "full book", "long document", "ebook",
+)
 
 from .event_bus import EventBus
 from .state_machine import StateMachine, JobState
@@ -254,11 +262,99 @@ class Engine:
         has_complex = any(kw.lower() in req_lower for kw in COMPLEX_KEYWORDS)
         has_simple = any(kw in user_request or kw.lower() in req_lower for kw in SIMPLE_KEYWORDS)
 
+        # Document work is dominated by source size rather than wording length.
+        # Check it before generic phrases such as "创建一个", otherwise a whole
+        # book can accidentally receive the small-task budget.
+        if self._is_document_request(user_request):
+            if any(marker in req_lower for marker in LONG_DOCUMENT_KEYWORDS):
+                return "complex"
+            return "complex" if has_complex else "normal"
         if has_complex:
             return "complex"
         if has_simple and len(user_request) < 200:
             return "simple"
         return "normal"
+
+    @staticmethod
+    def _is_document_request(text: str) -> bool:
+        normalized = str(text or "").lower()
+        return any(marker in normalized for marker in DOCUMENT_KEYWORDS)
+
+    @classmethod
+    def _document_task_profile(cls, task, project_root: str,
+                               user_request: str = "") -> dict | None:
+        """Return a size-aware Worker budget for PDF/document tasks."""
+        allowed_paths = list(getattr(task, "allowed_paths", None) or [])
+        task_text = " ".join([
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(path) for path in allowed_paths),
+        ]).lower()
+        if not cls._is_document_request(task_text):
+            return None
+        text = f"{user_request} {task_text}".lower()
+
+        root = Path(project_root).resolve()
+        ignored = {".git", ".ai", ".venv", "venv", "node_modules"}
+        pdf_files: set[Path] = set()
+
+        # Prefer Planner-provided paths. If they are broad or omit the source,
+        # inspect only a bounded number of project PDFs for workload sizing.
+        for pattern in allowed_paths:
+            normalized = str(pattern or "").replace("\\", "/").lstrip("./")
+            if not normalized:
+                continue
+            try:
+                for candidate in root.glob(normalized):
+                    if len(pdf_files) >= 50:
+                        break
+                    if (
+                        candidate.is_file()
+                        and candidate.suffix.lower() == ".pdf"
+                        and not ignored.intersection(candidate.relative_to(root).parts)
+                    ):
+                        pdf_files.add(candidate)
+            except (OSError, ValueError):
+                continue
+        if not pdf_files:
+            try:
+                for candidate in root.rglob("*.pdf"):
+                    if len(pdf_files) >= 50:
+                        break
+                    if (
+                        candidate.is_file()
+                        and not ignored.intersection(candidate.relative_to(root).parts)
+                    ):
+                        pdf_files.add(candidate)
+            except OSError:
+                pass
+
+        total_bytes = 0
+        for path in pdf_files:
+            try:
+                total_bytes += path.stat().st_size
+            except OSError:
+                continue
+
+        is_long = any(marker in text for marker in LONG_DOCUMENT_KEYWORDS)
+        if is_long or total_bytes >= 8 * 1024 * 1024:
+            level, input_budget, turns, exploration = "long", 1_000_000, 52, 36
+        elif total_bytes >= 2 * 1024 * 1024:
+            level, input_budget, turns, exploration = "medium", 600_000, 40, 22
+        else:
+            level, input_budget, turns, exploration = "short", 300_000, 28, 10
+        return {
+            "level": level,
+            "input_budget": input_budget,
+            "max_turns": turns,
+            "exploration_turns": exploration,
+            "pdf_count": len(pdf_files),
+            "pdf_bytes": total_bytes,
+            "reason": (
+                f"document={level}, pdfs={len(pdf_files)}, "
+                f"size={total_bytes} bytes"
+            ),
+        }
 
     # ── Job Lifecycle ──────────────────────────────────────────
 
@@ -1085,6 +1181,34 @@ class Engine:
         if not all_tasks:
             return {"status": "failed", "reason": "没有可执行的任务"}
 
+        # Reserve the combined token capacity before parallel tasks start.
+        # Reserving only one task at a time could let two legitimate document
+        # tasks collide with the job-level ceiling even though each is valid.
+        document_root = job.project.root_path if job.project else "."
+        document_profiles = [
+            profile for task in all_tasks
+            if (profile := self._document_task_profile(
+                task, document_root, getattr(job, "user_request", "")
+            ))
+        ]
+        if document_profiles:
+            combined_input_budget = sum(
+                profile["input_budget"] for profile in document_profiles
+            )
+            document_job_budget = (
+                self.model_router.cost_engine.reserve_document_budget(
+                    job.job_id, combined_input_budget
+                )
+            )
+            await self.event_bus.publish(
+                "document_job_budget_reserved",
+                job_id=job.job_id,
+                document_tasks=len(document_profiles),
+                task_input_budget=combined_input_budget,
+                job_input_budget=document_job_budget.max_input_tokens,
+                job_total_budget=document_job_budget.max_total_tokens,
+            )
+
         task_dicts = []
         for t in all_tasks:
             task_dicts.append({
@@ -1174,16 +1298,46 @@ class Engine:
             )
             task_worker.max_turns = budget["max_turns"]
             task_worker.max_exploration_turns = budget["exploration_turns"]
-            if complexity == "simple":
-                task_worker.max_turns = min(task_worker.max_turns, 18)
             task_input_limits = {
                 "simple": 120_000,
                 "normal": 220_000,
                 "complex": 320_000,
             }
-            t._rockcore_input_budget = task_input_limits.get(
-                complexity, 220_000
+            document_profile = self._document_task_profile(
+                t, task_worktree_root, getattr(job, "user_request", "")
             )
+            if document_profile:
+                task_worker.max_turns = max(
+                    task_worker.max_turns, document_profile["max_turns"]
+                )
+                task_worker.max_exploration_turns = max(
+                    task_worker.max_exploration_turns,
+                    document_profile["exploration_turns"],
+                )
+                t._rockcore_input_budget = document_profile["input_budget"]
+                budget["reason"] += ", " + document_profile["reason"]
+                document_job_budget = (
+                    self.model_router.cost_engine.reserve_document_budget(
+                        job.job_id, t._rockcore_input_budget
+                    )
+                )
+                await self.event_bus.publish(
+                    "document_budget_reserved",
+                    job_id=job.job_id,
+                    task_id=task_id,
+                    document_level=document_profile["level"],
+                    task_input_budget=t._rockcore_input_budget,
+                    job_input_budget=document_job_budget.max_input_tokens,
+                    job_total_budget=document_job_budget.max_total_tokens,
+                    pdf_count=document_profile["pdf_count"],
+                    pdf_bytes=document_profile["pdf_bytes"],
+                )
+            else:
+                if complexity == "simple":
+                    task_worker.max_turns = min(task_worker.max_turns, 18)
+                t._rockcore_input_budget = task_input_limits.get(
+                    complexity, 220_000
+                )
             t._rockcore_retry_count = (
                 proj_config.worker.retry_count if proj_config else MAX_FLASH_RETRY
             )
@@ -1217,6 +1371,7 @@ class Engine:
                 task_id=task_id, title=t.title,
                 max_turns=task_worker.max_turns,
                 exploration_limit=task_worker.max_exploration_turns,
+                input_token_budget=t._rockcore_input_budget,
                 budget_reason=budget["reason"],
             )
 
@@ -1420,16 +1575,21 @@ class Engine:
             ]
             if failed:
                 logger.error(f"Tasks failed: {failed}")
-                terminal_status = (
-                    "needs_attention" if self.scheduler._completed else "failed"
-                )
-                repos["job"].update_status(job.job_id, terminal_status)
-                self.state_machine.transition(job.job_id, JobState.FAILED)
-                direct_failures = [tid for tid in failed if tid not in blocked]
                 failure_messages = [
                     str(results[tid].get("error", "")) for tid in failed
                     if isinstance(results.get(tid), dict)
                 ]
+                terminal_status = (
+                    "needs_attention"
+                    if self.scheduler._completed or any(
+                        self._is_user_input_required(message)
+                        for message in failure_messages
+                    )
+                    else "failed"
+                )
+                repos["job"].update_status(job.job_id, terminal_status)
+                self.state_machine.transition(job.job_id, JobState.FAILED)
+                direct_failures = [tid for tid in failed if tid not in blocked]
                 if direct_failures:
                     failure_messages = [
                         str(results[tid].get("error", ""))
@@ -1637,6 +1797,8 @@ class Engine:
 
                 if result and result.get("error"):
                     last_error = str(result["error"])
+                    if self._is_user_input_required(last_error):
+                        return {"status": "failed", "error": last_error}
                     if self._is_budget_error(last_error):
                         return {"status": "failed", "error": last_error}
                     if self._is_task_path_mismatch(last_error):
@@ -1704,6 +1866,8 @@ class Engine:
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
+                if self._is_user_input_required(last_error):
+                    return {"status": "failed", "error": last_error}
                 if self._is_budget_error(last_error):
                     return {"status": "failed", "error": last_error}
                 if self._is_provider_capability_error(last_error):
@@ -1765,6 +1929,10 @@ class Engine:
             or "api calls exceeded" in normalized
             or "cost exceeded" in normalized
         )
+
+    @staticmethod
+    def _is_user_input_required(error: str) -> bool:
+        return "user_input_required:" in str(error or "").lower()
 
     @staticmethod
     def _is_task_path_mismatch(error: str) -> bool:
@@ -2452,6 +2620,21 @@ class Engine:
     @classmethod
     def _failure_details(cls, error: str) -> tuple[str, str]:
         normalized = (error or "").lower()
+        if cls._is_user_input_required(error):
+            if "password" in normalized or "encrypted" in normalized:
+                return (
+                    "pdf_password_required",
+                    "请放入解除密码保护的 PDF，然后点击“继续此需求”；不会重复消耗模型重试。",
+                )
+            if "ocr" in normalized or "extractable text" in normalized:
+                return (
+                    "pdf_ocr_required",
+                    "请提供可搜索文本版或完成 OCR 的 PDF，然后点击“继续此需求”。",
+                )
+            return (
+                "user_input_required",
+                "补充所需文件或信息后点击“继续此需求”，将从当前检查点恢复。",
+            )
         if cls._is_budget_error(error):
             return (
                 "budget_exceeded",

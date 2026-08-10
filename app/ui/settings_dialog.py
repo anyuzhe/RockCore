@@ -317,6 +317,9 @@ class SettingsDialog(QDialog):
         budget_note = QLabel(
             "仅限制通过 API Key 单独计费的调用。ChatGPT 登录下的 Codex "
             "调用仍统计 Token 和人民币等价估算成本，但不会消耗此人民币预算。\n"
+            "PDF/长文档任务会按源文件规模自动预留 30万/60万/100万的任务 "
+            "Token，并同步扩展 Token 与调用次数安全上限；不会自动提高上面的"
+            "可计费 API 成本上限。\n"
             "价格单位：人民币/百万 Token。DeepSeek Flash 缓存/输入/输出 "
             "¥0.02/¥1/¥2，Pro ¥0.025/¥3/¥6；Kimi K2.6 "
             "¥1.10/¥6.50/¥27，K2.7 Code ¥1.30/¥6.50/¥27，"
