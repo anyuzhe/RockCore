@@ -43,6 +43,10 @@ class FileTools:
             raise PermissionError(f"Path outside project root: {path}")
         return p
 
+    def _relative_path(self, path: Path) -> str:
+        """Return the model/API path with platform-independent separators."""
+        return path.relative_to(self.project_root).as_posix()
+
     async def list_files(self, path: str = ".", pattern: str | None = None,
                           **kwargs) -> dict:
         """List files in a directory within the project."""
@@ -58,7 +62,7 @@ class FileTools:
                 continue
             files.append({
                 "name": f.name,
-                "path": str(f.relative_to(self.project_root)),
+                "path": self._relative_path(f),
                 "type": "directory" if f.is_dir() else "file",
                 "size": f.stat().st_size if f.is_file() else 0,
             })
@@ -94,7 +98,7 @@ class FileTools:
 
         result = {
             "content": content,
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "size": size,
             "total_lines": total_lines,
             "encoding": file_encoding,
@@ -127,7 +131,7 @@ class FileTools:
         document incrementally without putting the entire book in one prompt.
         """
         resolved = self._resolve_path(path)
-        relative_path = str(resolved.relative_to(self.project_root))
+        relative_path = self._relative_path(resolved)
         if not resolved.exists():
             return {
                 "status": "error", "error_code": "file_not_found",
@@ -318,7 +322,7 @@ class FileTools:
             encoded = encode_text_compatible(content, file_encoding)
         except (LookupError, UnicodeEncodeError) as error:
             return {
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
                 "status": "encoding_error",
                 "error": (
                     f"Content cannot be encoded as {file_encoding}: {error}. "
@@ -331,7 +335,7 @@ class FileTools:
         resolved.write_bytes(encoded)
         logger.info(f"[file_written] path={resolved} bytes={len(encoded)}")
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "absolute_path": str(resolved),
             "size": len(encoded),
             "encoding": file_encoding,
@@ -366,7 +370,7 @@ class FileTools:
                 })
 
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "matches": matches[:20],
             "count": len(matches),
             "total_lines": len(lines),
@@ -388,7 +392,7 @@ class FileTools:
                 "status": "no_match",
                 "reason": "search_text_not_found",
                 "hint": "The exact text was not found. Check whitespace, indentation, or use search_in_file to locate the correct text.",
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         if match_count > 1:
@@ -398,7 +402,7 @@ class FileTools:
                 "reason": f"search_text_matched_{match_count}_times",
                 "hint": f"The search text appeared {match_count} times. Use more surrounding context to make it unique, or use insert_before/insert_after with a unique anchor.",
                 "match_count": match_count,
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         new_content = content.replace(search, replace, 1)
@@ -406,7 +410,7 @@ class FileTools:
             write_text_compatible(resolved, new_content, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
             return {
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
                 "status": "encoding_error",
                 "error": f"Patch cannot preserve {file_encoding}: {error}",
                 "encoding": file_encoding,
@@ -414,7 +418,7 @@ class FileTools:
         old_lines = content.count("\n")
         new_lines = new_content.count("\n")
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "status": "patched",
             "line_delta": new_lines - old_lines,
             "encoding": file_encoding,
@@ -434,7 +438,7 @@ class FileTools:
                 "status": "no_match",
                 "reason": "anchor_not_found",
                 "hint": f"The anchor text was not found. Use search_in_file to locate the correct insertion point.",
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         if match_count > 1:
@@ -443,7 +447,7 @@ class FileTools:
                 "reason": f"anchor_matched_{match_count}_times",
                 "hint": f"The anchor appeared {match_count} times. Use a longer/more unique anchor to pinpoint the location.",
                 "match_count": match_count,
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         idx = text.index(anchor)
@@ -452,13 +456,13 @@ class FileTools:
             write_text_compatible(resolved, new_text, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
             return {
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
                 "status": "encoding_error",
                 "error": f"Insert cannot preserve {file_encoding}: {error}",
                 "encoding": file_encoding,
             }
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "status": "inserted",
             "position": idx,
             "encoding": file_encoding,
@@ -478,7 +482,7 @@ class FileTools:
                 "status": "no_match",
                 "reason": "anchor_not_found",
                 "hint": f"The anchor text was not found. Use search_in_file to locate the correct insertion point.",
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         if match_count > 1:
@@ -487,7 +491,7 @@ class FileTools:
                 "reason": f"anchor_matched_{match_count}_times",
                 "hint": f"The anchor appeared {match_count} times. Use a longer/more unique anchor to pinpoint the location.",
                 "match_count": match_count,
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
             }
 
         idx = text.index(anchor) + len(anchor)
@@ -496,13 +500,13 @@ class FileTools:
             write_text_compatible(resolved, new_text, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
             return {
-                "path": str(resolved.relative_to(self.project_root)),
+                "path": self._relative_path(resolved),
                 "status": "encoding_error",
                 "error": f"Insert cannot preserve {file_encoding}: {error}",
                 "encoding": file_encoding,
             }
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": self._relative_path(resolved),
             "status": "inserted",
             "position": idx,
             "encoding": file_encoding,

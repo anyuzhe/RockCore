@@ -26,12 +26,26 @@ def decode_process_output(value: bytes | str | None) -> str:
     if isinstance(value, str):
         return value
 
-    encodings = ["utf-8-sig", locale.getpreferredencoding(False)]
+    try:
+        return value.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+
+    # A single-byte Windows locale such as cp1252 can decode any byte sequence,
+    # including GB18030, and therefore produce convincing mojibake before the
+    # Chinese codec is attempted. Prefer a strict GB18030 result when it
+    # contains CJK text; western code-page output falls through to the locale.
     if sys.platform == "win32":
-        encodings.extend(["mbcs", "gb18030"])
+        try:
+            chinese = value.decode("gb18030")
+            if any("\u3400" <= char <= "\u9fff" for char in chinese):
+                return chinese
+        except UnicodeDecodeError:
+            pass
+        encodings = [locale.getpreferredencoding(False), "mbcs", "gb18030"]
     else:
         # Useful for logs copied from Chinese Windows into a non-Windows test.
-        encodings.append("gb18030")
+        encodings = [locale.getpreferredencoding(False), "gb18030"]
     seen: set[str] = set()
     for encoding in encodings:
         normalized = str(encoding or "").lower()

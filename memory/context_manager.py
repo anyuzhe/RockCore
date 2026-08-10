@@ -88,7 +88,7 @@ class ContextManager:
             try:
                 for f in self.project_root.rglob(pattern):
                     if f.is_file():
-                        relevant.add(str(f.relative_to(self.project_root)))
+                        relevant.add(f.relative_to(self.project_root).as_posix())
             except Exception as e:
                 logger.warning(f"Glob pattern '{pattern}' failed: {e}")
 

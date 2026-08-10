@@ -50,7 +50,7 @@ class SearchTools:
                         if pattern in line or re.search(pattern, line):
                             rel_path = fpath.relative_to(self.project_root)
                             results.append({
-                                "file": str(rel_path),
+                                "file": rel_path.as_posix(),
                                 "line": line_no,
                                 "content": line.rstrip()[:200],
                             })
@@ -73,7 +73,7 @@ class SearchTools:
 
         tail_lines = lines[-tail:]
         return {
-            "path": str(resolved.relative_to(self.project_root)),
+            "path": resolved.relative_to(self.project_root).as_posix(),
             "lines": [line.rstrip() for line in tail_lines],
             "total_lines": len(lines),
             "showing": min(tail, len(lines)),

@@ -106,6 +106,19 @@ def test_subprocess_output_decodes_utf8_and_windows_chinese_codepage():
     assert "中文输出 ✓" in result.stdout
 
 
+def test_windows_decoder_preserves_western_local_codepage(
+    monkeypatch,
+):
+    monkeypatch.setattr(subprocess_utils.sys, "platform", "win32")
+    monkeypatch.setattr(
+        subprocess_utils.locale,
+        "getpreferredencoding",
+        lambda _setlocale=False: "cp1252",
+    )
+
+    assert decode_process_output("Résumé".encode("cp1252")) == "Résumé"
+
+
 def test_synchronous_windows_processes_do_not_flash_console(monkeypatch):
     captured = {}
 

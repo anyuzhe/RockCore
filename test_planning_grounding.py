@@ -1,6 +1,7 @@
 """Regression coverage for file-grounded plans and analysis data flow."""
 
 import asyncio
+import json
 from pathlib import Path
 
 from memory.context_manager import ContextManager
@@ -36,6 +37,35 @@ def test_same_project_context_refreshes_files_added_by_previous_job(tmp_path):
     asyncio.run(context.switch_project(str(tmp_path)))
 
     assert "site/index.html" in context.get_full_context()
+
+
+def test_repository_map_migrates_legacy_windows_separators(tmp_path):
+    project = tmp_path / "project"
+    state = tmp_path / "state"
+    project.mkdir()
+    state.mkdir()
+    (state / "repository_map.json").write_text(
+        json.dumps({
+            "generated_at": "2026-08-10T00:00:00Z",
+            "files": [{
+                "path": r"site\index.html", "category": "markup", "symbols": 0,
+            }],
+            "symbols": [{
+                "name": "render", "type": "function", "line": 1,
+                "file": r"src\app.py",
+            }],
+            "categories": {
+                "markup": {"count": 1, "files": [r"site\index.html"]},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    repo_map = RepoMap(str(project), state_dir=state)
+
+    assert "site/index.html [markup]" in repo_map.get_context_summary()
+    assert repo_map.get_category_files("markup") == ["site/index.html"]
+    assert repo_map.get_symbols_for_file("src/app.py")[0]["name"] == "render"
 
 
 class _AnalysisAwareWorker:

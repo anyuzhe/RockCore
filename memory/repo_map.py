@@ -57,10 +57,35 @@ class RepoMap:
     def _load(self) -> dict:
         if self.map_path.exists():
             try:
-                return json.loads(self.map_path.read_text(encoding="utf-8"))
+                loaded = json.loads(self.map_path.read_text(encoding="utf-8"))
+                return self._normalize_stored_paths(loaded)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning(f"Failed to load repo map: {e}")
         return self._empty_map()
+
+    @staticmethod
+    def _portable_path(value: str | Path) -> str:
+        """Serialize project-relative paths identically on every platform."""
+        return str(value or "").replace("\\", "/")
+
+    @classmethod
+    def _normalize_stored_paths(cls, data: dict) -> dict:
+        """Migrate repository maps previously persisted with Windows slashes."""
+        if not isinstance(data, dict):
+            return data
+        for file_info in data.get("files", []):
+            if isinstance(file_info, dict):
+                file_info["path"] = cls._portable_path(file_info.get("path", ""))
+        for symbol in data.get("symbols", []):
+            if isinstance(symbol, dict):
+                symbol["file"] = cls._portable_path(symbol.get("file", ""))
+        for category in (data.get("categories") or {}).values():
+            if isinstance(category, dict):
+                category["files"] = [
+                    cls._portable_path(path)
+                    for path in (category.get("files") or [])
+                ]
+        return data
 
     def _save(self):
         try:
@@ -85,7 +110,6 @@ class RepoMap:
 
     def _classify_file(self, file_path: Path) -> str:
         """Classify a file into a category."""
-        rel = str(file_path.relative_to(self.project_root))
         ext = file_path.suffix.lower()
 
         # Check test patterns first
@@ -116,14 +140,14 @@ class RepoMap:
                         "name": node.name,
                         "type": "class",
                         "line": node.lineno,
-                        "file": str(file_path.relative_to(self.project_root)),
+                        "file": file_path.relative_to(self.project_root).as_posix(),
                     })
                 elif isinstance(node, ast.FunctionDef):
                     symbols.append({
                         "name": node.name,
                         "type": "function",
                         "line": node.lineno,
-                        "file": str(file_path.relative_to(self.project_root)),
+                        "file": file_path.relative_to(self.project_root).as_posix(),
                     })
         except (SyntaxError, UnicodeError, OSError) as e:
             logger.debug(f"Could not parse {file_path}: {e}")
@@ -139,7 +163,7 @@ class RepoMap:
         for f in self.project_root.rglob("*"):
             if not f.is_file():
                 continue
-            rel = str(f.relative_to(self.project_root))
+            rel = f.relative_to(self.project_root).as_posix()
 
             # Skip hidden dirs and common non-project dirs
             parts = Path(rel).parts
@@ -170,7 +194,11 @@ class RepoMap:
 
     def get_symbols_for_file(self, file_path: str) -> list[dict]:
         """Get all symbols defined in a specific file."""
-        return [s for s in self._map.get("symbols", []) if s["file"] == file_path]
+        normalized = self._portable_path(file_path)
+        return [
+            symbol for symbol in self._map.get("symbols", [])
+            if self._portable_path(symbol.get("file", "")) == normalized
+        ]
 
     def find_symbol(self, name: str) -> list[dict]:
         """Find a symbol by name across the project."""
