@@ -1,6 +1,7 @@
 """Cost Engine — budget control for V6 smart scheduling."""
 
 import logging
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -313,6 +314,24 @@ class CostEngine:
         if used > max_input_tokens:
             return False, f"Task input tokens exceeded: {used}/{max_input_tokens}"
         return True, f"Task OK: {used}/{max_input_tokens}"
+
+    def get_task_usage(self, job_id: str, task_id: str) -> dict[str, int]:
+        """Return task-local usage for continuation and finalization forecasts."""
+        records = [
+            record for record in self._usage.get(job_id, [])
+            if record.task_id == task_id
+        ]
+        input_tokens = sum(record.input_tokens for record in records)
+        output_tokens = sum(record.output_tokens for record in records)
+        calls = len(records)
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "calls": calls,
+            "average_input_tokens": (
+                math.ceil(input_tokens / calls) if calls else 0
+            ),
+        }
 
     def get_usage_summary(self, job_id: str) -> dict:
         """Get usage summary for a job."""

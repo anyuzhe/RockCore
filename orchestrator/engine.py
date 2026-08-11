@@ -378,20 +378,31 @@ class Engine:
         # intentionally conservative; the RMB ceiling remains the hard spend
         # protection. Four turns per eight-page batch leaves room for reading,
         # condensation, incremental writing, and verification.
-        input_budget = min(
-            20_000_000,
+        processing_input_budget = min(
+            19_000_000,
             max(400_000, estimated_pages * 12_000 + 300_000),
+        )
+        finalization_reserve = min(
+            1_000_000,
+            max(200_000, math.ceil(processing_input_budget * 0.12)),
+        )
+        input_budget = min(
+            20_000_000, processing_input_budget + finalization_reserve
         )
         turns = min(240, max(32, 20 + page_batches * 4))
         exploration = min(
             max(12, page_batches + 12),
             max(12, turns - 12),
         )
-        api_call_budget = turns + 24
+        finalization_turns = 12
+        api_call_budget = turns + finalization_turns + 24
         output_budget = max(200_000, estimated_pages * 1_500)
         return {
             "level": level,
             "input_budget": input_budget,
+            "processing_input_budget": processing_input_budget,
+            "finalization_reserve": finalization_reserve,
+            "finalization_turns": finalization_turns,
             "max_turns": turns,
             "exploration_turns": exploration,
             "api_call_budget": api_call_budget,
@@ -1574,8 +1585,23 @@ class Engine:
             if self.merge_manager:
                 wt_result = await self.merge_manager.create_task_worktree(task_id, job.job_id)
                 if wt_result.get("status") != "created":
-                    logger.warning(f"Worktree creation failed for {task_id}, running in-place")
-                    task_worktree_root = job.project.root_path if job.project else "."
+                    phase = str(wt_result.get("phase") or "worktree_create")
+                    detail = str(
+                        wt_result.get("error") or "Unknown Git worktree error"
+                    )
+                    error = f"Git isolation failed during {phase}: {detail}"
+                    logger.error("Task %s: %s", task_id, error)
+                    repos["task"].update_status_by_pk(t.id, "failed")
+                    self._checkpoint_task(
+                        repos, job, t, status="failed", result=wt_result,
+                        error=error,
+                    )
+                    await self.event_bus.publish(
+                        "task_failed", job_id=job.job_id, task_id=task_id,
+                        error=error, failure_stage="worktree_create",
+                        integration=wt_result,
+                    )
+                    raise RuntimeError(error)
                 else:
                     has_worktree = True
                     task_worktree_root = wt_result.get("path", job.project.root_path if job.project else ".")
@@ -1684,11 +1710,17 @@ class Engine:
 
             # L0-L3: Attempt with escalation
             result = await self._execute_single_task_with_escalation(
-                t, job, repos, task_worker, task_worktree_root
+                t, job, repos, task_worker, task_worktree_root,
+                baseline_snapshot=task_baseline,
             )
             integration_result = None
 
-            if result and result.get("status") == "completed":
+            if result and result.get("status") in {
+                "completed", "pending_validation",
+            }:
+                recovered_for_validation = (
+                    result.get("status") == "pending_validation"
+                )
                 # Coding tasks must edit files. Read-only report tasks instead
                 # succeed when they return a substantive report.
                 has_file_changes = await self._check_file_changes(
@@ -1734,6 +1766,18 @@ class Engine:
                     if has_worktree:
                         await self.merge_manager.abort_worktree(task_id)
                     raise RuntimeError(f"Task {task_id} failed: {error}")
+
+                if (
+                    recovered_for_validation
+                    and not result.get("pending_event_published")
+                ):
+                    await self.event_bus.publish(
+                        "task_pending_validation",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        reason=result.get("error", "文档产物已生成，转入确定性验收"),
+                        changes=task_changes,
+                    )
 
                 # Run acceptance test BEFORE marking done
                 test_passed = True
@@ -1802,7 +1846,13 @@ class Engine:
                         await self.merge_manager.abort_worktree(task_id)
                     repos["task"].update_status_by_pk(t.id, "done")
                     result_payload = dict(result)
+                    result_payload["status"] = "completed"
                     result_payload["changes"] = task_changes
+                    if recovered_for_validation:
+                        result_payload["recovered_from_budget"] = True
+                        result_payload["completion_note"] = (
+                            "模型预算在收尾阶段耗尽；现有产物已通过确定性验收"
+                        )
                     if integration_result:
                         result_payload["integration"] = integration_result
                     if declared_no_changes:
@@ -1833,15 +1883,25 @@ class Engine:
                     )
                     await self.event_bus.publish("task_failed", job_id=job.job_id,
                                                   task_id=task_id,
-                                                  error="Acceptance test failed")
-                    if has_worktree:
+                                                  error=(
+                                                      "Generated artifact validation failed; "
+                                                      "worktree preserved for repair"
+                                                      if recovered_for_validation
+                                                      else "Acceptance test failed"
+                                                  ),
+                                                  failure_stage="validation")
+                    if has_worktree and not recovered_for_validation:
                         await self.merge_manager.abort_worktree(task_id)
                     raise RuntimeError(f"Task {task_id} failed: acceptance test did not pass")
             else:
                 repos["task"].update_status_by_pk(t.id, "failed")
+                failure_stage = (
+                    result.get("failure_stage", "") if result else ""
+                )
                 await self.event_bus.publish("task_failed", job_id=job.job_id,
                                               task_id=task_id,
-                                              error=result.get("error", "Unknown") if result else "Unknown")
+                                              error=result.get("error", "Unknown") if result else "Unknown",
+                                              failure_stage=failure_stage)
                 if has_worktree:
                     await self.merge_manager.abort_worktree(task_id)
                 error = result.get("error", "Unknown") if result else "Unknown"
@@ -2076,7 +2136,10 @@ class Engine:
             paths_changed=refined_paths != current_paths,
         )
 
-    async def _execute_single_task_with_escalation(self, task, job, repos, worker, worktree_root):
+    async def _execute_single_task_with_escalation(
+        self, task, job, repos, worker, worktree_root,
+        baseline_snapshot: dict | None = None,
+    ):
         """Retry the primary Worker, then escalate once to Emergency."""
         escalation_count = 0
         last_error = ""
@@ -2096,8 +2159,72 @@ class Engine:
             task, "_rockcore_emergency_after_failures", 3
         ))))
         primary_attempts = min(configured_attempts, emergency_after)
+        budget_finalization_retry = False
 
-        for attempt in range(1, primary_attempts + 1):
+        async def extend_after_budget(error: str, attempt: int) -> bool:
+            nonlocal document_budget_extensions, budget_finalization_retry
+            nonlocal repair_guidance
+            if not document_profile or document_budget_extensions >= 2:
+                return False
+            if attempt > primary_attempts:
+                return False
+            if attempt >= primary_attempts and not await self._check_file_changes(
+                worktree_root, baseline_snapshot
+            ):
+                return False
+            extended = await self._extend_document_budget_for_retry(
+                task, job, worker, error, document_budget_extensions + 1,
+            )
+            if not extended:
+                return False
+            document_budget_extensions += 1
+            repair_guidance = (
+                "RockCore enlarged the document Token/call safety ceiling. "
+                "Do not repeat source reading. Validate the existing artifacts, "
+                "make only focused corrections, and return the final response."
+            )
+            if attempt >= primary_attempts:
+                budget_finalization_retry = True
+                self._enter_document_finalization_mode(task, worker)
+            return True
+
+        async def pending_validation_or_failure(error: str) -> dict:
+            if document_profile and await self._check_file_changes(
+                worktree_root, baseline_snapshot
+            ):
+                await self.event_bus.publish(
+                    "task_pending_validation",
+                    job_id=job.job_id,
+                    task_id=getattr(task, "task_id", ""),
+                    reason=error,
+                )
+                return {
+                    "status": "pending_validation",
+                    "error": error,
+                    "failure_stage": "budget_finalization",
+                    "budget_exhausted": True,
+                    "pending_event_published": True,
+                    "document_progress": getattr(
+                        task, "_rockcore_document_progress", {}
+                    ),
+                }
+            return {
+                "status": "failed",
+                "error": error,
+                "failure_stage": "budget",
+            }
+
+        for attempt in range(1, primary_attempts + 2):
+            if attempt > primary_attempts and not budget_finalization_retry:
+                break
+            if document_profile:
+                preflight = await self._prepare_document_attempt_budget(
+                    task, job, worker, attempt, primary_attempts,
+                    document_budget_extensions, worktree_root,
+                    baseline_snapshot,
+                )
+                if preflight.get("extended"):
+                    document_budget_extensions += 1
             try:
                 recovery_context = ""
                 if attempt > 1:
@@ -2127,22 +2254,9 @@ class Engine:
                     if self._is_user_input_required(last_error):
                         return {"status": "failed", "error": last_error}
                     if self._is_budget_error(last_error):
-                        if (
-                            document_budget_extensions < 2
-                            and attempt < primary_attempts
-                            and await self._extend_document_budget_for_retry(
-                                task, job, worker, last_error,
-                                document_budget_extensions + 1,
-                            )
-                        ):
-                            document_budget_extensions += 1
-                            repair_guidance = (
-                                "RockCore automatically enlarged the document "
-                                "Token/call safety budget. Continue from the next "
-                                "unread PDF page and finish the existing output."
-                            )
+                        if await extend_after_budget(last_error, attempt):
                             continue
-                        return {"status": "failed", "error": last_error}
+                        return await pending_validation_or_failure(last_error)
                     if self._is_task_path_mismatch(last_error):
                         logger.warning(
                             "Task %s has an invalid allowed-path plan; "
@@ -2179,10 +2293,23 @@ class Engine:
                 # partial edits for a continuation, but never auto-pass merely
                 # because some file changed.
                 if result and "Max turns" in str(result.get("error", "")):
-                    has_changes = await self._check_file_changes(worktree_root)
+                    document_progress = dict(
+                        result.get("document_progress") or {}
+                    )
+                    task._rockcore_document_progress = document_progress
+                    has_changes = await self._check_file_changes(
+                        worktree_root, baseline_snapshot
+                    )
                     if has_changes:
+                        progress_detail = ""
+                        if document_progress:
+                            progress_detail = "; continue document from " + ", ".join(
+                                f"{path} page {page}"
+                                for path, page in sorted(document_progress.items())
+                            )
                         last_error = (
                             "Max turns reached: partial changes require completion"
+                            + progress_detail
                         )
                         logger.warning(
                             f"Task {task.task_id}: max turns with partial changes; "
@@ -2195,6 +2322,7 @@ class Engine:
                             reason=last_error,
                             attempt=attempt + 1,
                             max_turns=continuation_turn_budget,
+                            document_progress=document_progress,
                         )
                         worker.max_turns = continuation_turn_budget
                         continue
@@ -2211,22 +2339,9 @@ class Engine:
                 if self._is_user_input_required(last_error):
                     return {"status": "failed", "error": last_error}
                 if self._is_budget_error(last_error):
-                    if (
-                        document_budget_extensions < 2
-                        and attempt < primary_attempts
-                        and await self._extend_document_budget_for_retry(
-                            task, job, worker, last_error,
-                            document_budget_extensions + 1,
-                        )
-                    ):
-                        document_budget_extensions += 1
-                        repair_guidance = (
-                            "RockCore automatically enlarged the document "
-                            "Token/call safety budget. Continue from the next "
-                            "unread PDF page and finish the existing output."
-                        )
+                    if await extend_after_budget(last_error, attempt):
                         continue
-                    return {"status": "failed", "error": last_error}
+                    return await pending_validation_or_failure(last_error)
                 if self._is_provider_capability_error(last_error):
                     logger.warning(
                         f"Task {task.task_id}: provider capability mismatch; "
@@ -2239,6 +2354,27 @@ class Engine:
                         "on the same provider; switching to fallback"
                     )
                     break
+
+        if (
+            document_profile
+            and "max turns" in last_error.lower()
+            and await self._check_file_changes(worktree_root, baseline_snapshot)
+        ):
+            await self.event_bus.publish(
+                "task_pending_validation",
+                job_id=job.job_id,
+                task_id=getattr(task, "task_id", ""),
+                reason=last_error,
+            )
+            return {
+                "status": "pending_validation",
+                "error": last_error,
+                "failure_stage": "budget_finalization",
+                "pending_event_published": True,
+                "document_progress": getattr(
+                    task, "_rockcore_document_progress", {}
+                ),
+            }
 
         if (
             self._is_provider_capability_error(last_error)
@@ -2286,6 +2422,92 @@ class Engine:
             or "api calls exceeded" in normalized
             or "cost exceeded" in normalized
         )
+
+    @staticmethod
+    def _enter_document_finalization_mode(task, worker) -> None:
+        """Constrain a document continuation to artifact checks and completion."""
+        profile = getattr(task, "_rockcore_document_profile", None) or {}
+        turns = max(4, int(profile.get("finalization_turns", 12) or 12))
+        task._rockcore_finalization_mode = True
+        worker.max_turns = min(max(1, int(worker.max_turns)), turns)
+        if hasattr(worker, "max_exploration_turns"):
+            worker.max_exploration_turns = min(
+                max(1, int(worker.max_exploration_turns)), 3
+            )
+
+    async def _prepare_document_attempt_budget(
+        self, task, job, worker, attempt: int, primary_attempts: int,
+        extension_count: int, worktree_root: str,
+        baseline_snapshot: dict | None = None,
+    ) -> dict:
+        """Forecast continuation cost and preserve a deterministic finish reserve."""
+        profile = getattr(task, "_rockcore_document_profile", None) or {}
+        if not profile:
+            return {"extended": False, "finalization": False}
+
+        usage = self.model_router.cost_engine.get_task_usage(
+            job.job_id, getattr(task, "task_id", "")
+        )
+        calls = int(usage.get("calls", 0) or 0)
+        finalization_candidate = attempt >= primary_attempts and calls > 0
+        finalization = (
+            finalization_candidate
+            and await self._check_file_changes(worktree_root, baseline_snapshot)
+        )
+        if finalization:
+            self._enter_document_finalization_mode(task, worker)
+            if not getattr(task, "_rockcore_finalization_announced", False):
+                task._rockcore_finalization_announced = True
+                await self.event_bus.publish(
+                    "document_finalization_started",
+                    job_id=job.job_id,
+                    task_id=getattr(task, "task_id", ""),
+                    max_turns=worker.max_turns,
+                    reason="预留预算已切换为产物验收与收尾",
+                )
+
+        if not calls:
+            return {"extended": False, "finalization": finalization}
+
+        hard_limit = max(
+            0, int(getattr(task, "_rockcore_input_budget", 0) or 0)
+        )
+        used = int(usage.get("input_tokens", 0) or 0)
+        remaining = max(0, hard_limit - used)
+        average = max(
+            8_000, int(usage.get("average_input_tokens", 0) or 0)
+        )
+        predicted = average * max(1, int(worker.max_turns))
+        reserve = (
+            0 if finalization
+            else max(0, int(profile.get("finalization_reserve", 0) or 0))
+        )
+        required = predicted + reserve
+        extended = False
+        if remaining < required and extension_count < 2:
+            reason = (
+                "Forecasted document continuation requires "
+                f"{required} input tokens but only {remaining} remain"
+            )
+            extended = await self._extend_document_budget_for_retry(
+                task, job, worker, reason, extension_count + 1,
+            )
+            if finalization:
+                self._enter_document_finalization_mode(task, worker)
+
+        await self.event_bus.publish(
+            "document_budget_forecast",
+            job_id=job.job_id,
+            task_id=getattr(task, "task_id", ""),
+            attempt=attempt,
+            used_input_tokens=used,
+            remaining_input_tokens=remaining,
+            predicted_input_tokens=predicted,
+            finalization_reserve=reserve,
+            finalization=finalization,
+            extended=extended,
+        )
+        return {"extended": extended, "finalization": finalization}
 
     async def _extend_document_budget_for_retry(
         self, task, job, worker, error: str, extension_round: int
@@ -3134,6 +3356,17 @@ class Engine:
     async def _check_file_changes(self, project_root: str,
                                   baseline_snapshot: dict | None = None) -> bool:
         """Check if any files have been modified/created in the working directory."""
+        # A task-local snapshot is authoritative when available. In particular,
+        # isolated worktrees may contain copied, untracked source PDFs before
+        # execution; plain ``git status`` must not misclassify those inputs as
+        # Worker-generated artifacts.
+        if baseline_snapshot is not None:
+            return bool(
+                self.test_manager.snapshot_diff(
+                    project_root, baseline_snapshot
+                )["changed"]
+            )
+
         # Try git first
         try:
             result = run_process(
@@ -3159,13 +3392,6 @@ class Engine:
                     return True
         except Exception:
             pass
-
-        # For non-Git projects, compare content snapshots rather than merely
-        # treating any pre-existing file as a change.
-        if baseline_snapshot is not None:
-            return bool(
-                self.test_manager.snapshot_diff(project_root, baseline_snapshot)["changed"]
-            )
 
         return False
 

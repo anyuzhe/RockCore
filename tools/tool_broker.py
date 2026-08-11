@@ -1,6 +1,7 @@
 """ToolBroker — central security checkpoint for all AI tool execution."""
 
 import logging
+import inspect
 import os
 import time
 from typing import Any
@@ -312,6 +313,21 @@ class ToolBroker:
         """Execute a tool call with policy enforcement."""
         start = time.time()
 
+        handler = self._tool_registry.get(tool_name)
+        if not handler:
+            return {
+                "status": "error",
+                "error": f"Unknown tool: {tool_name}",
+                "tool": tool_name,
+            }
+
+        args, ignored_arguments = self._normalize_tool_arguments(handler, args)
+        if ignored_arguments:
+            logger.info(
+                "Ignored unsupported arguments for %s: %s",
+                tool_name, ", ".join(ignored_arguments),
+            )
+
         # 1. Policy check
         try:
             self.policy.check_tool_call(task, tool_name, args)
@@ -325,20 +341,14 @@ class ToolBroker:
             }
 
         # 2. Execute
-        handler = self._tool_registry.get(tool_name)
-        if not handler:
-            return {
-                "status": "error",
-                "error": f"Unknown tool: {tool_name}",
-                "tool": tool_name,
-            }
-
         try:
             result = await handler(**args)
             duration = int((time.time() - start) * 1000)
             if isinstance(result, dict):
                 result["tool"] = tool_name
                 result["duration_ms"] = duration
+                if ignored_arguments:
+                    result["ignored_arguments"] = ignored_arguments
             return result
         except Exception as e:
             logger.error(f"Tool execution error: {tool_name}: {e}")
@@ -348,6 +358,27 @@ class ToolBroker:
                 "tool": tool_name,
                 "duration_ms": int((time.time() - start) * 1000),
             }
+
+    @staticmethod
+    def _normalize_tool_arguments(handler, args: dict) -> tuple[dict, list[str]]:
+        """Drop provider-added metadata unsupported by the concrete handler."""
+        values = dict(args) if isinstance(args, dict) else {}
+        try:
+            parameters = inspect.signature(handler).parameters.values()
+        except (TypeError, ValueError):
+            return values, []
+        if any(parameter.kind == inspect.Parameter.VAR_KEYWORD
+               for parameter in parameters):
+            return values, []
+        allowed = {
+            parameter.name for parameter in parameters
+            if parameter.kind in {
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            }
+        }
+        ignored = sorted(set(values) - allowed)
+        return {key: value for key, value in values.items() if key in allowed}, ignored
 
     def set_project_root(self, project_root: str | os.PathLike[str] | None):
         """Update the project root (called per-job to match the actual project)."""

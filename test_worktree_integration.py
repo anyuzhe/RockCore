@@ -68,6 +68,24 @@ def test_worktree_merge_requires_and_records_verified_commit(tmp_path):
     assert manager.active_count == 0
 
 
+def test_stale_task_branch_gets_a_unique_worktree_run_suffix(tmp_path):
+    project = _initialize_project(tmp_path)
+    assert _git(project, "branch", "ai/job-repeat/t001").returncode == 0
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-REPEAT")
+        assert created["status"] == "created"
+        assert created["collision_recovered"] is True
+        assert created["branch"] == "ai/job-repeat/t001-run2"
+        assert Path(created["path"]).name == "T001-run2"
+        await manager.abort_worktree("T001")
+
+    asyncio.run(scenario())
+
+
 def test_commit_failure_preserves_worktree_and_never_merges(
     tmp_path, monkeypatch,
 ):

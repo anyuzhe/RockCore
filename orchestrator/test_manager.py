@@ -291,7 +291,10 @@ class TestManager:
         ))
         diff = self.snapshot_diff(root, baseline_snapshot)
         allowed = task.allowed_paths or []
-        supported = {".html", ".htm", ".json", ".py", ".js", ".mjs", ".cjs"}
+        supported = {
+            ".html", ".htm", ".json", ".py", ".js", ".mjs", ".cjs",
+            ".pdf", ".md", ".txt",
+        }
         candidates: list[Path] = []
         changed_paths = [root / relative for relative in diff["changed"]]
         for path in changed_paths:
@@ -373,10 +376,14 @@ class TestManager:
         suffix = path.suffix.lower()
         if suffix in {".html", ".htm"}:
             return cls._validate_html(path)
+        if suffix == ".pdf":
+            return cls._validate_pdf(path)
         issues = []
         try:
             content, _ = read_text_compatible(path)
-            if suffix == ".json":
+            if suffix in {".md", ".txt"} and not content.strip():
+                issues.append(f"{path.name}: generated document is empty")
+            elif suffix == ".json":
                 json.loads(content)
             elif suffix == ".py":
                 ast.parse(content, filename=str(path))
@@ -398,6 +405,34 @@ class TestManager:
         except (OSError, UnicodeError, ValueError, SyntaxError,
                 json.JSONDecodeError) as error:
             issues.append(f"{path.name}: syntax/parse error: {error}")
+        return {"status": "passed" if not issues else "failed", "issues": issues}
+
+    @staticmethod
+    def _validate_pdf(path: Path) -> dict:
+        """Check that a generated PDF is readable, non-empty, and has pages."""
+        issues = []
+        try:
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
+            if path.stat().st_size <= 0:
+                issues.append(f"{path.name}: generated PDF is empty")
+            else:
+                reader = PdfReader(str(path))
+                if getattr(reader, "is_encrypted", False):
+                    issues.append(f"{path.name}: generated PDF is encrypted")
+                elif len(reader.pages) < 1:
+                    issues.append(f"{path.name}: generated PDF has no pages")
+                else:
+                    # Access both ends so a truncated xref/page tree cannot
+                    # masquerade as a structurally valid multi-page artifact.
+                    reader.pages[0].mediabox
+                    reader.pages[-1].mediabox
+        except (OSError, ValueError, TypeError, IndexError) as error:
+            issues.append(f"{path.name}: invalid PDF: {error}")
+        except Exception as error:
+            issues.append(f"{path.name}: PDF validation failed: {error}")
         return {"status": "passed" if not issues else "failed", "issues": issues}
 
     @staticmethod

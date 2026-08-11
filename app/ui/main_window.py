@@ -880,10 +880,32 @@ class MainWindow(QMainWindow):
                     repair_round=task_repair_round,
                 )
             self._capture_diff(data.get("result"))
+        elif event_type == "task_pending_validation" and is_selected:
+            self.bridge.task_update.emit(data.get("task_id", ""), "running")
+            self.task_panel.append_stage_output(
+                "worker",
+                "产物已生成；模型预算在收尾阶段耗尽，正在进行确定性验收",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "document_finalization_started" and is_selected:
+            self.task_panel.update_stage(
+                "worker", "running",
+                f"{data.get('task_id', '')} 已进入收尾模式，停止重复读取",
+                repair_round=task_repair_round,
+            )
         elif event_type == "task_failed" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "failed")
+            failure_stage = data.get("failure_stage", "")
+            prefix = (
+                "RockCore 流程错误"
+                if failure_stage in {
+                    "budget", "budget_finalization", "validation",
+                    "worktree_create", "git_integration",
+                }
+                else "错误"
+            )
             self.task_panel.append_stage_output(
-                "worker", f"错误：{data.get('error', '未知错误')}",
+                "worker", f"{prefix}：{data.get('error', '未知错误')}",
                 repair_round=task_repair_round,
             )
             self._capture_diff(data.get("result"))

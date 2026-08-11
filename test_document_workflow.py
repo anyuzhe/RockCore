@@ -11,6 +11,8 @@ from orchestrator.cost_engine import CostEngine
 from orchestrator.engine import Engine
 from orchestrator.merge_manager import MergeManager
 from orchestrator.policy_engine import PolicyEngine
+from orchestrator.state_machine import JobState
+from orchestrator.test_manager import TestManager
 from git.repository import Repository
 from tools.file_tools import FileTools
 from tools.tool_broker import ToolBroker
@@ -62,13 +64,15 @@ def test_document_budget_scales_with_actual_page_count(tmp_path, monkeypatch):
         _task(description="整理整本 PDF 书籍"), str(tmp_path)
     )
 
-    assert short["input_budget"] == 588_000
-    assert medium["input_budget"] == 1_260_000
-    assert long["input_budget"] == 2_112_000
+    assert short["input_budget"] == 788_000
+    assert medium["input_budget"] == 1_460_000
+    assert long["processing_input_budget"] == 2_112_000
+    assert long["finalization_reserve"] == 253_440
+    assert long["input_budget"] == 2_365_440
     assert long["pdf_pages"] == 151
     assert long["page_batches"] == 19
     assert long["max_turns"] == 96
-    assert long["api_call_budget"] == 120
+    assert long["api_call_budget"] == 132
     assert long["exploration_turns"] > medium["exploration_turns"]
 
 
@@ -86,6 +90,27 @@ def test_document_reservation_keeps_paid_api_cost_limit_unchanged():
     assert budget.max_total_tokens >= 2_914_000
     assert budget.max_api_calls >= 180
     assert budget.max_cost_cny == before
+
+
+def test_generated_pdf_receives_structural_validation(tmp_path):
+    try:
+        from pypdf import PdfWriter
+    except ImportError:
+        from PyPDF2 import PdfWriter
+    output = tmp_path / "summary.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    with output.open("wb") as handle:
+        writer.write(handle)
+
+    valid = TestManager._validate_source(output)
+    invalid = tmp_path / "broken.pdf"
+    invalid.write_bytes(b"not-a-pdf")
+    broken = TestManager._validate_source(invalid)
+
+    assert valid["status"] == "passed"
+    assert broken["status"] == "failed"
+    assert "PDF" in broken["issues"][0]
 
 
 def test_worker_cannot_finish_while_pdf_reports_unread_pages():
@@ -210,6 +235,165 @@ def test_document_token_budget_auto_expands_before_retry(tmp_path):
     asyncio.run(scenario())
 
 
+def test_final_document_attempt_can_expand_into_short_finalization(tmp_path):
+    class Worker:
+        max_turns = 64
+        max_exploration_turns = 20
+        calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                return {"status": "failed", "error": "Max turns (32) reached"}
+            if self.calls == 3:
+                return {
+                    "status": "failed",
+                    "error": (
+                        "RockCore job budget exceeded: Task input tokens "
+                        "exceeded: 600001/600000"
+                    ),
+                }
+            return {"status": "completed", "content": "artifacts verified"}
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        task = _task()
+        task._rockcore_input_budget = 600_000
+        task._rockcore_document_profile = {
+            "max_turns": 64,
+            "finalization_turns": 12,
+            "api_call_budget": 88,
+            "output_budget": 200_000,
+        }
+        engine._check_file_changes = lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=True
+        )
+        worker = Worker()
+        job = SimpleNamespace(job_id="JOB-DOC-FINAL", project=None)
+
+        result = await engine._execute_single_task_with_escalation(
+            task, job, {}, worker, str(tmp_path)
+        )
+
+        assert result["status"] == "completed"
+        assert worker.calls == 4
+        assert task._rockcore_finalization_mode is True
+        assert worker.max_turns <= 12
+        assert engine.event_bus.get_history("document_budget_extended")
+
+    asyncio.run(scenario())
+
+
+def test_exhausted_document_with_artifacts_moves_to_validation(tmp_path):
+    class Worker:
+        max_turns = 24
+        max_exploration_turns = 8
+        calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            return {
+                "status": "failed",
+                "error": (
+                    "RockCore job budget exceeded: Task input tokens "
+                    "exceeded: 600001/600000"
+                ),
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        task = _task()
+        task._rockcore_input_budget = 600_000
+        task._rockcore_document_profile = {
+            "max_turns": 24,
+            "finalization_turns": 8,
+            "api_call_budget": 48,
+            "output_budget": 200_000,
+        }
+        engine._check_file_changes = lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=True
+        )
+
+        result = await engine._execute_single_task_with_escalation(
+            task, SimpleNamespace(job_id="JOB-DOC-PENDING", project=None),
+            {}, Worker(), str(tmp_path),
+        )
+
+        assert result["status"] == "pending_validation"
+        assert result["failure_stage"] == "budget_finalization"
+        assert engine.event_bus.get_history("task_pending_validation")
+
+    asyncio.run(scenario())
+
+
+def test_execution_marks_budget_exhausted_artifact_done_after_validation(tmp_path):
+    try:
+        from pypdf import PdfWriter
+    except ImportError:
+        from PyPDF2 import PdfWriter
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    source_writer = PdfWriter()
+    source_writer.add_blank_page(width=595, height=842)
+    with (project_root / "source.pdf").open("wb") as handle:
+        source_writer.write(handle)
+
+    class Worker:
+        max_turns = 24
+        max_exploration_turns = 8
+
+        def scoped_to(self, root):
+            self.root = Path(root)
+            return self
+
+        async def run(self, *_args, **_kwargs):
+            output = PdfWriter()
+            output.add_blank_page(width=595, height=842)
+            with (self.root / "summary.pdf").open("wb") as handle:
+                output.write(handle)
+            return {
+                "status": "failed",
+                "error": (
+                    "RockCore job budget exceeded: Task input tokens "
+                    "exceeded: 600001/600000"
+                ),
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        engine._check_file_changes = lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=True
+        )
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Docs", str(project_root))
+            job = repos["job"].create(
+                "JOB-DOC-VALIDATE", project.id, "精简 PDF 文档"
+            )
+            task = repos["task"].create(
+                "T001", job.id, "生成精简 PDF", task_type="coding",
+                allowed_paths=["summary.pdf"],
+            )
+            engine.register_agent("worker", Worker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            done = engine.event_bus.get_history("task_done")[-1]["data"]["result"]
+            assert task.status == "done"
+            assert done["recovered_from_budget"] is True
+            assert done["status"] == "completed"
+            assert engine.event_bus.get_history("task_pending_validation")
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_untracked_pdf_input_is_not_committed_or_merged_as_output(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -239,6 +423,27 @@ def test_untracked_pdf_input_is_not_committed_or_merged_as_output(tmp_path):
     assert repository._run(
         "ls-files", "--error-unmatch", source.name
     ).returncode != 0
+
+
+def test_task_snapshot_does_not_treat_preexisting_untracked_pdf_as_output(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    repository = Repository(str(project))
+    assert repository.ensure_initialized()["status"] == "initialized"
+    (project / "source.pdf").write_bytes(b"input")
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    baseline = engine.test_manager.capture_snapshot(project)
+
+    assert asyncio.run(
+        engine._check_file_changes(str(project), baseline)
+    ) is False
+
+    (project / "summary.md").write_text("output", encoding="utf-8")
+    assert asyncio.run(
+        engine._check_file_changes(str(project), baseline)
+    ) is True
 
 
 def test_pdf_tool_is_available_without_shell_commands(tmp_path):

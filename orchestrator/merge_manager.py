@@ -103,21 +103,67 @@ class MergeManager:
                 )
 
     async def create_task_worktree(self, task_id: str, job_id: str) -> dict:
-        """Create an isolated worktree for a task."""
-        branch = f"ai/{job_id.lower()}/{task_id.lower()}"
-        wt_path = str(self.worktrees_base / task_id)
-
-        result = await self.git_tools.create_worktree(branch, wt_path)
-        if result.get("status") == "created":
-            self._copy_untracked_input_assets(wt_path)
-            self._active_worktrees[task_id] = {
-                "branch": branch,
-                "path": wt_path,
-                "task_id": task_id,
-                "status": "active",
+        """Create an isolated worktree, avoiding stale branch/path collisions."""
+        if task_id in self._active_worktrees:
+            active = self._active_worktrees[task_id]
+            return {
+                "status": "failed",
+                "phase": "worktree_preflight",
+                "error": f"Task {task_id} already has an active worktree",
+                "path": active.get("path", ""),
+                "branch": active.get("branch", ""),
             }
-            logger.info(f"Worktree created: {branch} at {wt_path}")
-        return result
+
+        base_branch = f"ai/{job_id.lower()}/{task_id.lower()}"
+        last_result = {}
+        for run_number in range(1, 26):
+            suffix = "" if run_number == 1 else f"-run{run_number}"
+            branch = base_branch + suffix
+            path_name = task_id if run_number == 1 else f"{task_id}{suffix}"
+            wt_path = str(self.worktrees_base / path_name)
+            result = await self.git_tools.create_worktree(branch, wt_path)
+            last_result = result
+            if result.get("status") == "created":
+                self._copy_untracked_input_assets(wt_path)
+                self._active_worktrees[task_id] = {
+                    "branch": branch,
+                    "path": wt_path,
+                    "task_id": task_id,
+                    "status": "active",
+                }
+                result["collision_recovered"] = run_number > 1
+                result["run_number"] = run_number
+                logger.info("Worktree created: %s at %s", branch, wt_path)
+                return result
+            error = str(result.get("error") or "")
+            if not self._is_worktree_collision(error):
+                result.setdefault("phase", "worktree_create")
+                logger.error("Worktree creation failed for %s: %s", task_id, error)
+                return result
+            logger.warning(
+                "Worktree name collision for %s (%s); trying a unique run suffix",
+                task_id, error[:300],
+            )
+
+        return {
+            "status": "failed",
+            "phase": "worktree_create",
+            "error": (
+                "Could not allocate a unique task worktree after 25 attempts: "
+                + str(last_result.get("error") or "unknown Git error")
+            ),
+        }
+
+    @staticmethod
+    def _is_worktree_collision(error: str) -> bool:
+        normalized = str(error or "").lower()
+        return any(marker in normalized for marker in (
+            "already exists",
+            "already checked out",
+            "already registered worktree",
+            "is a missing but already registered worktree",
+            "path already exists",
+        ))
 
     async def commit_and_merge(self, task_id: str, commit_message: str) -> dict:
         """Commit changes in worktree and merge back to main."""

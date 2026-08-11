@@ -148,12 +148,23 @@ Acceptance Command: {task.acceptance_command or 'none'}
         is_document_task = any(marker in document_text for marker in (
             ".pdf", "pdf", "文档", "书籍", "全书", "document", "book",
         ))
+        finalization_mode = bool(
+            getattr(task, "_rockcore_finalization_mode", False)
+        )
         if is_document_task:
             task_context += (
                 "\nThis is a document-processing task. Use read_pdf directly "
                 "and paginate with next_page. Do not install dependencies or "
                 "retry shell-based PDF extraction. For a long source, write "
                 "the output incrementally so completed page ranges are preserved."
+            )
+        if finalization_mode:
+            task_context += (
+                "\nFINALIZATION MODE: useful artifacts already exist. Do not "
+                "restart source reading or broad exploration. Inspect only the "
+                "generated outputs, run one focused deterministic check, repair "
+                "only a concrete defect if found, then return the final completion "
+                "response. Never regenerate a complete document from scratch."
             )
         if recovery_context:
             task_context += (
@@ -600,6 +611,8 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     "tool_calls": tool_calls_made,
                     "input_tokens": total_input,
                     "output_tokens": total_output,
+                    "document_progress": dict(pending_document_pages),
+                    "has_written": has_written,
                 }
 
             result = {
@@ -612,6 +625,8 @@ Acceptance Command: {task.acceptance_command or 'none'}
             }
             if no_changes_declared:
                 result["no_changes"] = True
+            if is_document_task:
+                result["document_progress"] = dict(pending_document_pages)
             return result
 
         except Exception as e:

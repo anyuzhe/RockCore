@@ -251,6 +251,27 @@ def test_tool_schema_is_pruned_by_task_type(tmp_path):
     assert {"write_file", "apply_patch", "run_tests"}.issubset(coding)
 
 
+def test_tool_broker_ignores_provider_metadata_arguments(tmp_path):
+    source = tmp_path / "note.txt"
+    source.write_text("old", encoding="utf-8")
+    broker = ToolBroker(tmp_path, PolicyEngine())
+    task = SimpleNamespace(
+        task_type="coding", allowed_paths=["note.txt"],
+        title="Update note", description="", acceptance_command="",
+    )
+
+    result = asyncio.run(broker.execute(task, "apply_patch", {
+        "path": "note.txt",
+        "search": "old",
+        "replace": "new",
+        "note": "provider-only narration",
+    }))
+
+    assert result["status"] == "patched"
+    assert result["ignored_arguments"] == ["note"]
+    assert source.read_text(encoding="utf-8") == "new"
+
+
 def test_provider_capability_error_immediately_falls_back():
     class BrokenProvider:
         model = "thinking-model"
