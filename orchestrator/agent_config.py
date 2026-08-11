@@ -274,7 +274,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 8
+    config_version: int = 9
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -288,7 +288,7 @@ class ProjectAgentConfig:
         reasoning_effort="default", max_turns=24,
     ))
     worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(
-        enabled=True, provider="deepseek", model="deepseek-v4-flash",
+        enabled=True, provider="deepseek", model="deepseek-v4-pro",
         reasoning_effort="default", max_turns=96,
         max_exploration_turns=60, patch_recovery_turns=6, retry_count=2,
         emergency_after_failures=3, fallback_provider="kimi",
@@ -359,9 +359,19 @@ class ProjectAgentConfig:
             cfg._upgrade_exploration_limits()
         if source_version < 8:
             cfg._triple_runtime_limits(data)
+        if source_version < 9:
+            cfg._upgrade_default_worker_model()
         cfg._normalize_provider_model_ids()
-        cfg.config_version = 8
+        cfg.config_version = 9
         return cfg
+
+    def _upgrade_default_worker_model(self):
+        """Move the former built-in Flash Worker default to V4 Pro."""
+        if (
+            self.worker.provider == "deepseek"
+            and self.worker.model in {"", "deepseek-v4-flash"}
+        ):
+            self.worker.model = "deepseek-v4-pro"
 
     def _triple_runtime_limits(self, source: dict):
         """Triple persisted non-monetary ceilings once for existing projects."""
@@ -505,7 +515,7 @@ class ProjectAgentConfig:
             mode="fast",
             governor=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=False, provider="kimi", model="kimi-k3", max_turns=0),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=30, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-pro", max_turns=30, max_exploration_turns=30, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
             complexity_exploration={"simple": 30, "normal": 42, "complex": 60},
             reviewer=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
@@ -521,7 +531,7 @@ class ProjectAgentConfig:
             mode="standard",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=24),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=96, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-pro", max_turns=96, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
             complexity_turns={"simple": 60, "normal": 96, "complex": 144},
@@ -538,7 +548,7 @@ class ProjectAgentConfig:
             mode="strict",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=30),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=90, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-pro", max_turns=90, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
             complexity_turns={"simple": 60, "normal": 90, "complex": 120},

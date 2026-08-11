@@ -99,14 +99,14 @@ class CostEngine:
         "codex": "gpt-5.6-sol",
         "openai": "gpt-5.6-sol",
         "kimi": "kimi-k3",
-        "deepseek": "deepseek-v4-flash",
+        "deepseek": "deepseek-v4-pro",
     }
     DEFAULT_MODEL_BY_AGENT = {
         "governor": "gpt-5.6-sol",
         "reviewer": "gpt-5.6-sol",
         "emergency_coder": "gpt-5.6-sol",
         "planner": "kimi-k3",
-        "worker": "deepseek-v4-flash",
+        "worker": "deepseek-v4-pro",
     }
 
     def __init__(self, default_budget: JobBudget | None = None):
@@ -705,7 +705,7 @@ class CostEngine:
         if normalized not in cls.MODEL_PRICES_CNY_PER_MILLION:
             normalized = cls.DEFAULT_MODEL_BY_PROVIDER.get(
                 (provider or "").lower(),
-                cls.DEFAULT_MODEL_BY_AGENT.get(agent_type, "deepseek-v4-flash"),
+                cls.DEFAULT_MODEL_BY_AGENT.get(agent_type, "deepseek-v4-pro"),
             )
         return cls.MODEL_PRICES_CNY_PER_MILLION[normalized]
 

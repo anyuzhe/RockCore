@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class DeepSeekProvider(BaseProvider):
     """Provider for DeepSeek V4 models used by the Worker role."""
 
-    DEFAULT_MODEL = "deepseek-v4-flash"
+    DEFAULT_MODEL = "deepseek-v4-pro"
     BASE_URL = "https://api.deepseek.com/v1"
     MAX_OUTPUT_TOKENS = 16_384
 

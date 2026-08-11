@@ -41,6 +41,13 @@ def load_config() -> dict:
                 if kimi.get("model") in {None, "", "kimi-k2.6"}:
                     kimi["model"] = "kimi-k3"
                 config["workflow_defaults_version"] = 2
+            if version < 3:
+                deepseek = config.setdefault("deepseek", {})
+                if deepseek.get("model") in {
+                    None, "", "deepseek-v4-flash",
+                }:
+                    deepseek["model"] = "deepseek-v4-pro"
+                config["workflow_defaults_version"] = 3
             if int(config.get("pricing_currency_version", 0) or 0) < 1:
                 budget = config.setdefault("budget", {})
                 if "max_cost_cny" not in budget:
@@ -186,7 +193,7 @@ class SettingsDialog(QDialog):
         for model in PROVIDER_MODELS["deepseek"]:
             self.ds_model.addItem(model, model)
         current_ds_model = self._config.get("deepseek", {}).get(
-            "model", "deepseek-v4-flash"
+            "model", "deepseek-v4-pro"
         )
         ds_model_index = self.ds_model.findData(current_ds_model)
         if ds_model_index >= 0:
@@ -506,7 +513,7 @@ class SettingsDialog(QDialog):
         }
         self._config["deepseek"] = {
             "api_key": self.ds_api_key.text().strip(),
-            "model": self.ds_model.currentText().strip() or "deepseek-v4-flash",
+            "model": self.ds_model.currentText().strip() or "deepseek-v4-pro",
         }
         previous_codex = self._config.get("codex", {})
         self._config["codex"] = {
@@ -540,7 +547,7 @@ class SettingsDialog(QDialog):
             "cached_input_weight": self.cached_input_weight.value() / 100.0,
             "max_cost_cny": self.max_cost.value(),
         }
-        self._config["workflow_defaults_version"] = 2
+        self._config["workflow_defaults_version"] = 3
         self._config["pricing_currency_version"] = 1
         self._config["budget_policy_version"] = 2
 

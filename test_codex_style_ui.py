@@ -512,6 +512,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
 
     assert settings.kimi_model.findData("kimi-k2.7-code") >= 0
     assert settings.ds_model.findData("deepseek-v4-pro") >= 0
+    assert settings.ds_model.currentData() == "deepseek-v4-pro"
     assert settings.max_cost.prefix() == "¥"
     assert settings.max_tokens.value() == 5_000_000
     assert settings.max_auto_tokens.value() == 50_000_000
@@ -522,6 +523,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
         "kimi-k2.7-code"
     ) >= 0
     assert project.worker_model.findData("deepseek-v4-pro") >= 0
+    assert project.worker_model.currentData() == "deepseek-v4-pro"
     assert project._agent_widgets["governor"]["model"].findData(
         "gpt-5.6-sol"
     ) >= 0

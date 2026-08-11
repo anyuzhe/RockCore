@@ -900,10 +900,11 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 8
+    assert config.config_version == 9
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
+    assert config.worker.model == "deepseek-v4-pro"
     assert config.reviewer.provider == "codex"
     assert config.reviewer.model == "gpt-5.6-sol"
     assert config.emergency_coder.reasoning_effort == "max"
@@ -947,9 +948,10 @@ def test_version_seven_project_limits_are_tripled_once():
     upgraded = ProjectAgentConfig.from_dict(legacy)
     reloaded = ProjectAgentConfig.from_dict(upgraded.to_dict())
 
-    assert upgraded.config_version == 8
+    assert upgraded.config_version == 9
     assert upgraded.planner.max_turns == 24
     assert upgraded.worker.max_turns == 150
+    assert upgraded.worker.model == "deepseek-v4-pro"
     assert upgraded.worker.max_exploration_turns == 60
     assert upgraded.worker.patch_recovery_turns == 6
     assert upgraded.complexity_turns == {

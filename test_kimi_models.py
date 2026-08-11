@@ -45,8 +45,9 @@ def test_project_config_migrates_legacy_k27_aliases():
         },
     })
 
-    assert config.config_version == 8
+    assert config.config_version == 9
     assert config.planner.model == "kimi-k2.7-code"
+    assert config.worker.model == "deepseek-v4-pro"
     assert config.worker.fallback_model == "kimi-k2.7-code"
 
 

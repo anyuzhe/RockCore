@@ -1,4 +1,4 @@
-# Worker Agent — DeepSeek V4 Flash
+# Worker Agent — DeepSeek V4 Pro
 
 You are the **Worker** in the AI Engineering Studio.
 

@@ -3,7 +3,8 @@
 import asyncio
 from types import SimpleNamespace
 
-from orchestrator.agent_config import PROVIDER_MODELS
+from orchestrator.agent_config import PROVIDER_MODELS, ProjectAgentConfig
+from orchestrator.cost_engine import CostEngine
 from providers.deepseek_provider import DeepSeekProvider
 
 
@@ -12,6 +13,15 @@ def test_deepseek_v4_pro_is_available_for_configuration():
 
     provider = DeepSeekProvider({"api_key": "test", "model": "deepseek-v4-pro"})
     assert provider.model == "deepseek-v4-pro"
+
+
+def test_deepseek_v4_pro_is_the_default_worker_model():
+    assert DeepSeekProvider.DEFAULT_MODEL == "deepseek-v4-pro"
+    assert DeepSeekProvider({"api_key": "test"}).model == "deepseek-v4-pro"
+    assert ProjectAgentConfig().worker.model == "deepseek-v4-pro"
+    assert ProjectAgentConfig.standard_preset().worker.model == "deepseek-v4-pro"
+    assert CostEngine.DEFAULT_MODEL_BY_PROVIDER["deepseek"] == "deepseek-v4-pro"
+    assert CostEngine.DEFAULT_MODEL_BY_AGENT["worker"] == "deepseek-v4-pro"
 
 
 def test_deepseek_downgrades_required_tool_choice_to_auto():

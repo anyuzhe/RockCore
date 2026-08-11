@@ -159,7 +159,7 @@ class ProjectConfigDialog(QDialog):
 
         self.worker_provider.currentIndexChanged.connect(lambda _: _refresh_worker_models())
         _refresh_worker_models()
-        self.worker_model.setCurrentIndex(self.worker_model.findData("deepseek-v4-flash"))
+        self.worker_model.setCurrentIndex(self.worker_model.findData("deepseek-v4-pro"))
         form.addRow("模型：", self.worker_provider)
         form.addRow("版本：", self.worker_model)
         form.addRow("推理强度：", self.worker_reasoning)
@@ -539,7 +539,7 @@ class ProjectConfigDialog(QDialog):
                 )
 
         cfg.worker.provider = self.worker_provider.currentData() or "deepseek"
-        cfg.worker.model = self.worker_model.currentData() or "deepseek-v4-flash"
+        cfg.worker.model = self.worker_model.currentData() or "deepseek-v4-pro"
         cfg.worker.reasoning_effort = (
             self.worker_reasoning.currentData() or "default"
         )
