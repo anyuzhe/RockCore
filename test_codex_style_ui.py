@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 
 from app.ui import main_window as main_window_module
@@ -142,6 +143,31 @@ def test_live_stage_updates_expand_inside_the_conversation():
     panel.update_job_status("JOB-1", "done")
     assert not worker.indicator.is_spinning
     assert not panel.job_status_indicator.is_spinning
+    panel.close()
+
+
+def test_submitted_request_can_copy_the_complete_original_text():
+    app = _app()
+    panel = TaskPanel()
+    original = "第一行完整需求\n第二行包含实现细节" + "。" * 400
+    panel.set_workflow({
+        "job_id": "JOB-COPY",
+        "user_request": original,
+        "status": "done",
+        "created_at": "2026-08-11T12:00:00Z",
+    })
+
+    # Copying must use the stored request even if presentation text changes.
+    panel.user_output.setText("界面显示内容")
+    panel._copy_original_request()
+
+    assert app.clipboard().text() == original
+    assert panel.user_frame.contextMenuPolicy() == (
+        panel.user_output.contextMenuPolicy()
+    ) == Qt.ContextMenuPolicy.CustomContextMenu
+    assert panel.user_output.textInteractionFlags() & (
+        Qt.TextInteractionFlag.TextSelectableByMouse
+    )
     panel.close()
 
 

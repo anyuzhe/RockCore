@@ -7,9 +7,11 @@ from datetime import datetime
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -323,6 +325,14 @@ class TaskPanel(QWidget):
         self.user_frame = QFrame()
         self.user_frame.setObjectName("userMessage")
         self.user_frame.setMaximumWidth(760)
+        self.user_frame.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.user_frame.customContextMenuRequested.connect(
+            lambda position: self._show_user_request_menu(
+                self.user_frame, position
+            )
+        )
         user_layout = QVBoxLayout(self.user_frame)
         user_layout.setContentsMargins(14, 11, 14, 11)
         user_label = QLabel("你")
@@ -330,6 +340,18 @@ class TaskPanel(QWidget):
         self.user_output = QLabel("")
         self.user_output.setObjectName("userMessageText")
         self.user_output.setWordWrap(True)
+        self.user_output.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.user_output.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.user_output.customContextMenuRequested.connect(
+            lambda position: self._show_user_request_menu(
+                self.user_output, position
+            )
+        )
         self.user_source_label = QLabel("")
         self.user_source_label.setObjectName("mutedLabel")
         self.user_attachments_widget = QWidget()
@@ -399,6 +421,36 @@ class TaskPanel(QWidget):
         self.feed_layout.addStretch()
         self.scroll.setWidget(content)
         root.addWidget(self.scroll, 1)
+
+    def _original_request_text(self) -> str:
+        """Return the complete submitted request, independent of UI rendering."""
+        if self._current_job:
+            return str(self._current_job.get("user_request") or "")
+        return self.user_output.text()
+
+    def _copy_original_request(self) -> None:
+        request = self._original_request_text()
+        if request:
+            QApplication.clipboard().setText(request)
+
+    def _show_user_request_menu(self, source: QWidget, position) -> None:
+        """Show copy actions for the user's submitted request bubble."""
+        request = self._original_request_text()
+        selected_text = (
+            self.user_output.selectedText()
+            if self.user_output.hasSelectedText() else ""
+        )
+        menu = QMenu(self.user_frame)
+        copy_selected = menu.addAction("复制选中内容")
+        copy_selected.setEnabled(bool(selected_text))
+        menu.addSeparator()
+        copy_original = menu.addAction("复制原始需求")
+        copy_original.setEnabled(bool(request))
+        chosen = menu.exec(source.mapToGlobal(position))
+        if chosen is copy_selected:
+            QApplication.clipboard().setText(selected_text)
+        elif chosen is copy_original:
+            self._copy_original_request()
 
     def set_project_context(self, name: str = "", root_path: str = ""):
         if name and not self._current_job:
