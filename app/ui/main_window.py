@@ -484,6 +484,10 @@ class MainWindow(QMainWindow):
                     self.task_panel.log(
                         f"已建立 Git 初始基线：{git_state.get('commit', '')}", "log"
                     )
+                elif git_state.get("gitignore_updated"):
+                    self.task_panel.log(
+                        "已保留原有规则并自动更新项目 .gitignore", "log"
+                    )
                 elif git_state.get("status") == "failed":
                     self.task_panel.log(
                         f"Git 初始化失败，将使用文件快照：{git_state.get('error', '')}",

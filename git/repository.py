@@ -1,13 +1,57 @@
 """Git repository management for the AI Engineering Studio."""
 
 import logging
+import os
+import re
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
 from app.subprocess_utils import run_process
 
 logger = logging.getLogger(__name__)
+
+ROCKCORE_IGNORE_START = "# >>> RockCore managed ignores >>>"
+ROCKCORE_IGNORE_END = "# <<< RockCore managed ignores <<<"
+ROCKCORE_IGNORE_LINES = (
+    "# Python bytecode and tool caches",
+    "__pycache__/",
+    "*.py[cod]",
+    "*$py.class",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".tox/",
+    ".nox/",
+    ".coverage",
+    ".coverage.*",
+    "htmlcov/",
+    "",
+    "# Local dependencies and virtual environments",
+    ".venv/",
+    "venv/",
+    "node_modules/",
+    ".npm/",
+    ".pnpm-store/",
+    ".yarn/cache/",
+    "",
+    "# Local secrets, logs, OS and editor temporary files",
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    "*.pem",
+    "*.key",
+    "credentials.json",
+    "*.log",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.swp",
+    "*~",
+    "",
+    "# RockCore runtime isolation",
+    ".ai/worktrees/",
+)
 
 
 class Repository:
@@ -34,15 +78,102 @@ class Repository:
         except (OSError, ValueError):
             return False
 
+    @staticmethod
+    def _managed_ignore_block(newline: bytes) -> bytes:
+        lines = (
+            ROCKCORE_IGNORE_START,
+            *ROCKCORE_IGNORE_LINES,
+            ROCKCORE_IGNORE_END,
+            "",
+        )
+        return newline.join(line.encode("utf-8") for line in lines)
+
+    @staticmethod
+    def _update_managed_ignore_file(path: Path) -> tuple[bool, str]:
+        """Atomically add/update RockCore's block while preserving user bytes."""
+        if path.is_symlink():
+            return False, f"Refusing to replace symlinked ignore file: {path}"
+        try:
+            existing = path.read_bytes() if path.exists() else b""
+            newline = (
+                b"\r\n"
+                if existing.count(b"\r\n") > existing.count(b"\n") / 2
+                else b"\n"
+            )
+            block = Repository._managed_ignore_block(newline)
+            matcher = re.compile(
+                rb"(?ms)^" + re.escape(ROCKCORE_IGNORE_START.encode())
+                + rb"\r?\n.*?^" + re.escape(ROCKCORE_IGNORE_END.encode())
+                + rb"(?:\r?\n)?"
+            )
+            match = matcher.search(existing)
+            if match:
+                updated = existing[:match.start()] + block + existing[match.end():]
+            else:
+                prefix = existing
+                if prefix and not prefix.endswith((b"\n", b"\r")):
+                    prefix += newline
+                if prefix and not prefix.endswith(newline * 2):
+                    prefix += newline
+                updated = prefix + block
+            if updated == existing:
+                return False, ""
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(
+                f".{path.name}.rockcore-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                temporary.write_bytes(updated)
+                os.replace(temporary, path)
+            finally:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return True, ""
+        except OSError as error:
+            return False, str(error)
+
+    def ensure_ignore_rules(self) -> dict:
+        """Maintain shared .gitignore rules for new and existing repositories."""
+        common_dir_result = self._run("rev-parse", "--git-common-dir")
+        if common_dir_result.returncode != 0:
+            return {
+                "updated": False,
+                "error": common_dir_result.stderr.strip()
+                or "Unable to locate the Git metadata directory",
+            }
+        common_dir = Path(common_dir_result.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (self.root_path / common_dir).resolve()
+        targets = (
+            self.root_path / ".gitignore",
+            common_dir / "info" / "exclude",
+        )
+        changed = []
+        for target in targets:
+            updated, error = self._update_managed_ignore_file(target)
+            if error:
+                return {"updated": bool(changed), "error": error}
+            if updated:
+                changed.append(str(target))
+        return {"updated": bool(changed), "paths": changed, "error": ""}
+
     def ensure_initialized(self) -> dict:
         """Create a local Git baseline for a project that has no repository yet."""
         if not self.root_path.is_dir():
             return {"status": "failed", "error": "Project root is not a directory"}
-        if self.is_repo():
+        existing_repository = self.is_repo()
+        if existing_repository:
+            ignore_state = self.ensure_ignore_rules()
+            if ignore_state.get("error"):
+                return {"status": "failed", "error": ignore_state["error"]}
             return {
                 "status": "existing",
                 "branch": self.current_branch(),
                 "commit": self.get_commit_hash(),
+                "gitignore_updated": ignore_state["updated"],
             }
 
         try:
@@ -54,23 +185,9 @@ class Repository:
         if init_result.returncode != 0:
             return {"status": "failed", "error": init_result.stderr.strip()}
 
-        # Keep generated data and common credentials out of the automatic baseline
-        # without modifying a project's own .gitignore.
-        exclude_path = self.root_path / ".git" / "info" / "exclude"
-        exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-        patterns = [
-            ".DS_Store", ".venv/", "venv/", "node_modules/", "__pycache__/",
-            "*.pyc", ".env", ".env.*", "*.pem", "*.key", "credentials.json",
-            ".ai/worktrees/",
-        ]
-        missing = [pattern for pattern in patterns if pattern not in existing.splitlines()]
-        if missing:
-            suffix = "" if not existing or existing.endswith("\n") else "\n"
-            exclude_path.write_text(
-                existing + suffix + "# RockCore local exclusions\n" + "\n".join(missing) + "\n",
-                encoding="utf-8",
-            )
+        ignore_state = self.ensure_ignore_rules()
+        if ignore_state.get("error"):
+            return {"status": "failed", "error": ignore_state["error"]}
 
         stage_result = self._run("add", "-A")
         if stage_result.returncode != 0:
@@ -92,6 +209,7 @@ class Repository:
             "status": "initialized",
             "branch": self.current_branch(),
             "commit": self.get_commit_hash(),
+            "gitignore_updated": ignore_state["updated"],
         }
 
     def current_branch(self) -> str:

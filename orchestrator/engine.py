@@ -601,6 +601,12 @@ class Engine:
                     "project_git_initialized", project_root=project_root,
                     commit=repo_state.get("commit", ""),
                 )
+            if repo_state.get("gitignore_updated"):
+                await self.event_bus.publish(
+                    "project_gitignore_updated",
+                    project_root=project_root,
+                    summary="已自动维护项目 .gitignore 和本地排除规则",
+                )
             unmerged_files = repository.unmerged_files()
             if unmerged_files:
                 error = (

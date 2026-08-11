@@ -1,10 +1,11 @@
 """Regression coverage for Git bootstrap, local validation, and provider failures."""
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from git.repository import Repository
+from git.repository import ROCKCORE_IGNORE_START, Repository
 from orchestrator.engine import Engine
 from orchestrator.test_manager import TestManager
 
@@ -33,12 +34,56 @@ def test_repository_bootstrap_creates_safe_initial_commit(tmp_path):
     assert result["status"] == "initialized"
     assert result["commit"]
     assert Repository(str(tmp_path)).is_repo()
-    import subprocess
     tracked = subprocess.run(
         ["git", "ls-files"], capture_output=True, text=True, cwd=tmp_path
     ).stdout.splitlines()
     assert "index.html" in tracked
+    assert ".gitignore" in tracked
     assert ".env" not in tracked
+    ignore_text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "# >>> RockCore managed ignores >>>" in ignore_text
+    assert "__pycache__/" in ignore_text
+    assert "node_modules/" in ignore_text
+
+
+def test_repository_bootstrap_ignores_generated_code_artifacts(tmp_path):
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    (cache / "main.cpython-313.pyc").write_bytes(b"generated")
+    dependency = tmp_path / "node_modules" / "demo"
+    dependency.mkdir(parents=True)
+    (dependency / "index.js").write_text("generated", encoding="utf-8")
+
+    result = Repository(str(tmp_path)).ensure_initialized()
+    tracked = Repository(str(tmp_path))._run("ls-files").stdout.splitlines()
+
+    assert result["status"] == "initialized"
+    assert "main.py" in tracked
+    assert not any("__pycache__" in path for path in tracked)
+    assert not any("node_modules" in path for path in tracked)
+
+
+def test_existing_repository_gets_idempotent_managed_ignore_block(tmp_path):
+    repository = Repository(str(tmp_path))
+    repository._run("init", "-b", "main")
+    repository._run("config", "user.name", "RockCore Test")
+    repository._run("config", "user.email", "test@rockcore.local")
+    (tmp_path / ".gitignore").write_bytes(b"custom-output/\r\n")
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    repository._run("add", "-A")
+    repository._run("commit", "-m", "baseline")
+
+    first = repository.ensure_initialized()
+    first_bytes = (tmp_path / ".gitignore").read_bytes()
+    second = repository.ensure_initialized()
+
+    assert first["status"] == "existing"
+    assert first["gitignore_updated"]
+    assert not second["gitignore_updated"]
+    assert (tmp_path / ".gitignore").read_bytes() == first_bytes
+    assert first_bytes.startswith(b"custom-output/\r\n")
+    assert first_bytes.count(ROCKCORE_IGNORE_START.encode()) == 1
 
 
 def test_non_git_git_acceptance_uses_snapshot_and_local_html_validation(tmp_path):

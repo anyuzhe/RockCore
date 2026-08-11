@@ -3,5 +3,42 @@ dist/
 release/
 build/version_info.generated.txt
 .test_project/
+
+# >>> RockCore managed ignores >>>
+# Python bytecode and tool caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local dependencies and virtual environments
+.venv/
+venv/
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+
+# Local secrets, logs, OS and editor temporary files
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# RockCore runtime isolation
+.ai/worktrees/
+# <<< RockCore managed ignores <<<
