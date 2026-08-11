@@ -899,12 +899,13 @@ class Engine:
                     "Project has unresolved Git conflicts: "
                     + ", ".join(unmerged_files[:8])
                 )
-                repos["job"].update_status(job.job_id, "failed")
+                repos["job"].update_status(job.job_id, "needs_attention")
                 self._store_job_failure(repos, job.job_id, error)
                 self.state_machine.transition(job.job_id, JobState.GOVERNING)
-                self.state_machine.transition(job.job_id, JobState.FAILED)
+                self.state_machine.transition(job.job_id, JobState.WAITING_USER)
                 await self.event_bus.publish(
-                    "job_failed", job_id=job.job_id, error=error
+                    "job_needs_attention", job_id=job.job_id, reason=error,
+                    failure_stage="git_conflict",
                 )
                 return
             self.merge_manager = MergeManager(project_root)
@@ -1083,7 +1084,7 @@ class Engine:
                 # ── Phase 2: Planner ──
                 if proj_config.planner.enabled:
                     await self._run_planner(job, repos, proj_config)
-                    if job.status == "failed":
+                    if job.status in {"failed", "needs_attention"}:
                         if worker and saved_turns is not None:
                             worker.max_turns = saved_turns
                         return
@@ -1434,31 +1435,61 @@ class Engine:
                 plan_data = self._direct_plan_data(job, repos, proj_config)
                 self._assign_plan_skills(plan_data)
 
-        plan = repos["plan"].create(
-            job_id=job.id,
-            summary=plan_data.get("summary", ""),
-            raw_output=plan_data,
-        )
-
         # Validate plan against constitution
         self.state_machine.transition(job.job_id, JobState.PLAN_CHECK)
         errors = self.policy_engine.check_task_plan(
             plan_data, {"protected_paths": protected_paths}
         )
-        repos["plan"].update_validation(plan.id, validated=len(errors) == 0, errors=errors)
+        if errors and not any(
+            marker in str(error).lower()
+            for error in errors
+            for marker in (
+                "protected_path", "contains traversal", "must be relative"
+            )
+        ):
+            original_errors = list(errors)
+            fallback_plan = self._direct_plan_data(job, repos, proj_config)
+            self._assign_plan_skills(fallback_plan)
+            fallback_errors = self.policy_engine.check_task_plan(
+                fallback_plan, {"protected_paths": protected_paths}
+            )
+            if not fallback_errors:
+                used_fallback = True
+                plan_data = fallback_plan
+                errors = []
+                await self.event_bus.publish(
+                    "plan_recovered",
+                    job_id=job.job_id,
+                    errors=original_errors,
+                    strategy="direct_single_task",
+                )
+
+        plan = repos["plan"].create(
+            job_id=job.id,
+            summary=plan_data.get("summary", ""),
+            raw_output=plan_data,
+        )
+        repos["plan"].update_validation(
+            plan.id, validated=len(errors) == 0, errors=errors
+        )
 
         if errors:
-            logger.error(f"Plan validation failed: {errors}")
-            repos["job"].update_status(job.job_id, "failed")
+            logger.warning(f"Plan validation needs user attention: {errors}")
+            repos["job"].update_status(job.job_id, "needs_attention")
             self._store_job_failure(
                 repos, job.job_id, f"Plan validation failed: {errors[0]}"
             )
-            self.state_machine.transition(job.job_id, JobState.FAILED)
+            self.state_machine.transition(job.job_id, JobState.WAITING_USER)
             await self.event_bus.publish("plan_rejected", job_id=job.job_id, errors=errors)
             await self.event_bus.publish("phase_summary",
                 phase="planner", agent_type="planner", status="rejected",
-                summary=f"计划验证失败：{errors[0][:80] if errors else '未知错误'}",
+                summary=f"计划需要调整：{errors[0][:80] if errors else '未知错误'}",
                 details={"errors": errors},
+            )
+            await self.event_bus.publish(
+                "job_needs_attention", job_id=job.job_id,
+                reason=f"计划需要调整：{errors[0]}",
+                failure_stage="plan_validation",
             )
             return
 
@@ -2177,16 +2208,29 @@ class Engine:
                     project_root=job.project.root_path if job.project else ".",
                 )
                 if result.get("status") != "passed":
-                    repos["task"].update_status_by_pk(t.id, "failed")
+                    reason = str(
+                        result.get("output")
+                        or result.get("error")
+                        or "Local validation did not pass"
+                    )
+                    continuation = {
+                        "status": "needs_continuation",
+                        "error": reason,
+                        "failure_stage": "validation_continuation",
+                        "checkpoint": {"validation": result},
+                    }
+                    repos["task"].update_status_by_pk(t.id, "interrupted")
                     self._checkpoint_task(
-                        repos, job, t, status="failed", result=result,
-                        error=result.get("output", "Local validation failed"),
+                        repos, job, t, status="interrupted",
+                        result=continuation, error=reason,
                     )
                     await self.event_bus.publish(
-                        "task_failed", job_id=job.job_id, task_id=task_id,
-                        error=result.get("output", "Local validation failed"),
+                        "task_needs_continuation", job_id=job.job_id,
+                        task_id=task_id, reason=reason,
+                        failure_stage="validation_continuation",
+                        checkpoint=continuation["checkpoint"],
                     )
-                    raise RuntimeError(result.get("output", "Local validation failed"))
+                    return continuation
                 repos["task"].update_status_by_pk(t.id, "done")
                 self._checkpoint_task(
                     repos, job, t, status="done", result=result
@@ -2215,18 +2259,25 @@ class Engine:
                         wt_result.get("error") or "Unknown Git worktree error"
                     )
                     error = f"Git isolation failed during {phase}: {detail}"
-                    logger.error("Task %s: %s", task_id, error)
-                    repos["task"].update_status_by_pk(t.id, "failed")
+                    logger.warning("Task %s: %s", task_id, error)
+                    continuation = {
+                        "status": "needs_continuation",
+                        "error": error,
+                        "failure_stage": "worktree_create",
+                        "checkpoint": {"integration": wt_result},
+                    }
+                    repos["task"].update_status_by_pk(t.id, "interrupted")
                     self._checkpoint_task(
-                        repos, job, t, status="failed", result=wt_result,
-                        error=error,
+                        repos, job, t, status="interrupted",
+                        result=continuation, error=error,
                     )
                     await self.event_bus.publish(
-                        "task_failed", job_id=job.job_id, task_id=task_id,
-                        error=error, failure_stage="worktree_create",
-                        integration=wt_result,
+                        "task_needs_continuation", job_id=job.job_id,
+                        task_id=task_id, reason=error,
+                        failure_stage="worktree_create",
+                        checkpoint=continuation["checkpoint"],
                     )
-                    raise RuntimeError(error)
+                    return continuation
                 else:
                     has_worktree = True
                     task_worktree_root = wt_result.get("path", job.project.root_path if job.project else ".")
@@ -2305,8 +2356,6 @@ class Engine:
             else:
                 t._rockcore_document_profile = None
                 t._rockcore_artifact_manifest = None
-                if complexity == "simple":
-                    task_worker.max_turns = min(task_worker.max_turns, 18)
                 t._rockcore_input_budget = int(budget["input_budget"])
             t._rockcore_max_auto_input_budget = int(
                 self.model_router.cost_engine.get_budget(
@@ -2384,7 +2433,11 @@ class Engine:
                 # Preserve the isolated worktree and its checkpoint. A follow-up
                 # job receives a unique worktree and the saved continuation data.
                 if has_worktree:
-                    self.merge_manager.preserve_worktree(task_id)
+                    preserve = getattr(
+                        self.merge_manager, "preserve_worktree", None
+                    )
+                    if callable(preserve):
+                        preserve(task_id)
                 return result
 
             if result and result.get("status") in {
@@ -2430,21 +2483,38 @@ class Engine:
                             else "Analysis task produced no report"
                         )
                     )
-                    logger.error(
+                    logger.warning(
                         f"Task {task_id}: {t.task_type} task completed without "
-                        "its required output — marking failed"
+                        "its required output — preserving it for continuation"
                     )
-                    repos["task"].update_status_by_pk(t.id, "failed")
+                    continuation = {
+                        "status": "needs_continuation",
+                        "error": error,
+                        "failure_stage": "missing_required_output",
+                        "checkpoint": {
+                            "changes": task_changes,
+                            "worker_result": worker_result,
+                        },
+                    }
+                    repos["task"].update_status_by_pk(t.id, "interrupted")
                     self._checkpoint_task(
-                        repos, job, t, status="failed", result=result,
-                        error=error,
+                        repos, job, t, status="interrupted",
+                        result=continuation, error=error,
                     )
-                    await self.event_bus.publish("task_failed", job_id=job.job_id,
-                                                  task_id=task_id,
-                                                  error=error)
+                    await self.event_bus.publish(
+                        "task_needs_continuation", job_id=job.job_id,
+                        task_id=task_id, reason=error,
+                        failure_stage="missing_required_output",
+                        checkpoint=continuation["checkpoint"],
+                        worktree_path=(task_worktree_root if has_worktree else ""),
+                    )
                     if has_worktree:
-                        await self.merge_manager.abort_worktree(task_id)
-                    raise RuntimeError(f"Task {task_id} failed: {error}")
+                        preserve = getattr(
+                            self.merge_manager, "preserve_worktree", None
+                        )
+                        if callable(preserve):
+                            preserve(task_id)
+                    return continuation
 
                 if (
                     recovered_for_validation
@@ -2486,6 +2556,60 @@ class Engine:
                             task_id, test_result.get("output", "failed"),
                         )
 
+                if not test_passed and t.task_type in {"coding", "testing"}:
+                    validation_detail = str(
+                        (test_result or {}).get("output")
+                        or (test_result or {}).get("error")
+                        or "Validation failed"
+                    )
+                    await self.event_bus.publish(
+                        "task_validation_repairing",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        validation=validation_detail[:1200],
+                    )
+                    repair_result = await task_worker.run(
+                        t,
+                        project_root=task_worktree_root,
+                        recovery_context=(
+                            "Deterministic acceptance validation failed after "
+                            "the implementation. Repair only the concrete failure "
+                            "below, preserve useful changes, and rerun a focused "
+                            "check before finishing.\nValidation output:\n"
+                            + validation_detail[:2400]
+                        ),
+                    )
+                    if (
+                        isinstance(repair_result, dict)
+                        and repair_result.get("status") == "completed"
+                    ):
+                        result = {"status": "completed", "result": repair_result}
+                        worker_result = repair_result
+                        task_output = str(
+                            repair_result.get("content")
+                            or repair_result.get("output")
+                            or task_output
+                        ).strip()
+                        has_file_changes = await self._check_file_changes(
+                            task_worktree_root, task_baseline
+                        )
+                        task_changes = self.test_manager.snapshot_diff(
+                            task_worktree_root, task_baseline
+                        )
+                        if t.acceptance_command:
+                            test_result = await self.test_manager.run_tests(
+                                t, repos, self.event_bus,
+                                baseline_snapshot=task_baseline,
+                                project_root=task_worktree_root,
+                            )
+                        else:
+                            test_result = await self.test_manager.validate_project(
+                                t, repos, self.event_bus,
+                                baseline_snapshot=task_baseline,
+                                project_root=task_worktree_root,
+                            )
+                        test_passed = test_result.get("status") == "passed"
+
                 if test_passed:
                     # Merge worktree back
                     if has_worktree and has_file_changes:
@@ -2518,7 +2642,11 @@ class Engine:
                                 checkpoint=continuation["checkpoint"],
                                 worktree_path=merge_result.get("worktree_path", ""),
                             )
-                            self.merge_manager.preserve_worktree(task_id)
+                            preserve = getattr(
+                                self.merge_manager, "preserve_worktree", None
+                            )
+                            if callable(preserve):
+                                preserve(task_id)
                             return continuation
                         if merge_result.get("status") != "merged":
                             conflicts = merge_result.get("conflicts") or []
@@ -2536,6 +2664,36 @@ class Engine:
                             error = f"Git integration failed during {phase}: {detail}"
                             if merge_result.get("preserved") and preserved_path:
                                 error += f"; worktree preserved at {preserved_path}"
+                                continuation = {
+                                    "status": "needs_continuation",
+                                    "error": error,
+                                    "failure_stage": "git_integration",
+                                    "checkpoint": {
+                                        "changes": task_changes,
+                                        "integration": merge_result,
+                                    },
+                                }
+                                repos["task"].update_status_by_pk(
+                                    t.id, "interrupted"
+                                )
+                                self._checkpoint_task(
+                                    repos, job, t, status="interrupted",
+                                    result=continuation, error=error,
+                                )
+                                await self.event_bus.publish(
+                                    "task_needs_continuation",
+                                    job_id=job.job_id, task_id=task_id,
+                                    reason=error,
+                                    failure_stage="git_integration",
+                                    checkpoint=continuation["checkpoint"],
+                                    worktree_path=preserved_path,
+                                )
+                                preserve = getattr(
+                                    self.merge_manager, "preserve_worktree", None
+                                )
+                                if callable(preserve):
+                                    preserve(task_id)
+                                return continuation
                             repos["task"].update_status_by_pk(t.id, "failed")
                             self._checkpoint_task(
                                 repos, job, t, status="failed",
@@ -2583,55 +2741,48 @@ class Engine:
                     completed_task_results[task_id] = result_payload
                     return result_payload
                 else:
-                    if recovered_for_validation:
-                        continuation = {
-                            "status": "needs_continuation",
-                            "error": (
-                                "Generated artifact validation did not pass; "
-                                "the worktree and checkpoint were preserved"
-                            ),
-                            "failure_stage": "validation_continuation",
-                            "checkpoint": {
-                                "changes": task_changes,
-                                "validation": "failed",
-                            },
-                        }
-                        repos["task"].update_status_by_pk(t.id, "interrupted")
-                        self._checkpoint_task(
-                            repos, job, t, status="interrupted",
-                            result=continuation,
-                            error=continuation["error"],
-                        )
-                        await self.event_bus.publish(
-                            "task_needs_continuation",
-                            job_id=job.job_id,
-                            task_id=task_id,
-                            reason=continuation["error"],
-                            failure_stage="validation_continuation",
-                            checkpoint=continuation["checkpoint"],
-                            worktree_path=(
-                                task_worktree_root if has_worktree else ""
-                            ),
-                        )
-                        if has_worktree:
-                            self.merge_manager.preserve_worktree(task_id)
-                        return continuation
-                    repos["task"].update_status_by_pk(t.id, "failed")
+                    validation_detail = str(
+                        (test_result or {}).get("output")
+                        or (test_result or {}).get("error")
+                        or "Acceptance validation did not pass"
+                    )
+                    continuation = {
+                        "status": "needs_continuation",
+                        "error": (
+                            "Generated changes did not pass validation; the "
+                            "worktree and checkpoint were preserved for a "
+                            "focused repair. " + validation_detail[:1200]
+                        ),
+                        "failure_stage": "validation_continuation",
+                        "checkpoint": {
+                            "changes": task_changes,
+                            "validation": test_result or {"status": "failed"},
+                            "recovered_from_model_limit": recovered_for_validation,
+                        },
+                    }
+                    repos["task"].update_status_by_pk(t.id, "interrupted")
                     self._checkpoint_task(
-                        repos, job, t, status="failed", result=result,
-                        error="Acceptance test failed",
+                        repos, job, t, status="interrupted",
+                        result=continuation,
+                        error=continuation["error"],
                     )
                     await self.event_bus.publish(
-                        "task_failed", job_id=job.job_id,
+                        "task_needs_continuation", job_id=job.job_id,
                         task_id=task_id,
-                        error="Acceptance test failed",
-                        failure_stage="validation",
+                        reason=continuation["error"],
+                        failure_stage="validation_continuation",
+                        checkpoint=continuation["checkpoint"],
+                        worktree_path=(
+                            task_worktree_root if has_worktree else ""
+                        ),
                     )
                     if has_worktree:
-                        await self.merge_manager.abort_worktree(task_id)
-                    raise RuntimeError(
-                        f"Task {task_id} failed: acceptance test did not pass"
-                    )
+                        preserve = getattr(
+                            self.merge_manager, "preserve_worktree", None
+                        )
+                        if callable(preserve):
+                            preserve(task_id)
+                    return continuation
             else:
                 repos["task"].update_status_by_pk(t.id, "failed")
                 failure_stage = (
@@ -3023,7 +3174,12 @@ class Engine:
                 if result and result.get("error"):
                     last_error = str(result["error"])
                     if self._is_user_input_required(last_error):
-                        return {"status": "failed", "error": last_error}
+                        return {
+                            "status": "needs_continuation",
+                            "error": last_error,
+                            "failure_stage": "user_input_required",
+                            "checkpoint": {"reason": last_error},
+                        }
                     if self._is_budget_error(last_error):
                         if await extend_after_budget(last_error, attempt):
                             continue
@@ -3040,7 +3196,9 @@ class Engine:
                                     job, task, last_error, repos
                                 )
                             except BudgetExceededError as error:
-                                return {"status": "failed", "error": str(error)}
+                                return await pending_validation_or_failure(
+                                    str(error)
+                                )
                             if repair_plan:
                                 await self._apply_repair_plan_paths(
                                     task, job, repos, repair_plan
@@ -3138,7 +3296,12 @@ class Engine:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
                 if self._is_user_input_required(last_error):
-                    return {"status": "failed", "error": last_error}
+                    return {
+                        "status": "needs_continuation",
+                        "error": last_error,
+                        "failure_stage": "user_input_required",
+                        "checkpoint": {"reason": last_error},
+                    }
                 if self._is_budget_error(last_error):
                     if await extend_after_budget(last_error, attempt):
                         continue
@@ -3240,6 +3403,21 @@ class Engine:
                         task, "_rockcore_document_progress", {}
                     ),
                 },
+            }
+
+        if (
+            self._is_provider_capability_error(last_error)
+            or self._is_provider_unavailable(last_error)
+            or self._is_stalled_worker_error(last_error)
+            or self._is_task_path_mismatch(last_error)
+            or "ended without editing files" in last_error.lower()
+            or "tool_payload_truncated" in last_error.lower()
+        ):
+            return {
+                "status": "needs_continuation",
+                "error": last_error,
+                "failure_stage": "execution_continuation",
+                "checkpoint": {"reason": last_error},
             }
 
         # Non-budget/model failures with no usable artifact remain failures.
@@ -3420,6 +3598,7 @@ class Engine:
         return (
             "no_progress:" in normalized
             or "repeated_tool_failure:" in normalized
+            or "tool_payload_truncated:" in normalized
         )
 
     @staticmethod
@@ -3449,6 +3628,9 @@ class Engine:
             "error code: 503", "error code: 504",
             "invalid response", "malformed response", "expected a json object",
             "missing credentials", "credentials were not found", "api key",
+            "not found the model", "model not found",
+            "resource_not_found_error", "permission denied",
+            "error code: 404", "status code: 404",
         )
         return any(marker in normalized for marker in markers)
 
@@ -4013,19 +4195,14 @@ class Engine:
         """Persist and publish a review failure with an actionable explanation."""
         if self._is_cancelled(job.job_id, job, repos):
             return
-        has_completed_work = any(
-            task.status == "done"
-            for task in repos["task"].list_by_job(job.id)
-        )
-        repos["job"].update_status(
-            job.job_id,
-            "needs_attention" if has_completed_work else "failed",
-        )
+        repos["job"].update_status(job.job_id, "needs_attention")
         self._store_job_failure(repos, job.job_id, reason)
-        if self.state_machine.get_state(job.job_id) != JobState.FAILED:
-            if not self.state_machine.transition(job.job_id, JobState.FAILED):
+        if self.state_machine.get_state(job.job_id) != JobState.WAITING_USER:
+            if not self.state_machine.transition(
+                job.job_id, JobState.WAITING_USER
+            ):
                 logger.warning(
-                    "Could not transition %s to FAILED from %s",
+                    "Could not transition %s to WAITING_USER from %s",
                     job.job_id,
                     self.state_machine.get_state(job.job_id).name,
                 )
@@ -4040,7 +4217,9 @@ class Engine:
             repair_round=repair_round,
         )
         await self.event_bus.publish(
-            "job_failed", job_id=job.job_id, error=reason
+            "job_needs_attention", job_id=job.job_id, reason=reason,
+            failure_stage="review_repair_incomplete",
+            repair_round=repair_round,
         )
 
     @staticmethod

@@ -748,7 +748,8 @@ def test_escalation_does_not_retry_a_user_input_requirement(tmp_path):
             _task(), SimpleNamespace(job_id="JOB-DOC"), {}, worker, str(tmp_path)
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "needs_continuation"
+        assert result["failure_stage"] == "user_input_required"
         assert worker.calls == 1
 
     asyncio.run(scenario())

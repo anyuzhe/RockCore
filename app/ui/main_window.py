@@ -1058,7 +1058,14 @@ class MainWindow(QMainWindow):
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
             self.task_panel.append_stage_output(
                 "worker",
-                "产物已生成；模型预算在收尾阶段耗尽，正在进行确定性验收",
+                "产物已生成，正在优先进行确定性验收",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_validation_repairing" and is_selected:
+            self.bridge.task_update.emit(data.get("task_id", ""), "running")
+            self.task_panel.append_stage_output(
+                "worker",
+                f"{data.get('task_id', '')} 验收未通过，正在自动进行一次聚焦修复",
                 repair_round=task_repair_round,
             )
         elif event_type == "document_finalization_started" and is_selected:
@@ -1079,10 +1086,10 @@ class MainWindow(QMainWindow):
                 f"{data.get('task_id', '')} Token 达到 85%，已保存执行进度",
                 repair_round=task_repair_round,
             )
-        elif event_type == "task_budget_finalizing" and is_selected:
-            self.task_panel.update_stage(
-                "worker", "running",
-                f"{data.get('task_id', '')} Token 达到 92%，正在停止探索并收尾",
+        elif event_type == "task_budget_pressure" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"{data.get('task_id', '')} Token 达到 92% 软额度，继续聚焦执行并自动扩容",
                 repair_round=task_repair_round,
             )
         elif event_type in {

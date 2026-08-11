@@ -258,7 +258,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 4
+    config_version: int = 5
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -273,8 +273,8 @@ class ProjectAgentConfig:
     ))
     worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(
         enabled=True, provider="deepseek", model="deepseek-v4-flash",
-        reasoning_effort="default", max_turns=24,
-        max_exploration_turns=4, patch_recovery_turns=2, retry_count=2,
+        reasoning_effort="default", max_turns=32,
+        max_exploration_turns=6, patch_recovery_turns=2, retry_count=2,
         emergency_after_failures=3, fallback_provider="kimi",
         fallback_model="kimi-k2.7",
     ))
@@ -289,14 +289,14 @@ class ProjectAgentConfig:
 
     # ── Per-complexity turn overrides ──
     complexity_turns: dict[str, int] = field(default_factory=lambda: {
-        "simple": 16,
-        "normal": 24,
-        "complex": 36,
+        "simple": 20,
+        "normal": 32,
+        "complex": 48,
     })
     complexity_exploration: dict[str, int] = field(default_factory=lambda: {
-        "simple": 4,
-        "normal": 6,
-        "complex": 8,
+        "simple": 6,
+        "normal": 8,
+        "complex": 10,
     })
 
     # ── Features ──
@@ -337,8 +337,27 @@ class ProjectAgentConfig:
         cfg.mcp = MCPConfig.from_dict(data.get("mcp"))
         if source_version < 2:
             cfg._upgrade_legacy_recommendations()
-        cfg.config_version = 4
+        if source_version < 5:
+            cfg._upgrade_completion_limits()
+        cfg.config_version = 5
         return cfg
+
+    def _upgrade_completion_limits(self):
+        """Raise former built-in ceilings without overwriting custom values."""
+        if self.worker.max_turns == 24:
+            self.worker.max_turns = 32
+        if self.worker.max_exploration_turns == 4:
+            self.worker.max_exploration_turns = 6
+        old_turns = {"simple": 16, "normal": 24, "complex": 36}
+        new_turns = {"simple": 20, "normal": 32, "complex": 48}
+        for level, old_value in old_turns.items():
+            if self.complexity_turns.get(level) == old_value:
+                self.complexity_turns[level] = new_turns[level]
+        old_exploration = {"simple": 4, "normal": 6, "complex": 8}
+        new_exploration = {"simple": 6, "normal": 8, "complex": 10}
+        for level, old_value in old_exploration.items():
+            if self.complexity_exploration.get(level) == old_value:
+                self.complexity_exploration[level] = new_exploration[level]
 
     def _upgrade_legacy_recommendations(self):
         """Upgrade only the former built-in defaults, not arbitrary choices."""
@@ -424,10 +443,10 @@ class ProjectAgentConfig:
             mode="standard",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=8),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=24, max_exploration_turns=4, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=32, max_exploration_turns=6, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
-            complexity_turns={"simple": 16, "normal": 24, "complex": 32},
+            complexity_turns={"simple": 20, "normal": 32, "complex": 48},
             continuation_context=True,
             auto_validation=True,
             auto_repair=True,

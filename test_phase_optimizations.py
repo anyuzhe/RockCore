@@ -441,7 +441,7 @@ def test_review_failure_after_completed_work_is_needs_attention(tmp_path):
             repos["_session"].refresh(job)
             assert job.status == "needs_attention"
             assert job.failure_reason.startswith("The final check")
-            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
+            assert engine.state_machine.get_state(job.job_id) == JobState.WAITING_USER
         finally:
             repos["_session"].close()
 

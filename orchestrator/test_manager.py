@@ -34,7 +34,7 @@ VALID_TEST_COMMANDS = {
 class TestManager:
     """Manages test execution for task acceptance criteria."""
 
-    DEFAULT_TIMEOUT = 120
+    DEFAULT_TIMEOUT = 300
     SNAPSHOT_IGNORES = {".git", ".ai/worktrees", "node_modules", ".venv", "venv", "__pycache__"}
 
     @staticmethod
@@ -255,7 +255,9 @@ class TestManager:
             }
         except subprocess.TimeoutExpired:
             repos["test_run"].update_result(
-                tr.id, 0, 0, 0, "Timeout (120s)", 120000, "failed"
+                tr.id, 0, 0, 0,
+                f"Timeout ({self.DEFAULT_TIMEOUT}s)",
+                self.DEFAULT_TIMEOUT * 1000, "failed"
             )
             if event_bus:
                 await event_bus.publish(

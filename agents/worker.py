@@ -34,7 +34,7 @@ EXPLORATION_TOOLS = {
     "list_files", "read_file", "read_pdf", "read_docx", "read_pptx",
     "search_in_file", "search_code", "git_status", "git_diff", "read_log",
 }
-MAX_CONVERSATION_CHARS = 14_000
+MAX_CONVERSATION_CHARS = 24_000
 MAX_TOOL_CONTENT_CHARS = 12_000
 CODING_OUTPUT_TOKENS = 12_288
 FOLLOWUP_OUTPUT_TOKENS = 8_192
@@ -232,6 +232,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         pending_document_pages: dict[str, int] = {}
         repeated_errors: dict[str, int] = {}
         truncated_tool_failures = 0
+        exploration_warning_sent = False
         no_progress_turns = 0
         stall_warning_sent = False
         allow_no_change = self._allows_no_change(task)
@@ -266,25 +267,25 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 )
                 token_ratio = effective_input / task_limit
                 if token_ratio >= 0.92 and not token_finalization_sent:
-                    budget_finalization_mode = True
-                    task._rockcore_finalization_mode = True
                     messages.append({
                         "role": "user",
                         "content": (
-                            "Token usage reached 92% of the current task soft "
-                            "allocation. Enter finalization now: do not read or "
-                            "search again, preserve existing work, run at most one "
-                            "focused verification, and return the result."
+                            "Token usage reached 92% of the current soft task "
+                            "allocation. The router may expand this soft limit. "
+                            "Keep work focused and preserve progress, but continue "
+                            "the necessary reads, edits, and verification needed to "
+                            "finish correctly."
                         ),
                     })
                     token_finalization_sent = True
                     if self.model_router.event_bus:
                         await self.model_router.event_bus.publish(
-                            "task_budget_finalizing",
+                            "task_budget_pressure",
                             job_id=job_id,
                             task_id=task.task_id,
                             used_tokens=effective_input,
                             task_input_budget=task_limit,
+                            hard_blocked=False,
                         )
                 elif token_ratio >= 0.85 and not token_checkpoint_sent:
                     messages.append({
@@ -350,10 +351,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     progress_warning_sent = True
 
                 compact_limit = (
-                    6_000 if token_ratio >= 0.92
-                    else 9_000 if token_ratio >= 0.85
-                    else 14_000 if token_ratio >= 0.70
-                    else 26_000 if is_document_task
+                    12_000 if token_ratio >= 0.92
+                    else 16_000 if token_ratio >= 0.85
+                    else 20_000 if token_ratio >= 0.70
+                    else 32_000 if is_document_task
                     else MAX_CONVERSATION_CHARS
                 )
                 messages = self._compact_messages(messages, max_chars=compact_limit)
@@ -715,25 +716,6 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         }
                         exploration_blocked = True
                     elif (
-                        task.task_type in {"coding", "analysis", "review", "action"}
-                        and is_exploration
-                        and exploration_calls >= (
-                            self.max_exploration_turns + (2 if has_written else 0)
-                        )
-                    ):
-                        result = {
-                            "status": "rejected",
-                            "error": (
-                            "Exploration budget exhausted. Stop reading and return "
-                            "the concrete report now."
-                            if task.task_type in {"analysis", "review"}
-                            else
-                            "Exploration budget exhausted. Use write_file, "
-                            "apply_patch, insert_before, or insert_after now."
-                            ),
-                        }
-                        exploration_blocked = True
-                    elif (
                         is_mutating_mcp
                         and external_signature in external_action_signatures
                     ):
@@ -832,6 +814,21 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
                             meaningful_progress = True
+                            if (
+                                exploration_calls >= self.max_exploration_turns
+                                and not exploration_warning_sent
+                            ):
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "The suggested exploration allowance has "
+                                        "been reached. It is a soft threshold, not "
+                                        "a ban: continue any new, necessary read, "
+                                        "but avoid repeating searches and move to "
+                                        "the concrete edit or report promptly."
+                                    ),
+                                })
+                                exploration_warning_sent = True
                         if (
                             is_mutating_mcp
                             and result.get("status") not in {"error", "rejected"}
@@ -963,7 +960,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         for path, page in sorted(pending_document_pages.items())
                     )
                 return {
-                    "status": "failed",
+                    "status": "needs_continuation",
                     "error": (
                         f"Max turns ({self.max_turns}) reached{unread_detail}"
                     ),
