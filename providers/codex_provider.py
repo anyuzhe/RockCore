@@ -190,9 +190,22 @@ def _configured_codex_candidates(value: str, environment: dict) -> list[str]:
     if not expanded:
         return []
     path = Path(expanded).expanduser()
-    if path.is_file() and path.name.lower() not in {"code.exe", "chatgpt.exe"}:
+    normalized = "/" + expanded.replace("\\", "/").lower().lstrip("/")
+    is_store_codex_gui = (
+        path.name.lower() == "codex.exe"
+        and path.parent.name.lower() == "app"
+        and "/windowsapps/openai.codex_" in normalized
+    )
+    if path.is_file() and path.name.lower() not in {
+        "code.exe", "chatgpt.exe",
+    } and not is_store_codex_gui:
         return [str(path)]
     if path.suffix.lower() in {".exe", ".cmd", ".bat", ".ps1"}:
+        if is_store_codex_gui:
+            return [
+                str(path.parent / "resources" / "codex.exe"),
+                str(path.parent.parent / "resources" / "codex.exe"),
+            ]
         if path.name.lower() in {"code.exe", "chatgpt.exe"}:
             # These are installation hints, not valid Codex launchers. Prefer
             # the real sibling/resource CLI and never execute the GUI/editor.
@@ -260,7 +273,6 @@ def _windows_store_codex_candidates(environment: dict) -> list[str]:
         candidates.extend([
             str(root / "app" / "resources" / "codex.exe"),
             str(root / "resources" / "codex.exe"),
-            str(root / "app" / "codex.exe"),
         ])
     return candidates
 
@@ -281,6 +293,10 @@ def _windows_codex_install_candidates(environment: dict) -> list[str]:
         for name in ("codex.cmd", "codex.exe", "codex.ps1")
     ])
     candidates.extend([
+        str(
+            Path(localappdata) / "Programs" / "OpenAI" / "Codex"
+            / "bin" / "codex.exe"
+        ) if localappdata else "",
         str(Path(localappdata) / "Programs" / "ChatGPT" / "resources" / "codex.exe")
         if localappdata else "",
         str(Path(localappdata) / "Programs" / "ChatGPT" / "codex.exe")
@@ -299,6 +315,23 @@ def _windows_codex_install_candidates(environment: dict) -> list[str]:
         str(Path(userprofile) / ".local" / "bin" / "codex.exe")
         if userprofile else "",
     ])
+
+    # The Windows desktop app exposes its native agent in a user-accessible,
+    # versioned cache.  Package-internal copies under Program Files\WindowsApps
+    # are ACL-protected, while this cache is the executable used by the app.
+    if localappdata:
+        app_bin_root = Path(localappdata) / "OpenAI" / "Codex" / "bin"
+        try:
+            app_bin_versions = [
+                entry for entry in app_bin_root.iterdir() if entry.is_dir()
+            ]
+            app_bin_versions.sort(
+                key=lambda entry: entry.stat().st_mtime_ns, reverse=True
+            )
+        except OSError:
+            app_bin_versions = []
+        for version_dir in app_bin_versions[:16]:
+            candidates.append(str(version_dir / "codex.exe"))
 
     # Codex/ChatGPT editor extensions contain their own native CLI. These are
     # common on machines where the user is logged in but npm's global `codex`
@@ -334,6 +367,7 @@ def _windows_codex_install_candidates(environment: dict) -> list[str]:
     if localappdata:
         local = Path(localappdata)
         recursive_roots.extend([
+            local / "Programs" / "OpenAI" / "Codex",
             local / "Programs" / "ChatGPT",
             local / "Programs" / "Codex",
             local / "ChatGPT",
@@ -360,9 +394,9 @@ def _windows_codex_install_candidates(environment: dict) -> list[str]:
     return candidates
 
 
-def _find_codex_binary(environ: dict | None = None,
-                       configured_binary: str = "") -> str:
-    """Find Codex even when a desktop launch did not inherit the shell PATH."""
+def _codex_binary_candidates(environ: dict | None = None,
+                             configured_binary: str = "") -> list[str]:
+    """Return accessible Codex launchers in deterministic priority order."""
     environment = os.environ if environ is None else environ
     candidates = [
         *_configured_codex_candidates(configured_binary, environment),
@@ -386,26 +420,40 @@ def _find_codex_binary(environ: dict | None = None,
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
         ])
+    results: list[str] = []
+    seen: set[str] = set()
     for candidate in candidates:
         if not candidate:
             continue
         expanded = _expand_binary_path(str(candidate), environment)
         path = Path(expanded).expanduser()
-        protected_store_executable = (
-            windows_environment
-            and path.name.lower() == "codex.exe"
-            and path.suffix.lower() == ".exe"
-            and "/program files/windowsapps/" in (
-                "/" + expanded.replace("\\", "/").lower().lstrip("/")
-            )
-        )
-        if not path.is_file() and not protected_store_executable:
+        key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        if key in seen:
+            continue
+        seen.add(key)
+        # Store package contents can appear in PATH/Appx metadata while still
+        # rejecting ordinary Win32 callers with WinError 5.  Do not accept a
+        # protected path that cannot pass a real filesystem accessibility check.
+        try:
+            is_file = path.is_file()
+        except OSError:
+            is_file = False
+        if not is_file:
             continue
         if windows_environment or path.suffix.lower() in {
             ".exe", ".cmd", ".bat", ".ps1",
         } or os.access(path, os.X_OK):
-            return str(path)
-    return ""
+            results.append(str(path))
+    return results
+
+
+def _find_codex_binary(environ: dict | None = None,
+                       configured_binary: str = "") -> str:
+    """Find Codex even when a desktop launch did not inherit the shell PATH."""
+    candidates = _codex_binary_candidates(
+        environ, configured_binary=configured_binary
+    )
+    return candidates[0] if candidates else ""
 
 
 def _prepare_codex_command(binary: str, arguments: list[str],
@@ -444,55 +492,64 @@ def _detect_chatgpt_login(
     environment = os.environ if environ is None else environ
     codex_home = _resolve_codex_home(auth_path, environment)
     selected_auth_path = Path(auth_path) if auth_path else codex_home / "auth.json"
-    binary = _find_codex_binary(
+    binaries = _codex_binary_candidates(
         environment, configured_binary=configured_binary
     )
-    if not binary:
+    if not binaries:
         detail = (
-            "已找到 auth.json，但未找到 Codex CLI；请安装 Codex CLI，"
-            "或在设置中选择 codex.exe/codex.cmd"
+            "已找到 auth.json，但未找到可执行的 Codex CLI；请安装独立 Codex CLI，"
+            "或在设置中选择可执行的 codex.exe/codex.cmd"
             if selected_auth_path.exists()
-            else "未找到 Codex CLI 或 ChatGPT 登录"
+            else "未找到可执行的 Codex CLI 或 ChatGPT 登录"
         )
         return False, detail, ""
 
     run = runner or run_process
     process_environment = utf8_environment(environment)
     process_environment["CODEX_HOME"] = str(codex_home)
-    try:
-        command = _prepare_codex_command(
-            binary, ["login", "status"], environ=environment
-        )
-        result = run(
-            command,
-            capture_output=True,
-            timeout=CODEX_LOGIN_STATUS_TIMEOUT,
-            creationflags=no_window_creation_flags(),
-            env=process_environment,
-        )
-        stdout = decode_process_output(getattr(result, "stdout", ""))
-        stderr = decode_process_output(getattr(result, "stderr", ""))
-        output = f"{stdout}\n{stderr}".strip()
-        normalized = output.lower()
-        returncode = int(getattr(result, "returncode", 1) or 0)
-        login_hint = _auth_file_login_hint(selected_auth_path)
-        if returncode == 0 and (
-            "chatgpt" in normalized or login_hint == "chatgpt"
-        ):
-            return True, "codex login status: ChatGPT", binary
-        if returncode == 0 and output:
-            return False, f"codex login status: {output[:120]}", binary
-        if output:
-            return False, f"codex login status failed: {output[:120]}", binary
-        return False, f"codex login status failed (exit {returncode})", binary
-    except subprocess.TimeoutExpired as error:
-        logger.warning("Codex login status timed out: %s", error)
-        return False, (
-            f"codex login status timed out after {CODEX_LOGIN_STATUS_TIMEOUT}s"
-        ), binary
-    except (OSError, subprocess.SubprocessError) as error:
-        logger.warning("Failed to query Codex login status: %s", error)
-        return False, f"codex login status unavailable: {error}", binary
+    launch_errors: list[tuple[str, Exception]] = []
+    for binary in binaries:
+        try:
+            command = _prepare_codex_command(
+                binary, ["login", "status"], environ=environment
+            )
+            result = run(
+                command,
+                capture_output=True,
+                timeout=CODEX_LOGIN_STATUS_TIMEOUT,
+                creationflags=no_window_creation_flags(),
+                env=process_environment,
+            )
+            stdout = decode_process_output(getattr(result, "stdout", ""))
+            stderr = decode_process_output(getattr(result, "stderr", ""))
+            output = f"{stdout}\n{stderr}".strip()
+            normalized = output.lower()
+            returncode = int(getattr(result, "returncode", 1) or 0)
+            login_hint = _auth_file_login_hint(selected_auth_path)
+            if returncode == 0 and (
+                "chatgpt" in normalized or login_hint == "chatgpt"
+            ):
+                return True, "codex login status: ChatGPT", binary
+            if returncode == 0 and output:
+                return False, f"codex login status: {output[:120]}", binary
+            if output:
+                return False, f"codex login status failed: {output[:120]}", binary
+            return False, f"codex login status failed (exit {returncode})", binary
+        except subprocess.TimeoutExpired as error:
+            logger.warning("Codex login status timed out: %s", error)
+            return False, (
+                f"codex login status timed out after {CODEX_LOGIN_STATUS_TIMEOUT}s"
+            ), binary
+        except (OSError, subprocess.SubprocessError) as error:
+            # A stale configured path or protected Store package must not mask
+            # a later standalone/npm/editor CLI that is actually executable.
+            logger.warning(
+                "Failed to query Codex login status via %s: %s", binary, error
+            )
+            launch_errors.append((binary, error))
+
+    failed_binary, error = launch_errors[-1]
+    return False, f"codex login status unavailable: {error}", failed_binary
 
 
 def get_codex_auth_status(

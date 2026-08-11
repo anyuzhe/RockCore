@@ -149,6 +149,44 @@ def test_chatgpt_probe_reports_timeout_instead_of_claiming_no_login(tmp_path):
     assert binary == sys.executable
 
 
+def test_chatgpt_probe_skips_unlaunchable_binary_and_uses_next_candidate(
+    tmp_path,
+):
+    configured = tmp_path / "Store App" / "codex.exe"
+    configured.parent.mkdir(parents=True)
+    configured.write_bytes(b"MZ")
+    appdata = tmp_path / "AppData" / "Roaming"
+    launcher = appdata / "npm" / "codex.cmd"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("@echo off\r\n", encoding="utf-8")
+    attempts = []
+
+    def runner(command, **_kwargs):
+        attempts.append(command)
+        if len(attempts) == 1:
+            raise PermissionError(5, "Access is denied")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Logged in using ChatGPT\n",
+            stderr="",
+        )
+
+    authenticated, source, binary = _detect_chatgpt_login(
+        environ={
+            "APPDATA": str(appdata),
+            "COMSPEC": r"C:\Windows\System32\cmd.exe",
+            "PATH": "",
+        },
+        runner=runner,
+        configured_binary=str(configured),
+    )
+
+    assert authenticated
+    assert source == "codex login status: ChatGPT"
+    assert binary == str(launcher)
+    assert len(attempts) == 2
+
+
 def test_provider_uses_codex_exec_for_chatgpt_login(tmp_path):
     def runner(*args, **kwargs):
         return SimpleNamespace(

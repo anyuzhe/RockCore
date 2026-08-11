@@ -174,6 +174,46 @@ def test_codex_binary_is_found_in_windows_local_npm_directory(
     assert binary == str(launcher)
 
 
+def test_codex_binary_is_found_in_official_windows_standalone_directory(
+    tmp_path, monkeypatch,
+):
+    localappdata = tmp_path / "User Data" / "Local"
+    executable = (
+        localappdata / "Programs" / "OpenAI" / "Codex"
+        / "bin" / "codex.exe"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+    monkeypatch.setattr(codex_module.sys, "platform", "win32")
+
+    binary = _find_codex_binary({
+        "LOCALAPPDATA": str(localappdata),
+        "PATH": "",
+    })
+
+    assert binary == str(executable)
+
+
+def test_codex_binary_is_found_in_windows_desktop_app_cache(
+    tmp_path, monkeypatch,
+):
+    localappdata = tmp_path / "User Data" / "Local"
+    executable = (
+        localappdata / "OpenAI" / "Codex" / "bin" / "version-hash"
+        / "codex.exe"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+    monkeypatch.setattr(codex_module.sys, "platform", "win32")
+
+    binary = _find_codex_binary({
+        "LOCALAPPDATA": str(localappdata),
+        "PATH": "",
+    })
+
+    assert binary == str(executable)
+
+
 def test_codex_binary_is_found_inside_vscode_chatgpt_extension(tmp_path):
     userprofile = tmp_path / "Work station"
     executable = (
@@ -219,6 +259,38 @@ def test_configured_store_package_root_resolves_bundled_codex(tmp_path):
     )
 
     assert binary == str(executable)
+
+
+def test_configured_store_codex_gui_resolves_resource_cli(tmp_path):
+    package_root = (
+        tmp_path / "Program Files" / "WindowsApps"
+        / "OpenAI.Codex_26.803.10989.0_x64__2p2nqsd0c76g0"
+    )
+    gui = package_root / "app" / "Codex.exe"
+    executable = package_root / "app" / "resources" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    gui.write_bytes(b"MZ")
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(gui)
+    )
+
+    assert binary == str(executable)
+
+
+def test_inaccessible_store_path_is_not_assumed_to_be_executable(tmp_path):
+    executable = (
+        tmp_path / "Program Files" / "WindowsApps"
+        / "OpenAI.Codex_26.803.10989.0_x64__2p2nqsd0c76g0"
+        / "app" / "resources" / "codex.exe"
+    )
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(executable)
+    )
+
+    assert binary == ""
 
 
 def test_configured_chatgpt_exe_resolves_resource_codex_not_gui(tmp_path):
