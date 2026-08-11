@@ -29,6 +29,7 @@ CODEX_HOME = Path(os.path.expandvars(os.fspath(
 AUTH_PATH = CODEX_HOME / "auth.json"
 CONFIG_PATH = CODEX_HOME / "config.toml"
 REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+CODEX_LOGIN_STATUS_TIMEOUT = 20
 
 
 def _load_codex_runtime_config(config_path: Path | None = None) -> dict:
@@ -106,6 +107,40 @@ def _load_codex_token(auth_path: Path | None = None,
     return _load_platform_api_key(auth_path=auth_path, environ=environ)
 
 
+def _resolve_codex_home(auth_path: Path | None = None,
+                        environ: dict | None = None) -> Path:
+    """Resolve the Codex state directory selected by RockCore's settings."""
+    environment = os.environ if environ is None else environ
+    if auth_path is not None:
+        expanded = os.path.expandvars(os.fspath(auth_path))
+        return Path(expanded).expanduser().parent
+    configured = environment.get("CODEX_HOME", "")
+    if configured:
+        return Path(os.path.expandvars(configured)).expanduser()
+    return Path.home() / ".codex"
+
+
+def _auth_file_login_hint(auth_path: Path) -> str:
+    """Inspect only auth structure, never return or reuse credential values."""
+    try:
+        auth = json.loads(auth_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return ""
+    if not isinstance(auth, dict):
+        return ""
+    if auth.get("OPENAI_API_KEY"):
+        return "api_key"
+    auth_mode = str(auth.get("auth_mode", "") or "").lower()
+    if "chatgpt" in auth_mode:
+        return "chatgpt"
+    tokens = auth.get("tokens")
+    if isinstance(tokens, dict) and any(
+        name in tokens for name in ("access_token", "refresh_token", "id_token")
+    ):
+        return "chatgpt"
+    return ""
+
+
 def _find_codex_binary(environ: dict | None = None) -> str:
     """Find Codex even when a desktop launch did not inherit the shell PATH."""
     environment = os.environ if environ is None else environ
@@ -113,6 +148,8 @@ def _find_codex_binary(environ: dict | None = None) -> str:
     candidates = [
         configured,
         shutil.which("codex", path=environment.get("PATH")),
+        shutil.which("codex.cmd", path=environment.get("PATH")),
+        shutil.which("codex.exe", path=environment.get("PATH")),
     ]
     windows_environment = sys.platform == "win32" or any(
         environment.get(name) for name in ("APPDATA", "LOCALAPPDATA")
@@ -121,13 +158,29 @@ def _find_codex_binary(environ: dict | None = None) -> str:
         appdata = environment.get("APPDATA", "")
         localappdata = environment.get("LOCALAPPDATA", "")
         userprofile = environment.get("USERPROFILE", "")
+        programfiles = environment.get("ProgramFiles", "")
+        programfiles_x86 = environment.get("ProgramFiles(x86)", "")
         candidates.extend([
             str(Path(appdata) / "npm" / "codex.cmd") if appdata else "",
             str(Path(appdata) / "npm" / "codex.exe") if appdata else "",
+            str(Path(localappdata) / "npm" / "codex.cmd") if localappdata else "",
+            str(Path(localappdata) / "npm" / "codex.exe") if localappdata else "",
             str(Path(localappdata) / "Programs" / "ChatGPT" / "resources" / "codex.exe")
+            if localappdata else "",
+            str(Path(localappdata) / "Programs" / "ChatGPT" / "codex.exe")
+            if localappdata else "",
+            str(Path(localappdata) / "Programs" / "Codex" / "codex.exe")
             if localappdata else "",
             str(Path(localappdata) / "Microsoft" / "WindowsApps" / "codex.exe")
             if localappdata else "",
+            str(Path(programfiles) / "nodejs" / "codex.cmd")
+            if programfiles else "",
+            str(Path(programfiles_x86) / "nodejs" / "codex.cmd")
+            if programfiles_x86 else "",
+            str(Path(userprofile) / ".codex" / "bin" / "codex.exe")
+            if userprofile else "",
+            str(Path(userprofile) / ".codex" / "bin" / "codex.cmd")
+            if userprofile else "",
             str(Path(userprofile) / ".local" / "bin" / "codex.exe")
             if userprofile else "",
         ])
@@ -183,11 +236,20 @@ def _detect_chatgpt_login(
 ) -> tuple[bool, str, str]:
     """Ask Codex which login mode is active without reading or exposing tokens."""
     environment = os.environ if environ is None else environ
-    binary = _find_codex_binary(environ)
+    codex_home = _resolve_codex_home(auth_path, environment)
+    selected_auth_path = Path(auth_path) if auth_path else codex_home / "auth.json"
+    binary = _find_codex_binary(environment)
     if not binary:
-        return False, "codex CLI unavailable", ""
+        detail = (
+            "auth.json exists, but Codex CLI was not found"
+            if selected_auth_path.exists()
+            else "codex CLI unavailable"
+        )
+        return False, detail, ""
 
     run = runner or run_process
+    process_environment = utf8_environment(environment)
+    process_environment["CODEX_HOME"] = str(codex_home)
     try:
         command = _prepare_codex_command(
             binary, ["login", "status"], environ=environment
@@ -195,19 +257,33 @@ def _detect_chatgpt_login(
         result = run(
             command,
             capture_output=True,
-            timeout=5,
+            timeout=CODEX_LOGIN_STATUS_TIMEOUT,
             creationflags=no_window_creation_flags(),
+            env=process_environment,
         )
-        output = f"{getattr(result, 'stdout', '')}\n{getattr(result, 'stderr', '')}".strip()
+        stdout = decode_process_output(getattr(result, "stdout", ""))
+        stderr = decode_process_output(getattr(result, "stderr", ""))
+        output = f"{stdout}\n{stderr}".strip()
         normalized = output.lower()
-        if getattr(result, "returncode", 1) == 0 and "chatgpt" in normalized:
+        returncode = int(getattr(result, "returncode", 1) or 0)
+        login_hint = _auth_file_login_hint(selected_auth_path)
+        if returncode == 0 and (
+            "chatgpt" in normalized or login_hint == "chatgpt"
+        ):
             return True, "codex login status: ChatGPT", binary
-        if getattr(result, "returncode", 1) == 0 and output:
+        if returncode == 0 and output:
             return False, f"codex login status: {output[:120]}", binary
-        return False, "codex login status: not logged in", binary
+        if output:
+            return False, f"codex login status failed: {output[:120]}", binary
+        return False, f"codex login status failed (exit {returncode})", binary
+    except subprocess.TimeoutExpired as error:
+        logger.warning("Codex login status timed out: %s", error)
+        return False, (
+            f"codex login status timed out after {CODEX_LOGIN_STATUS_TIMEOUT}s"
+        ), binary
     except (OSError, subprocess.SubprocessError) as error:
         logger.warning("Failed to query Codex login status: %s", error)
-        return False, "codex login status unavailable", binary
+        return False, f"codex login status unavailable: {error}", binary
 
 
 def get_codex_auth_status(
@@ -236,8 +312,9 @@ def get_codex_auth_status(
         mode = "unavailable"
         source = "unavailable"
 
-    path = auth_path or AUTH_PATH
-    runtime = _load_codex_runtime_config()
+    codex_home = _resolve_codex_home(auth_path, environ)
+    path = Path(auth_path) if auth_path else codex_home / "auth.json"
+    runtime = _load_codex_runtime_config(codex_home / "config.toml")
     proxy, proxy_source = _detect_proxy(environ)
     return {
         "authenticated": mode != "unavailable",
@@ -276,7 +353,8 @@ class CodexProvider(BaseProvider):
         login_status_runner: Callable[..., Any] | None = None,
     ):
         super().__init__(config or {})
-        runtime = _load_codex_runtime_config()
+        codex_home = _resolve_codex_home(auth_path, environ)
+        runtime = _load_codex_runtime_config(codex_home / "config.toml")
         configured_key = str(self.config.get("api_key", "") or "").strip()
         detected_key, detected_source = _load_platform_api_key(
             auth_path=auth_path, environ=environ
@@ -294,6 +372,7 @@ class CodexProvider(BaseProvider):
         self._process_environment = utf8_environment(
             None if environ is None else environ
         )
+        self._process_environment["CODEX_HOME"] = str(codex_home)
         if self.api_key:
             self.authentication_mode = "platform_api"
             self.auth_source = self.platform_api_source

@@ -61,14 +61,26 @@ class GitTools:
     async def commit(self, message: str) -> dict:
         """Stage all and commit."""
         try:
-            run_process(["git", "add", "-A"], capture_output=True,
-                           cwd=self.project_root)
+            stage = run_process(
+                ["git", "add", "-A"], capture_output=True, text=True,
+                cwd=self.project_root,
+            )
+            if stage.returncode != 0:
+                return {
+                    "error": self._process_error(stage),
+                    "status": "failed",
+                    "phase": "stage",
+                }
             result = run_process(
                 ["git", "commit", "-m", message],
                 capture_output=True, text=True, cwd=self.project_root
             )
             if result.returncode != 0:
-                return {"error": result.stderr, "status": "failed"}
+                return {
+                    "error": self._process_error(result),
+                    "status": "failed",
+                    "phase": "commit",
+                }
             return {"hash": result.stdout.strip(), "status": "committed"}
         except Exception as e:
             return {"error": str(e), "status": "failed"}
@@ -123,26 +135,64 @@ class GitTools:
     async def merge_branch(self, source_branch: str, target_branch: str = "main") -> dict:
         """Merge source_branch into target_branch."""
         try:
-            # Checkout target
-            run_process(
+            checkout = run_process(
                 ["git", "checkout", target_branch],
                 capture_output=True, text=True, cwd=self.project_root
             )
-            # Merge source
+            if checkout.returncode != 0:
+                return {
+                    "status": "failed",
+                    "phase": "checkout_target",
+                    "error": self._process_error(checkout),
+                    "branch": source_branch,
+                    "into": target_branch,
+                }
+            merge_head = run_process(
+                ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                capture_output=True, text=True, cwd=self.project_root,
+            )
+            if merge_head.returncode == 0:
+                return {
+                    "status": "failed",
+                    "phase": "merge_preflight",
+                    "error": "Target repository already has an in-progress merge",
+                    "branch": source_branch,
+                    "into": target_branch,
+                }
             result = run_process(
                 ["git", "merge", source_branch, "--no-edit"],
                 capture_output=True, text=True, cwd=self.project_root
             )
             if result.returncode != 0:
-                # Conflict detected
+                conflicts = self._detect_conflicts()
+                active_merge = run_process(
+                    ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                    capture_output=True, text=True, cwd=self.project_root,
+                )
+                merge_aborted = False
+                if active_merge.returncode == 0:
+                    abort_result = run_process(
+                        ["git", "merge", "--abort"],
+                        capture_output=True, text=True, cwd=self.project_root,
+                    )
+                    merge_aborted = abort_result.returncode == 0
                 return {
-                    "status": "conflict",
-                    "error": result.stderr,
-                    "conflicts": self._detect_conflicts(),
+                    "status": "conflict" if conflicts else "failed",
+                    "phase": "merge",
+                    "error": self._process_error(result),
+                    "conflicts": conflicts,
+                    "branch": source_branch,
+                    "into": target_branch,
+                    "target_merge_aborted": merge_aborted,
                 }
-            return {"status": "merged", "branch": source_branch, "into": target_branch}
+            return {
+                "status": "merged",
+                "branch": source_branch,
+                "into": target_branch,
+                "output": self._process_error(result),
+            }
         except Exception as e:
-            return {"error": str(e), "status": "failed"}
+            return {"error": str(e), "status": "failed", "phase": "merge"}
 
     async def delete_branch(self, branch_name: str) -> dict:
         """Delete a local branch."""
@@ -167,3 +217,10 @@ class GitTools:
             return [f.strip() for f in result.stdout.split("\n") if f.strip()]
         except Exception:
             return []
+
+    @staticmethod
+    def _process_error(result: Any) -> str:
+        """Return useful Git output for both stdout-only and stderr failures."""
+        stdout = str(getattr(result, "stdout", "") or "").strip()
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        return "\n".join(part for part in (stderr, stdout) if part)

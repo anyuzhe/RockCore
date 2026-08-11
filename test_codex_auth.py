@@ -2,10 +2,12 @@
 
 import asyncio
 import json
+import subprocess
 import sys
 from types import SimpleNamespace
 
 from providers.codex_provider import (
+    CODEX_LOGIN_STATUS_TIMEOUT,
     CodexProvider,
     _detect_chatgpt_login,
     _detect_proxy,
@@ -72,6 +74,53 @@ def test_chatgpt_login_is_detected_through_codex_status_without_reading_token():
 
     assert authenticated
     assert source == "codex login status: ChatGPT"
+    assert binary == sys.executable
+
+
+def test_chatgpt_probe_and_exec_use_selected_codex_home(tmp_path):
+    codex_home = tmp_path / "Windows 用户" / ".codex"
+    codex_home.mkdir(parents=True)
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text(json.dumps({
+        "tokens": {"access_token": "must-never-be-reused-as-api-key"}
+    }))
+    captured = {}
+
+    def runner(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="已登录", stderr="")
+
+    provider = CodexProvider(
+        {},
+        auth_path=auth_path,
+        environ={"CODEX_BINARY": sys.executable, "PATH": ""},
+        login_status_runner=runner,
+    )
+
+    assert provider.authentication_mode == "chatgpt_cli"
+    assert provider.api_key == ""
+    assert captured["env"]["CODEX_HOME"] == str(codex_home)
+    assert captured["timeout"] == CODEX_LOGIN_STATUS_TIMEOUT
+    assert provider._process_environment["CODEX_HOME"] == str(codex_home)
+    assert "must-never" not in provider.chatgpt_source
+
+
+def test_chatgpt_probe_reports_timeout_instead_of_claiming_no_login(tmp_path):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"access_token": "secret"}}))
+
+    def runner(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    authenticated, source, binary = _detect_chatgpt_login(
+        auth_path=auth_path,
+        environ={"CODEX_BINARY": sys.executable, "PATH": ""},
+        runner=runner,
+    )
+
+    assert not authenticated
+    assert "timed out" in source
+    assert str(CODEX_LOGIN_STATUS_TIMEOUT) in source
     assert binary == sys.executable
 
 

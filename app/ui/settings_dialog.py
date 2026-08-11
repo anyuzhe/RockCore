@@ -206,7 +206,8 @@ class SettingsDialog(QDialog):
             )
         else:
             self.codex_chatgpt_status.setText(
-                "✗ 未检测到 ChatGPT 登录 · 请运行 codex login"
+                "✗ ChatGPT 登录不可用 · "
+                + auth_status["chatgpt_source"]
             )
             self.codex_chatgpt_status.setStyleSheet(
                 "color: #f44336; font-weight: bold; padding: 8px;"
@@ -249,7 +250,7 @@ class SettingsDialog(QDialog):
             f"Codex CLI：{auth_status['codex_binary'] or '未找到'}\n"
             f"代理：{auth_status['proxy_source']}\n"
             f"认证文件：{auth_path}\n"
-            "Windows 会自动查找 PATH 和 %APPDATA%\\npm\\codex.cmd；"
+            "Windows 会自动查找 PATH、npm、WindowsApps 与 Codex/ChatGPT 安装目录；"
             "自定义位置可设置 CODEX_BINARY。"
         )
         info_label.setStyleSheet("color: #888; padding: 4px 8px;")

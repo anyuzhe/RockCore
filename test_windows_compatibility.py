@@ -157,6 +157,23 @@ def test_windows_command_arguments_quote_paths_with_spaces():
     assert quoted == r'"C:\Program Files\Python 311\python.exe"'
 
 
+def test_codex_binary_is_found_in_windows_local_npm_directory(
+    tmp_path, monkeypatch,
+):
+    localappdata = tmp_path / "用户资料" / "Local"
+    launcher = localappdata / "npm" / "codex.cmd"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(codex_module.sys, "platform", "win32")
+
+    binary = _find_codex_binary({
+        "LOCALAPPDATA": str(localappdata),
+        "PATH": "",
+    })
+
+    assert binary == str(launcher)
+
+
 def test_gb18030_project_file_is_read_without_mojibake(tmp_path):
     source = tmp_path / "旧项目.txt"
     source.write_bytes("中文内容：兼容 Windows".encode("gb18030"))

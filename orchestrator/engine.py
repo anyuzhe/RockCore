@@ -1686,6 +1686,7 @@ class Engine:
             result = await self._execute_single_task_with_escalation(
                 t, job, repos, task_worker, task_worktree_root
             )
+            integration_result = None
 
             if result and result.get("status") == "completed":
                 # Coding tasks must edit files. Read-only report tasks instead
@@ -1767,12 +1768,23 @@ class Engine:
                     if has_worktree and has_file_changes:
                         merge_msg = f"AI {job.job_id}: {task_id} - {t.title}"
                         merge_result = await self.merge_manager.commit_and_merge(task_id, merge_msg)
+                        integration_result = merge_result
                         if merge_result.get("status") != "merged":
                             conflicts = merge_result.get("conflicts") or []
-                            error = merge_result.get("error") or merge_result.get("message")
+                            phase = str(merge_result.get("phase") or "merge")
+                            detail = (
+                                merge_result.get("error")
+                                or merge_result.get("message")
+                                or "Task changes could not be integrated"
+                            )
                             if conflicts:
-                                error = f"Merge conflict: {', '.join(conflicts)}"
-                            error = error or "Task changes could not be merged"
+                                detail = f"Merge conflict: {', '.join(conflicts)}"
+                            preserved_path = str(
+                                merge_result.get("worktree_path") or ""
+                            )
+                            error = f"Git integration failed during {phase}: {detail}"
+                            if merge_result.get("preserved") and preserved_path:
+                                error += f"; worktree preserved at {preserved_path}"
                             repos["task"].update_status_by_pk(t.id, "failed")
                             self._checkpoint_task(
                                 repos, job, t, status="failed",
@@ -1780,9 +1792,9 @@ class Engine:
                             )
                             await self.event_bus.publish(
                                 "task_failed", job_id=job.job_id, task_id=task_id,
-                                error=error,
+                                error=error, failure_stage="git_integration",
+                                integration=merge_result,
                             )
-                            await self.merge_manager.abort_worktree(task_id)
                             raise RuntimeError(error)
                     elif has_worktree:
                         # A successful read-only analysis has nothing to merge,
@@ -1791,6 +1803,8 @@ class Engine:
                     repos["task"].update_status_by_pk(t.id, "done")
                     result_payload = dict(result)
                     result_payload["changes"] = task_changes
+                    if integration_result:
+                        result_payload["integration"] = integration_result
                     if declared_no_changes:
                         result_payload["no_changes"] = True
                     if task_output:

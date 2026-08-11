@@ -57,14 +57,14 @@ class MergeManager:
         except (OSError, ValueError):
             return set()
 
-    def _unstage_input_assets(self, worktree_path: str) -> None:
+    def _unstage_input_assets(self, worktree_path: str) -> tuple[bool, str]:
         """Keep pre-existing untracked PDFs/media out of Worker commits."""
         present_assets = [
             path for path in sorted(self._untracked_input_assets)
             if (Path(worktree_path) / path).is_file()
         ]
         if not present_assets:
-            return
+            return True, ""
         result = run_process(
             [
                 "git", "reset", "-q", "HEAD", "--",
@@ -73,10 +73,11 @@ class MergeManager:
             capture_output=True, text=True, cwd=worktree_path,
         )
         if result.returncode != 0:
-            logger.warning(
-                "Could not unstage source assets in %s: %s",
-                worktree_path, result.stderr.strip(),
-            )
+            error = self._process_output(result)
+            logger.warning("Could not unstage source assets in %s: %s",
+                           worktree_path, error)
+            return False, error
+        return True, ""
 
     def _copy_untracked_input_assets(self, worktree_path: str) -> None:
         """Make local source documents readable inside an isolated worktree."""
@@ -134,36 +135,124 @@ class MergeManager:
         branch = wt_info["branch"]
 
         try:
-            # Stage and commit in worktree
-            run_process(
+            stage_result = run_process(
                 ["git", "add", "-A"],
                 capture_output=True, text=True, cwd=wt_path,
             )
-            self._unstage_input_assets(wt_path)
+            if stage_result.returncode != 0:
+                return self._integration_failure(
+                    task_id, "stage", self._process_output(stage_result)
+                )
+
+            assets_unstaged, unstage_error = self._unstage_input_assets(wt_path)
+            if not assets_unstaged:
+                return self._integration_failure(
+                    task_id, "unstage_input_assets", unstage_error
+                )
+
+            staged_result = run_process(
+                ["git", "diff", "--cached", "--name-only", "-z"],
+                capture_output=True, text=True, cwd=wt_path,
+            )
+            if staged_result.returncode != 0:
+                return self._integration_failure(
+                    task_id, "inspect_staged", self._process_output(staged_result)
+                )
+            staged_paths = [
+                item for item in staged_result.stdout.split("\0") if item
+            ]
+            if not staged_paths:
+                return self._integration_failure(
+                    task_id,
+                    "commit",
+                    "No task output remained staged after excluding input assets",
+                )
+
+            identity_error = self._ensure_git_identity(wt_path)
+            if identity_error:
+                return self._integration_failure(
+                    task_id, "git_identity", identity_error
+                )
+
             commit_result = run_process(
                 ["git", "commit", "-m", commit_message],
                 capture_output=True, text=True, cwd=wt_path,
             )
-            if commit_result.returncode != 0 and "nothing to commit" not in commit_result.stderr:
-                if "nothing to commit" not in commit_result.stdout:
-                    logger.warning(f"Commit warning for {task_id}: {commit_result.stderr}")
+            if commit_result.returncode != 0:
+                return self._integration_failure(
+                    task_id, "commit", self._process_output(commit_result)
+                )
 
-            # Merge back to main repo
+            commit_hash_result = run_process(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, cwd=wt_path,
+            )
+            if commit_hash_result.returncode != 0:
+                return self._integration_failure(
+                    task_id, "resolve_commit",
+                    self._process_output(commit_hash_result),
+                )
+            commit_hash = commit_hash_result.stdout.strip()
+
             merge_result = await self.git_tools.merge_branch(branch, self.target_branch)
             if merge_result.get("status") == "conflict":
                 return await self._handle_conflict(task_id, merge_result)
+            if merge_result.get("status") != "merged":
+                return self._integration_failure(
+                    task_id,
+                    str(merge_result.get("phase") or "merge"),
+                    str(merge_result.get("error") or "Git merge failed"),
+                    details=merge_result,
+                )
 
-            # Clean up worktree
-            await self.git_tools.remove_worktree(wt_path)
-            await self.git_tools.delete_branch(branch)
-            wt_info["status"] = "merged"
-            self._active_worktrees.pop(task_id, None)
+            verify_result = run_process(
+                [
+                    "git", "merge-base", "--is-ancestor",
+                    commit_hash, self.target_branch,
+                ],
+                capture_output=True, text=True, cwd=self.project_root,
+            )
+            if verify_result.returncode != 0:
+                return self._integration_failure(
+                    task_id,
+                    "verify_merge",
+                    self._process_output(verify_result)
+                    or f"Commit {commit_hash} is not reachable from {self.target_branch}",
+                    details={"commit": commit_hash},
+                )
 
-            return {"status": "merged", "task_id": task_id, "branch": branch}
+            cleanup_warnings = []
+            remove_result = await self.git_tools.remove_worktree(wt_path)
+            if remove_result.get("status") == "removed":
+                delete_result = await self.git_tools.delete_branch(branch)
+                if delete_result.get("status") != "deleted":
+                    cleanup_warnings.append(
+                        "Branch cleanup failed: "
+                        + str(delete_result.get("error") or branch)
+                    )
+                wt_info["status"] = "merged"
+                self._active_worktrees.pop(task_id, None)
+            else:
+                wt_info["status"] = "merged_cleanup_pending"
+                cleanup_warnings.append(
+                    "Worktree cleanup failed: "
+                    + str(remove_result.get("error") or wt_path)
+                )
+
+            return {
+                "status": "merged",
+                "task_id": task_id,
+                "branch": branch,
+                "into": self.target_branch,
+                "commit": commit_hash,
+                "staged_paths": staged_paths,
+                "verified": True,
+                "cleanup_warnings": cleanup_warnings,
+            }
 
         except Exception as e:
             logger.error(f"Merge failed for {task_id}: {e}")
-            return {"error": str(e), "status": "failed", "task_id": task_id}
+            return self._integration_failure(task_id, "unexpected", str(e))
 
     async def _handle_conflict(self, task_id: str, merge_result: dict) -> dict:
         """Handle merge conflicts — flag for user resolution."""
@@ -176,24 +265,71 @@ class MergeManager:
             "status": "conflict",
             "task_id": task_id,
             "branch": wt_info.get("branch", ""),
+            "worktree_path": wt_info.get("path", ""),
+            "phase": "merge",
             "conflicts": conflicts,
+            "error": merge_result.get("error", ""),
+            "target_merge_aborted": merge_result.get("target_merge_aborted", False),
+            "preserved": True,
             "message": "Merge conflicts detected — manual resolution required",
         }
+
+    def _ensure_git_identity(self, worktree_path: str) -> str:
+        """Ensure packaged Windows installs can create local task commits."""
+        defaults = {
+            "user.name": "RockCore",
+            "user.email": "rockcore@localhost",
+        }
+        for name, default in defaults.items():
+            current = run_process(
+                ["git", "config", "--local", "--get", name],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            if current.returncode == 0 and current.stdout.strip():
+                continue
+            configured = run_process(
+                ["git", "config", "--local", name, default],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            if configured.returncode != 0:
+                return self._process_output(configured) or (
+                    f"Could not configure local Git {name}"
+                )
+        return ""
+
+    def _integration_failure(self, task_id: str, phase: str, error: str,
+                             *, details: dict | None = None) -> dict:
+        """Keep the failed worktree intact and return an actionable diagnosis."""
+        wt_info = self._active_worktrees.get(task_id, {})
+        wt_info["status"] = "integration_failed"
+        result = {
+            "status": "failed",
+            "task_id": task_id,
+            "phase": phase,
+            "error": error or "Git integration failed",
+            "branch": wt_info.get("branch", ""),
+            "worktree_path": wt_info.get("path", ""),
+            "preserved": True,
+        }
+        if details:
+            result["details"] = details
+        logger.error(
+            "Git integration failed for %s during %s; preserved %s: %s",
+            task_id, phase, result["worktree_path"], result["error"],
+        )
+        return result
+
+    @staticmethod
+    def _process_output(result) -> str:
+        stderr = str(getattr(result, "stderr", "") or "").strip()
+        stdout = str(getattr(result, "stdout", "") or "").strip()
+        return "\n".join(part for part in (stderr, stdout) if part)
 
     async def abort_worktree(self, task_id: str) -> dict:
         """Abort and clean up a worktree without merging."""
         wt_info = self._active_worktrees.get(task_id)
         if not wt_info:
             return {"error": f"No active worktree for {task_id}", "status": "failed"}
-
-        try:
-            # Abort any in-progress merge
-            run_process(
-                ["git", "merge", "--abort"],
-                capture_output=True, text=True, cwd=self.project_root,
-            )
-        except Exception:
-            pass
 
         await self.git_tools.remove_worktree(wt_info["path"])
         await self.git_tools.delete_branch(wt_info["branch"])
