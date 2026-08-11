@@ -241,10 +241,13 @@ class SettingsDialog(QDialog):
         self.codex_binary_browse = QPushButton("选择…")
         self.codex_binary_browse.clicked.connect(self._browse_codex_binary)
         binary_field_layout.addWidget(self.codex_binary_browse)
+        self.codex_binary_probe = QPushButton("检测")
+        self.codex_binary_probe.clicked.connect(self._probe_codex_login)
+        binary_field_layout.addWidget(self.codex_binary_probe)
         cli_layout.addRow("Codex CLI：", binary_field)
         cli_note = QLabel(
             "RockCore 会自动查找 PATH、npm、ChatGPT/Codex 安装目录，以及 "
-            "VS Code、Cursor、Windsurf 扩展中的 Codex CLI。"
+            "VS Code、Cursor、Windsurf 扩展和 Microsoft Store Codex 包。"
         )
         cli_note.setWordWrap(True)
         cli_note.setStyleSheet("color: #888;")
@@ -279,7 +282,7 @@ class SettingsDialog(QDialog):
         self.codex_active_route.setStyleSheet("font-weight: bold; padding: 4px 8px;")
         codex_layout.addWidget(self.codex_active_route)
 
-        info_label = QLabel(
+        self.codex_info_label = QLabel(
             "两种认证互相独立：ChatGPT 登录不会被当作 API Key 发送到公共接口。\n"
             f"ChatGPT：{auth_status['chatgpt_source']}\n"
             f"Platform API：{auth_status['platform_api_source']}\n"
@@ -287,12 +290,12 @@ class SettingsDialog(QDialog):
             f"Codex CLI：{auth_status['codex_binary'] or '未找到'}\n"
             f"代理：{auth_status['proxy_source']}\n"
             f"认证文件：{auth_path}\n"
-            "auth.json 是登录凭据，Codex CLI 是执行组件；两者都可用时才能走 "
-            "ChatGPT 登录通道。"
+            "认证以 codex login status 为准；auth.json 可能不存在，因为 Codex "
+            "也可以把凭据保存到 Windows 凭据库。"
         )
-        info_label.setStyleSheet("color: #888; padding: 4px 8px;")
-        info_label.setWordWrap(True)
-        codex_layout.addWidget(info_label)
+        self.codex_info_label.setStyleSheet("color: #888; padding: 4px 8px;")
+        self.codex_info_label.setWordWrap(True)
+        codex_layout.addWidget(self.codex_info_label)
 
         codex_layout.addStretch()
         self.tabs.addTab(codex_widget, "Codex SDK")
@@ -437,6 +440,57 @@ class SettingsDialog(QDialog):
         )
         if selected:
             self.codex_binary.setText(selected)
+            self._probe_codex_login()
+
+    def _probe_codex_login(self):
+        """Re-check the current field values and refresh diagnostics in place."""
+        from providers.codex_provider import get_codex_auth_status
+
+        codex_home = Path(os.path.expandvars(os.fspath(
+            os.environ.get("CODEX_HOME", Path.home() / ".codex")
+        ))).expanduser()
+        status = get_codex_auth_status(
+            codex_home / "auth.json",
+            configured_api_key=self.codex_api_key.text().strip(),
+            configured_binary=self.codex_binary.text().strip(),
+        )
+        if status["chatgpt_authenticated"]:
+            self.codex_chatgpt_status.setText(
+                "✓ ChatGPT 登录有效 · 通过本机 codex exec 调用"
+            )
+            self.codex_chatgpt_status.setStyleSheet(
+                "color: #4CAF50; font-weight: bold; padding: 8px;"
+            )
+        else:
+            self.codex_chatgpt_status.setText(
+                "✗ ChatGPT 登录不可用 · " + status["chatgpt_source"]
+            )
+            self.codex_chatgpt_status.setStyleSheet(
+                "color: #f44336; font-weight: bold; padding: 8px;"
+            )
+        routes = {
+            "chatgpt_cli": "ChatGPT 登录 → 本机 codex exec",
+            "platform_api": "OPENAI_API_KEY → Platform API",
+            "unavailable": "不可用",
+        }
+        self.codex_active_route.setText(
+            f"当前通道：{routes[status['authentication_mode']]}"
+        )
+        self.codex_platform_status.setText(
+            "已配置 · 公共 Platform API 通道"
+            if status["platform_api_configured"]
+            else "未配置 · 不会调用公共 Platform API"
+        )
+        self.codex_info_label.setText(
+            "两种认证互相独立：ChatGPT 登录不会被当作 API Key 发送到公共接口。\n"
+            f"ChatGPT：{status['chatgpt_source']}\n"
+            f"Platform API：{status['platform_api_source']}\n"
+            f"Codex 模型：{status['model']}\n"
+            f"Codex CLI：{status['codex_binary'] or '未找到'}\n"
+            f"认证文件：{status['auth_path']}\n"
+            "认证以 codex login status 为准；auth.json 也可能由 Windows "
+            "凭据库替代。"
+        )
 
     def _save(self):
         self._config["kimi"] = {

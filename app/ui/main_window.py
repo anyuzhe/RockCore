@@ -1226,9 +1226,35 @@ class MainWindow(QMainWindow):
         if dialog.exec() == SettingsDialog.DialogCode.Accepted:
             self._config = dialog.get_config()
             self.engine.apply_runtime_config(self._config)
+            asyncio.ensure_future(self._reload_codex_provider())
             self.task_panel.log(
-                "预算、并发、角色路由和模型设置已更新；新密钥需要重启后加载",
+                "预算、并发、角色路由和模型设置已更新；正在重新检测 Codex 登录",
                 "log",
+            )
+
+    async def _reload_codex_provider(self):
+        """Apply Codex path/auth changes without requiring an app restart."""
+        from providers.codex_provider import CodexProvider
+
+        try:
+            provider = await asyncio.to_thread(
+                CodexProvider, dict(self._config.get("codex", {}))
+            )
+        except Exception as error:
+            self.task_panel.log(f"Codex 重新检测失败：{error}", "error")
+            return
+        for route in ("codex", "governor", "reviewer"):
+            self.engine.model_router.register_provider(route, provider)
+        if provider.is_authenticated:
+            self.task_panel.log(
+                "Codex 已热重载："
+                f"{provider.chatgpt_source} · {provider.codex_binary}",
+                "success",
+            )
+        else:
+            self.task_panel.log(
+                "Codex 仍不可用：" + provider.chatgpt_source,
+                "error",
             )
 
     def _switch_tab(self, name: str):

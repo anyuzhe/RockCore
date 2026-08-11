@@ -177,6 +177,9 @@ class ModelRouter:
 
     def register_provider(self, agent_type: str, provider: Any):
         self._providers[agent_type] = provider
+        # Reconfiguring credentials/binaries must immediately close any
+        # authentication circuit opened by the previous provider instance.
+        self._provider_health.pop(agent_type, None)
 
     def get_provider(self, agent_type: str) -> Any:
         provider = self._providers.get(agent_type)

@@ -6,6 +6,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+from orchestrator.model_router import ModelRouter
 from providers.codex_provider import (
     CODEX_LOGIN_STATUS_TIMEOUT,
     CodexProvider,
@@ -242,3 +243,18 @@ def test_environment_proxy_is_detected_without_exposing_credentials():
 
     assert proxy == "http://127.0.0.1:6864"
     assert source == "environment:HTTPS_PROXY"
+
+
+def test_reloading_codex_provider_clears_stale_auth_circuit():
+    router = ModelRouter()
+    router._provider_health["codex"] = {
+        "failures": 2,
+        "open_until": float("inf"),
+        "reason": "previous credentials failed",
+    }
+    provider = object()
+
+    router.register_provider("codex", provider)
+
+    assert router.get_provider("codex") is provider
+    assert "codex" not in router._provider_health

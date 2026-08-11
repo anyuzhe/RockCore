@@ -205,6 +205,90 @@ def test_configured_codex_binary_with_spaces_takes_precedence(tmp_path):
     assert binary == str(executable)
 
 
+def test_configured_store_package_root_resolves_bundled_codex(tmp_path):
+    package_root = (
+        tmp_path / "WindowsApps"
+        / "OpenAI.Codex_26.803.10989.0_x64__2p2nqsd0c76g0"
+    )
+    executable = package_root / "app" / "resources" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(package_root)
+    )
+
+    assert binary == str(executable)
+
+
+def test_configured_chatgpt_exe_resolves_resource_codex_not_gui(tmp_path):
+    app_dir = tmp_path / "OpenAI.Codex" / "app"
+    chatgpt = app_dir / "ChatGPT.exe"
+    executable = app_dir / "resources" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    chatgpt.write_bytes(b"MZ")
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(chatgpt)
+    )
+
+    assert binary == str(executable)
+
+
+def test_configured_code_exe_typo_resolves_sibling_codex(tmp_path):
+    resources = tmp_path / "OpenAI.Codex" / "app" / "resources"
+    resources.mkdir(parents=True)
+    wrong_name = resources / "code.exe"
+    executable = resources / "codex.exe"
+    wrong_name.write_bytes(b"MZ")
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(wrong_name)
+    )
+
+    assert binary == str(executable)
+
+
+def test_windows_store_package_is_discovered_via_appx_metadata(
+    tmp_path, monkeypatch,
+):
+    package_root = (
+        tmp_path / "Program Files" / "WindowsApps"
+        / "OpenAI.Codex_26.803.10989.0_x64__2p2nqsd0c76g0"
+    )
+    executable = package_root / "app" / "resources" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+    powershell = tmp_path / "powershell.exe"
+    powershell.write_bytes(b"MZ")
+
+    monkeypatch.setattr(codex_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        codex_module.shutil,
+        "which",
+        lambda name, **_kwargs: (
+            str(powershell) if "powershell" in name else None
+        ),
+    )
+
+    def fake_run(command, **_kwargs):
+        return codex_module.subprocess.CompletedProcess(
+            command, 0, stdout=f"{package_root}\n", stderr=""
+        )
+
+    monkeypatch.setattr(codex_module, "run_process", fake_run)
+
+    binary = _find_codex_binary({
+        "ProgramFiles": str(tmp_path / "Program Files"),
+        "USERPROFILE": str(tmp_path / "Work station"),
+        "PATH": "",
+    })
+
+    assert binary == str(executable)
+
+
 def test_gb18030_project_file_is_read_without_mojibake(tmp_path):
     source = tmp_path / "旧项目.txt"
     source.write_bytes("中文内容：兼容 Windows".encode("gb18030"))

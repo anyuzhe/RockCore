@@ -184,6 +184,87 @@ def _bounded_codex_search(root: Path, *, max_depth: int = 6,
     return results
 
 
+def _configured_codex_candidates(value: str, environment: dict) -> list[str]:
+    """Accept an executable, Store package root, or common code.exe typo."""
+    expanded = _expand_binary_path(value, environment)
+    if not expanded:
+        return []
+    path = Path(expanded).expanduser()
+    if path.is_file() and path.name.lower() not in {"code.exe", "chatgpt.exe"}:
+        return [str(path)]
+    if path.suffix.lower() in {".exe", ".cmd", ".bat", ".ps1"}:
+        if path.name.lower() in {"code.exe", "chatgpt.exe"}:
+            # These are installation hints, not valid Codex launchers. Prefer
+            # the real sibling/resource CLI and never execute the GUI/editor.
+            return [
+                str(path.with_name("codex.exe")),
+                str(path.parent / "resources" / "codex.exe"),
+                str(path.parent / "app" / "resources" / "codex.exe"),
+            ]
+        return [str(path)]
+    return [
+        str(path / "app" / "resources" / "codex.exe"),
+        str(path / "resources" / "codex.exe"),
+        str(path / "app" / "codex.exe"),
+        str(path / "codex.exe"),
+    ]
+
+
+def _windows_store_codex_candidates(environment: dict) -> list[str]:
+    """Resolve versioned Microsoft Store installs via Appx metadata."""
+    if sys.platform != "win32" and not environment.get("ProgramFiles"):
+        return []
+    powershell = (
+        shutil.which("pwsh", path=environment.get("PATH"))
+        or shutil.which("powershell.exe", path=environment.get("PATH"))
+        or shutil.which("powershell", path=environment.get("PATH"))
+    )
+    if not powershell:
+        system_root = environment.get("SystemRoot", "")
+        fallback = (
+            Path(system_root) / "System32" / "WindowsPowerShell"
+            / "v1.0" / "powershell.exe"
+        ) if system_root else None
+        if fallback and fallback.is_file():
+            powershell = str(fallback)
+    if not powershell:
+        return []
+    script = (
+        "Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | "
+        "Sort-Object Version -Descending | Select-Object -First 1 "
+        "-ExpandProperty InstallLocation"
+    )
+    try:
+        result = run_process(
+            [
+                powershell, "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-Command", script,
+            ],
+            capture_output=True,
+            timeout=8,
+            creationflags=no_window_creation_flags(),
+            env=utf8_environment(environment),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if int(getattr(result, "returncode", 1) or 0) != 0:
+        return []
+    roots = [
+        line.strip() for line in decode_process_output(
+            getattr(result, "stdout", "")
+        ).splitlines() if line.strip()
+    ]
+    candidates = []
+    for root_text in roots[:4]:
+        root = Path(root_text)
+        candidates.extend([
+            str(root / "app" / "resources" / "codex.exe"),
+            str(root / "resources" / "codex.exe"),
+            str(root / "app" / "codex.exe"),
+        ])
+    return candidates
+
+
 def _windows_codex_install_candidates(environment: dict) -> list[str]:
     """Return Codex launchers from standard Windows and editor installs."""
     appdata = environment.get("APPDATA", "")
@@ -275,6 +356,7 @@ def _windows_codex_install_candidates(environment: dict) -> list[str]:
                 continue
     for root in recursive_roots:
         candidates.extend(_bounded_codex_search(root, max_depth=6))
+    candidates.extend(_windows_store_codex_candidates(environment))
     return candidates
 
 
@@ -283,8 +365,10 @@ def _find_codex_binary(environ: dict | None = None,
     """Find Codex even when a desktop launch did not inherit the shell PATH."""
     environment = os.environ if environ is None else environ
     candidates = [
-        configured_binary,
-        environment.get("CODEX_BINARY", ""),
+        *_configured_codex_candidates(configured_binary, environment),
+        *_configured_codex_candidates(
+            environment.get("CODEX_BINARY", ""), environment
+        ),
         shutil.which("codex", path=environment.get("PATH")),
         shutil.which("codex.cmd", path=environment.get("PATH")),
         shutil.which("codex.exe", path=environment.get("PATH")),
@@ -305,10 +389,19 @@ def _find_codex_binary(environ: dict | None = None,
     for candidate in candidates:
         if not candidate:
             continue
-        path = Path(_expand_binary_path(str(candidate), environment)).expanduser()
-        if not path.is_file():
+        expanded = _expand_binary_path(str(candidate), environment)
+        path = Path(expanded).expanduser()
+        protected_store_executable = (
+            windows_environment
+            and path.name.lower() == "codex.exe"
+            and path.suffix.lower() == ".exe"
+            and "/program files/windowsapps/" in (
+                "/" + expanded.replace("\\", "/").lower().lstrip("/")
+            )
+        )
+        if not path.is_file() and not protected_store_executable:
             continue
-        if sys.platform == "win32" or path.suffix.lower() in {
+        if windows_environment or path.suffix.lower() in {
             ".exe", ".cmd", ".bat", ".ps1",
         } or os.access(path, os.X_OK):
             return str(path)
