@@ -723,7 +723,7 @@ def test_connection_failure_switches_to_kimi_immediately(tmp_path):
         assert result["status"] == "completed"
         assert worker.calls == [
             {"provider": None, "model": None},
-            {"provider": "kimi", "model": "kimi-k2.7"},
+            {"provider": "kimi", "model": "kimi-k2.7-code"},
         ]
 
     asyncio.run(scenario())
@@ -792,7 +792,7 @@ def test_tool_choice_capability_error_switches_to_kimi_once(tmp_path):
         assert result["status"] == "completed"
         assert worker.calls == [
             {"provider": None, "model": None},
-            {"provider": "kimi", "model": "kimi-k2.7"},
+            {"provider": "kimi", "model": "kimi-k2.7-code"},
         ]
 
     asyncio.run(scenario())
@@ -877,7 +877,7 @@ def test_default_worker_budgets_use_reliable_soft_limits():
     assert config.reviewer.reasoning_effort == "high"
     assert config.emergency_coder.reasoning_effort == "max"
     assert config.worker.emergency_after_failures == 3
-    assert config.worker.fallback_model == "kimi-k2.7"
+    assert config.worker.fallback_model == "kimi-k2.7-code"
 
 
 def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
@@ -893,7 +893,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 6
+    assert config.config_version == 7
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"

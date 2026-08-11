@@ -79,6 +79,8 @@ class CostEngine:
         "kimi-k2.7-code": {
             "cached_input": 1.30, "input": 6.50, "output": 27.00,
         },
+        # Kept only for pricing historical records created before the model-ID
+        # migration. New requests use kimi-k2.7-code.
         "kimi-k2.7": {
             "cached_input": 1.30, "input": 6.50, "output": 27.00,
         },

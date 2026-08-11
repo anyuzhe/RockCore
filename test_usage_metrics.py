@@ -28,7 +28,7 @@ def test_cost_estimate_uses_model_specific_rmb_rate():
     ) == 33.5
     assert CostEngine.estimate_cost(
         "planner", 1_000_000, 1_000_000,
-        provider="kimi", model_name="kimi-k2.7",
+        provider="kimi", model_name="kimi-k2.7-code",
     ) == 33.5
     assert CostEngine.estimate_cost(
         "planner", 1_000_000, 1_000_000,
@@ -186,11 +186,11 @@ def test_router_prices_the_requested_fallback_model_not_provider_default():
 
         await router.chat(
             "worker", "system", [], provider_override="kimi",
-            model="kimi-k2.7",
+            model="kimi-k2.7-code",
         )
 
         event = event_bus.get_history("model_chat")[-1]["data"]
-        assert event["model_name"] == "kimi-k2.7"
+        assert event["model_name"] == "kimi-k2.7-code"
         assert event["estimated_cost"] == 6.5
         assert event["cost_currency"] == "CNY"
 

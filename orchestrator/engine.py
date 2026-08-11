@@ -2418,7 +2418,7 @@ class Engine:
             )
             t._rockcore_fallback_model = (
                 proj_config.worker.fallback_model
-                if proj_config else "kimi-k2.7"
+                if proj_config else "kimi-k2.7-code"
             )
             t._rockcore_emergency_enabled = (
                 proj_config.emergency_coder.enabled if proj_config else True
@@ -3719,8 +3719,8 @@ class Engine:
             getattr(task, "_rockcore_fallback_provider", "kimi") or "kimi"
         )
         configured_model = str(
-            getattr(task, "_rockcore_fallback_model", "kimi-k2.7")
-            or "kimi-k2.7"
+            getattr(task, "_rockcore_fallback_model", "kimi-k2.7-code")
+            or "kimi-k2.7-code"
         )
         for provider in (configured_provider,):
             if not self.model_router.has_provider(provider):

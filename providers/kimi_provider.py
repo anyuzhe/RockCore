@@ -9,6 +9,11 @@ from .base import BaseProvider
 logger = logging.getLogger(__name__)
 
 
+KIMI_MODEL_ALIASES = {
+    "kimi-k2.7": "kimi-k2.7-code",
+}
+
+
 class KimiProvider(BaseProvider):
     """Provider for Kimi models used by the Planner role."""
 
@@ -19,7 +24,7 @@ class KimiProvider(BaseProvider):
     # Per-model temperature constraints
     MODEL_TEMPERATURES = {
         "kimi-k3": 1.0,
-        "kimi-k2.7": 1.0,
+        "kimi-k2.7-code": 1.0,
         "kimi-k2.6": 1.0,   # API only accepts 1
         "kimi-k2.5": 1.0,
         "moonshot-v1-8k": 0.3,
@@ -30,7 +35,9 @@ class KimiProvider(BaseProvider):
     def __init__(self, config: dict | None = None):
         super().__init__(config)
         self.api_key = self.config.get("api_key", "")
-        self.model = self.config.get("model", self.DEFAULT_MODEL)
+        self.model = self._normalize_model(
+            self.config.get("model", self.DEFAULT_MODEL)
+        )
         self.base_url = self.config.get("base_url", self.BASE_URL)
         self._client = None
 
@@ -39,8 +46,14 @@ class KimiProvider(BaseProvider):
         if "temperature" in kwargs:
             return kwargs["temperature"]
         return self.MODEL_TEMPERATURES.get(
-            kwargs.get("model", self.model), 1.0
+            self._normalize_model(kwargs.get("model", self.model)), 1.0
         )
+
+    @staticmethod
+    def _normalize_model(model: str) -> str:
+        """Translate legacy RockCore model names to Moonshot API IDs."""
+        normalized = str(model or "").strip()
+        return KIMI_MODEL_ALIASES.get(normalized, normalized)
 
     def fallback_models(self, failed_model: str) -> list[str]:
         """Return conservative same-provider alternatives for unavailable models."""
@@ -62,7 +75,7 @@ class KimiProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=kwargs.get("model", self.model),
+            model=self._normalize_model(kwargs.get("model", self.model)),
             messages=full_messages,
             temperature=self._resolve_temperature(**kwargs),
             max_tokens=kwargs.get("max_tokens", 8192),
@@ -84,7 +97,7 @@ class KimiProvider(BaseProvider):
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = await client.chat.completions.create(
-            model=kwargs.get("model", self.model),
+            model=self._normalize_model(kwargs.get("model", self.model)),
             messages=full_messages,
             tools=tools if tools else None,
             temperature=self._resolve_temperature(**kwargs),

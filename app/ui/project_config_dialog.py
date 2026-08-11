@@ -208,7 +208,7 @@ class ProjectConfigDialog(QDialog):
             lambda _: _refresh_fallback_models()
         )
         _refresh_fallback_models()
-        fallback_index = self.worker_fallback_model.findData("kimi-k2.7")
+        fallback_index = self.worker_fallback_model.findData("kimi-k2.7-code")
         if fallback_index >= 0:
             self.worker_fallback_model.setCurrentIndex(fallback_index)
         form.addRow("供应商异常备用：", self.worker_fallback_provider)
@@ -551,7 +551,7 @@ class ProjectConfigDialog(QDialog):
             self.worker_fallback_provider.currentData() or "kimi"
         )
         cfg.worker.fallback_model = (
-            self.worker_fallback_model.currentData() or "kimi-k2.7"
+            self.worker_fallback_model.currentData() or "kimi-k2.7-code"
         )
         cfg.worker.patch_recovery_turns = self.worker_patch_recovery.value()
 

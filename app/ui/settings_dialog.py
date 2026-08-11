@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QPainter, QPainterPath, QPen
 
-from orchestrator.agent_config import PROVIDER_MODELS
+from orchestrator.agent_config import PROVIDER_MODELS, normalize_model_id
 from orchestrator.cost_engine import CostEngine
 from app.paths import application_dir, config_path, resolve_working_dir
 
@@ -63,6 +63,10 @@ def load_config() -> dict:
                 budget.setdefault("max_auto_api_calls", 5_000)
                 budget.setdefault("cached_input_weight", 0.15)
                 config["budget_policy_version"] = 2
+            kimi = config.setdefault("kimi", {})
+            kimi["model"] = normalize_model_id(
+                "kimi", kimi.get("model", "kimi-k3")
+            )
             return config
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return {}
@@ -496,7 +500,9 @@ class SettingsDialog(QDialog):
     def _save(self):
         self._config["kimi"] = {
             "api_key": self.kimi_api_key.text().strip(),
-            "model": self.kimi_model.currentText().strip() or "kimi-k3",
+            "model": normalize_model_id(
+                "kimi", self.kimi_model.currentText().strip() or "kimi-k3"
+            ),
         }
         self._config["deepseek"] = {
             "api_key": self.ds_api_key.text().strip(),

@@ -430,7 +430,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
     settings = SettingsDialog()
     project = ProjectConfigDialog(str(tmp_path))
 
-    assert settings.kimi_model.findData("kimi-k2.7") >= 0
+    assert settings.kimi_model.findData("kimi-k2.7-code") >= 0
     assert settings.ds_model.findData("deepseek-v4-pro") >= 0
     assert settings.max_cost.prefix() == "¥"
     assert settings.max_tokens.value() == 5_000_000
@@ -439,7 +439,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
     assert settings.max_auto_api_calls.value() == 5_000
     assert settings.cached_input_weight.value() == 15
     assert project._agent_widgets["planner"]["model"].findData(
-        "kimi-k2.7"
+        "kimi-k2.7-code"
     ) >= 0
     assert project.worker_model.findData("deepseek-v4-pro") >= 0
     assert project._agent_widgets["governor"]["model"].findData(
@@ -452,7 +452,7 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
         "max"
     ) >= 0
     assert project.worker_emergency_after.value() == 3
-    assert project.worker_fallback_model.currentData() == "kimi-k2.7"
+    assert project.worker_fallback_model.currentData() == "kimi-k2.7-code"
     settings.close()
     project.close()
 

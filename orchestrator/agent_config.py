@@ -10,10 +10,26 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+KIMI_K27_CODE_MODEL = "kimi-k2.7-code"
+KIMI_MODEL_ALIASES = {
+    # Kimi K2.7 was released as a coding model; the API never accepted the
+    # shorter display-name-like identifier that older RockCore builds stored.
+    "kimi-k2.7": KIMI_K27_CODE_MODEL,
+}
+
+
+def normalize_model_id(provider: str, model: str) -> str:
+    """Return the provider API model ID, migrating known legacy aliases."""
+    normalized = str(model or "").strip()
+    if str(provider or "").strip().lower() == "kimi":
+        return KIMI_MODEL_ALIASES.get(normalized, normalized)
+    return normalized
+
+
 # Available model versions per provider
 PROVIDER_MODELS = {
     "kimi": [
-        "kimi-k3", "kimi-k2.7", "kimi-k2.6", "kimi-k2.5",
+        "kimi-k3", KIMI_K27_CODE_MODEL, "kimi-k2.6", "kimi-k2.5",
         "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k",
     ],
     "deepseek": [
@@ -47,7 +63,7 @@ class WorkerProfile(AgentProfile):
     patch_recovery_turns: int = 2
     emergency_after_failures: int = 3
     fallback_provider: str = "kimi"
-    fallback_model: str = "kimi-k2.7"
+    fallback_model: str = KIMI_K27_CODE_MODEL
 
 
 CORE_BUILTIN_SKILLS = [
@@ -258,7 +274,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 6
+    config_version: int = 7
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -276,7 +292,7 @@ class ProjectAgentConfig:
         reasoning_effort="default", max_turns=32,
         max_exploration_turns=20, patch_recovery_turns=2, retry_count=2,
         emergency_after_failures=3, fallback_provider="kimi",
-        fallback_model="kimi-k2.7",
+        fallback_model=KIMI_K27_CODE_MODEL,
     ))
     reviewer: AgentProfile = field(default_factory=lambda: AgentProfile(
         enabled=True, provider="codex", model="gpt-5.6-sol",
@@ -341,8 +357,20 @@ class ProjectAgentConfig:
             cfg._upgrade_completion_limits()
         if source_version < 6:
             cfg._upgrade_exploration_limits()
-        cfg.config_version = 6
+        cfg._normalize_provider_model_ids()
+        cfg.config_version = 7
         return cfg
+
+    def _normalize_provider_model_ids(self):
+        """Migrate persisted display aliases to callable provider API IDs."""
+        for profile in (
+            self.governor, self.planner, self.worker,
+            self.reviewer, self.emergency_coder,
+        ):
+            profile.model = normalize_model_id(profile.provider, profile.model)
+        self.worker.fallback_model = normalize_model_id(
+            self.worker.fallback_provider, self.worker.fallback_model
+        )
 
     def _upgrade_exploration_limits(self):
         """Raise former built-in soft reminders without changing custom limits."""

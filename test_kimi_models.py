@@ -3,7 +3,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from orchestrator.agent_config import PROVIDER_MODELS
+from orchestrator.agent_config import PROVIDER_MODELS, ProjectAgentConfig
 from orchestrator.event_bus import EventBus
 from orchestrator.model_router import ModelRouter
 from providers.kimi_provider import KimiProvider
@@ -14,11 +14,38 @@ def test_kimi_k3_is_available_for_project_configuration():
 
 
 def test_kimi_k27_is_available_and_uses_k2_temperature_rules():
-    assert "kimi-k2.7" in PROVIDER_MODELS["kimi"]
+    assert "kimi-k2.7-code" in PROVIDER_MODELS["kimi"]
+    assert "kimi-k2.7" not in PROVIDER_MODELS["kimi"]
 
-    provider = KimiProvider({"api_key": "test", "model": "kimi-k2.7"})
-    assert provider.model == "kimi-k2.7"
+    provider = KimiProvider({"api_key": "test", "model": "kimi-k2.7-code"})
+    assert provider.model == "kimi-k2.7-code"
     assert provider._resolve_temperature() == 1.0
+
+
+def test_kimi_provider_migrates_legacy_k27_alias_before_api_call():
+    provider = KimiProvider({"api_key": "test", "model": "kimi-k2.7"})
+
+    assert provider.model == "kimi-k2.7-code"
+
+
+def test_project_config_migrates_legacy_k27_aliases():
+    config = ProjectAgentConfig.from_dict({
+        "config_version": 6,
+        "planner": {
+            "provider": "kimi",
+            "model": "kimi-k2.7",
+        },
+        "worker": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "fallback_provider": "kimi",
+            "fallback_model": "kimi-k2.7",
+        },
+    })
+
+    assert config.config_version == 7
+    assert config.planner.model == "kimi-k2.7-code"
+    assert config.worker.fallback_model == "kimi-k2.7-code"
 
 
 def test_kimi_provider_accepts_k3_configuration():
@@ -61,7 +88,7 @@ def test_kimi_forwards_required_tool_choice_only_for_tool_chat():
 
 def test_router_downgrades_unavailable_kimi_model_and_caches_result():
     class Provider:
-        model = "kimi-k2.7"
+        model = "kimi-k2.7-code"
         authentication_mode = "api"
         MAX_OUTPUT_TOKENS = 8_192
 
@@ -80,9 +107,9 @@ def test_router_downgrades_unavailable_kimi_model_and_caches_result():
                 "model": kwargs.get("model"),
                 "max_tokens": kwargs.get("max_tokens"),
             })
-            if kwargs.get("model") == "kimi-k2.7":
+            if kwargs.get("model") == "kimi-k2.7-code":
                 raise RuntimeError(
-                    "Error code: 404 - Not found the model kimi-k2.7 "
+                    "Error code: 404 - Not found the model kimi-k2.7-code "
                     "or Permission denied (resource_not_found_error)"
                 )
             return {
@@ -101,26 +128,26 @@ def test_router_downgrades_unavailable_kimi_model_and_caches_result():
         first = await router.chat_with_tools(
             "worker", "system", [], [],
             provider_override="kimi",
-            model="kimi-k2.7",
+            model="kimi-k2.7-code",
             max_tokens=12_288,
             allow_provider_fallback=False,
         )
         second = await router.chat_with_tools(
             "worker", "system", [], [],
             provider_override="kimi",
-            model="kimi-k2.7",
+            model="kimi-k2.7-code",
             max_tokens=12_288,
             allow_provider_fallback=False,
         )
 
         assert first["content"] == second["content"] == "ok"
         assert [call["model"] for call in provider.calls] == [
-            "kimi-k2.7", "kimi-k2.6", "kimi-k2.6",
+            "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.6",
         ]
         assert all(call["max_tokens"] == 8_192 for call in provider.calls)
         fallback_events = events.get_history("task_model_fallback")
         assert len(fallback_events) == 2
-        assert fallback_events[0]["data"]["from_model"] == "kimi-k2.7"
+        assert fallback_events[0]["data"]["from_model"] == "kimi-k2.7-code"
         assert fallback_events[0]["data"]["to_model"] == "kimi-k2.6"
 
     asyncio.run(scenario())
