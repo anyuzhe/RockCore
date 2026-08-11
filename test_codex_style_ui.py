@@ -327,7 +327,7 @@ def test_settings_no_longer_exposes_model_scoring():
     dialog.close()
 
 
-def test_project_settings_expose_skills_and_mcp_capability_tabs(tmp_path):
+def test_project_settings_expose_plugins_skills_and_mcp_capability_tabs(tmp_path):
     _app()
     dialog = ProjectConfigDialog(str(tmp_path))
     tab_titles = [
@@ -335,11 +335,14 @@ def test_project_settings_expose_skills_and_mcp_capability_tabs(tmp_path):
     ]
 
     assert "Skills" in tab_titles
+    assert "常用插件" in tab_titles
     assert "MCP" in tab_titles
     assert dialog.skills_enabled_cb.isChecked()
     assert dialog.project_skills_cb.isChecked()
     assert dialog.max_skills_spin.value() == 3
     assert dialog.skill_list.count() == 7
+    assert dialog.plugins_enabled_cb.isChecked()
+    assert dialog.plugin_list.count() == 5
     assert not dialog.mcp_enabled_cb.isChecked()
     assert json.loads(dialog.mcp_servers_text.toPlainText()) == []
     dialog.close()

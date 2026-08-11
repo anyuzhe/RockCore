@@ -566,11 +566,16 @@ class Engine:
             logger.info(f"Job {job_id}: mode={proj_config.mode}")
 
             if self.skill_manager:
-                self.skill_manager.configure(proj_root, proj_config.skills)
+                self.skill_manager.configure(
+                    proj_root, proj_config.skills, proj_config.plugins
+                )
             mcp_status = {}
             if self.tool_broker and hasattr(self.tool_broker, "configure_mcp"):
                 mcp_status = await self.tool_broker.configure_mcp(
-                    proj_root, proj_config.mcp
+                    proj_root, proj_config.mcp,
+                    trusted_servers=proj_config.builtin_mcp_servers(
+                        job.user_request
+                    ),
                 )
             await self.event_bus.publish(
                 "extensions_ready",

@@ -50,7 +50,7 @@ class WorkerProfile(AgentProfile):
     fallback_model: str = "kimi-k2.7"
 
 
-BUILTIN_SKILLS = [
+CORE_BUILTIN_SKILLS = [
     "simple-create",
     "simple-edit",
     "bug-fix",
@@ -59,6 +59,73 @@ BUILTIN_SKILLS = [
     "pyqt",
     "web",
 ]
+
+COMMON_PLUGINS = {
+    "documents": {
+        "display_name": "@documents",
+        "description": "读取、创建和整理 Word（.docx）文档",
+        "skill": "documents",
+        "availability": "local",
+    },
+    "browser": {
+        "display_name": "@browser",
+        "description": "导航、点击和检查网页；需要配置 Browser MCP 服务",
+        "skill": "browser",
+        "availability": "mcp_required",
+    },
+    "openai-docs": {
+        "display_name": "$openai-docs",
+        "description": "搜索并读取 OpenAI、ChatGPT 与 Codex 官方文档",
+        "skill": "openai-docs",
+        "availability": "builtin_mcp",
+    },
+    "pdf": {
+        "display_name": "@pdf",
+        "description": "分页读取、创建和整理 PDF 文件",
+        "skill": "pdf",
+        "availability": "local",
+    },
+    "presentations": {
+        "display_name": "@presentations",
+        "description": "读取和创建 PowerPoint（.pptx）演示文稿",
+        "skill": "presentations",
+        "availability": "local",
+    },
+}
+PLUGIN_SKILLS = [item["skill"] for item in COMMON_PLUGINS.values()]
+BUILTIN_SKILLS = [*CORE_BUILTIN_SKILLS, *PLUGIN_SKILLS]
+
+
+@dataclass
+class PluginConfig:
+    """Frequently used capability packs composed from Skills and tools."""
+
+    enabled: bool = True
+    enabled_plugins: list[str] = field(
+        default_factory=lambda: list(COMMON_PLUGINS)
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "PluginConfig":
+        values = data if isinstance(data, dict) else {}
+        raw = values.get("enabled_plugins", list(COMMON_PLUGINS))
+        if not isinstance(raw, list):
+            raw = list(COMMON_PLUGINS)
+        return cls(
+            enabled=bool(values.get("enabled", True)),
+            enabled_plugins=[
+                str(name).strip() for name in raw
+                if str(name).strip() in COMMON_PLUGINS
+            ],
+        )
+
+    def skill_names(self) -> set[str]:
+        if not self.enabled:
+            return set()
+        return {
+            COMMON_PLUGINS[name]["skill"]
+            for name in self.enabled_plugins if name in COMMON_PLUGINS
+        }
 
 
 @dataclass
@@ -93,12 +160,15 @@ class SkillConfig:
 
 @dataclass
 class MCPServerConfig:
-    """One explicitly configured MCP stdio server."""
+    """One explicitly configured MCP stdio or Streamable HTTP server."""
 
     name: str = ""
+    transport: str = "stdio"
     command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     timeout_seconds: int = 20
     allow_tools: list[str] = field(default_factory=lambda: ["*"])
@@ -113,22 +183,35 @@ class MCPServerConfig:
                 f"MCP 服务名不合法：{name}；仅允许小写字母、数字、_ 和 -"
             )
         command = str(values.get("command") or "").strip()
+        transport = str(values.get("transport") or "stdio").strip().lower()
+        if transport not in {"stdio", "streamable_http"}:
+            raise ValueError(
+                f"MCP 服务 {name or '<unnamed>'} 的 transport 必须是 "
+                "stdio 或 streamable_http"
+            )
         args = values.get("args") or []
         env = values.get("env") or {}
+        url = str(values.get("url") or "").strip()
+        headers = values.get("headers") or {}
         allow_tools = values.get("allow_tools") or ["*"]
         if not isinstance(args, list):
             raise ValueError(f"MCP 服务 {name or '<unnamed>'} 的 args 必须是数组")
         if not isinstance(env, dict):
             raise ValueError(f"MCP 服务 {name or '<unnamed>'} 的 env 必须是对象")
+        if not isinstance(headers, dict):
+            raise ValueError(f"MCP 服务 {name or '<unnamed>'} 的 headers 必须是对象")
         if not isinstance(allow_tools, list):
             raise ValueError(
                 f"MCP 服务 {name or '<unnamed>'} 的 allow_tools 必须是数组"
             )
         return cls(
             name=name,
+            transport=transport,
             command=command,
             args=[str(value) for value in args],
             env={str(key): str(value) for key, value in env.items()},
+            url=url,
+            headers={str(key): str(value) for key, value in headers.items()},
             enabled=bool(values.get("enabled", True)),
             timeout_seconds=max(
                 2, min(300, int(values.get("timeout_seconds", 20)))
@@ -156,8 +239,17 @@ class MCPConfig:
         if len(names) != len(set(names)):
             raise ValueError("MCP 服务名不能重复")
         for server in servers:
-            if server.enabled and (not server.name or not server.command):
-                raise ValueError("启用的 MCP 服务必须同时配置 name 和 command")
+            if not server.enabled:
+                continue
+            if not server.name:
+                raise ValueError("启用的 MCP 服务必须配置 name")
+            if server.transport == "stdio" and not server.command:
+                raise ValueError("启用的 stdio MCP 服务必须配置 command")
+            if server.transport == "streamable_http":
+                if not server.url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+                    raise ValueError(
+                        "Streamable HTTP MCP 仅允许 HTTPS 或本机 HTTP URL"
+                    )
         return cls(enabled=bool(values.get("enabled", False)), servers=servers)
 
 
@@ -166,7 +258,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 3
+    config_version: int = 4
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -214,6 +306,7 @@ class ProjectAgentConfig:
 
     # ── Reusable capabilities and external tools ──
     skills: SkillConfig = field(default_factory=SkillConfig)
+    plugins: PluginConfig = field(default_factory=PluginConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
 
     @classmethod
@@ -240,10 +333,11 @@ class ProjectAgentConfig:
             if k in data:
                 setattr(cfg, k, data[k])
         cfg.skills = SkillConfig.from_dict(data.get("skills"))
+        cfg.plugins = PluginConfig.from_dict(data.get("plugins"))
         cfg.mcp = MCPConfig.from_dict(data.get("mcp"))
         if source_version < 2:
             cfg._upgrade_legacy_recommendations()
-        cfg.config_version = 3
+        cfg.config_version = 4
         return cfg
 
     def _upgrade_legacy_recommendations(self):
@@ -275,8 +369,29 @@ class ProjectAgentConfig:
             "auto_validation": self.auto_validation,
             "auto_repair": self.auto_repair,
             "skills": asdict(self.skills),
+            "plugins": asdict(self.plugins),
             "mcp": asdict(self.mcp),
         }
+
+    def builtin_mcp_servers(self, request: str = "") -> list[MCPServerConfig]:
+        """Return trusted read-only MCP servers needed by this request."""
+        if not self.plugins.enabled or "openai-docs" not in self.plugins.enabled_plugins:
+            return []
+        text = str(request or "").lower()
+        if not re.search(
+            r"\b(openai|chatgpt|codex|gpt|responses? api|agents? sdk)\b|"
+            r"开放人工智能|模型接口|官方文档",
+            text,
+        ):
+            return []
+        return [MCPServerConfig(
+            name="openai_developer_docs",
+            transport="streamable_http",
+            url="https://developers.openai.com/mcp",
+            read_only=True,
+            allow_tools=["*"],
+            timeout_seconds=20,
+        )]
 
     def get_worker_turns(self, complexity: str) -> int:
         return self.complexity_turns.get(complexity, self.worker.max_turns or 20)

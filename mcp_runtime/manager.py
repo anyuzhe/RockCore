@@ -12,7 +12,7 @@ from typing import Any
 
 from orchestrator.agent_config import MCPConfig, MCPServerConfig
 
-from .client import MCPStdioClient
+from .client import MCPStdioClient, MCPStreamableHTTPClient
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,9 @@ class MCPManager:
     def __init__(self, project_root: str | Path = "."):
         self.project_root = Path(project_root).resolve()
         self.config = MCPConfig()
-        self._clients: dict[str, MCPStdioClient] = {}
+        self._clients: dict[
+            str, MCPStdioClient | MCPStreamableHTTPClient
+        ] = {}
         self._tools: dict[str, MCPTool] = {}
         self._status: dict[str, dict[str, Any]] = {}
 
@@ -62,7 +64,11 @@ class MCPManager:
                     "status": "disabled", "tools": 0,
                 }
                 continue
-            client = MCPStdioClient(server, self.project_root)
+            client = (
+                MCPStreamableHTTPClient(server, self.project_root)
+                if server.transport == "streamable_http"
+                else MCPStdioClient(server, self.project_root)
+            )
             try:
                 await client.start()
                 remote_tools = await client.list_tools()

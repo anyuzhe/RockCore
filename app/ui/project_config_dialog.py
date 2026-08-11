@@ -13,8 +13,8 @@ from PyQt6.QtCore import Qt
 
 from orchestrator.agent_config import (
     ProjectAgentConfig, load_project_config, save_project_config,
-    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, BUILTIN_SKILLS,
-    SkillConfig, MCPConfig,
+    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, CORE_BUILTIN_SKILLS,
+    COMMON_PLUGINS, SkillConfig, PluginConfig, MCPConfig,
 )
 from mcp_runtime.trust import approve_project_mcp, revoke_project_mcp
 from skills.trust import approve_project_skills, revoke_project_skills
@@ -259,7 +259,7 @@ class ProjectConfigDialog(QDialog):
         skills_layout.addWidget(QLabel("内置 Skills："))
         self.skill_list = QListWidget()
         self._skill_items = {}
-        for name in BUILTIN_SKILLS:
+        for name in CORE_BUILTIN_SKILLS:
             item = QListWidgetItem(name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
@@ -275,6 +275,45 @@ class ProjectConfigDialog(QDialog):
         skills_layout.addWidget(skill_hint)
         self.tabs.addTab(skills_widget, "Skills")
 
+        # ── Common Plugins Tab ──
+        plugins_widget = QWidget()
+        plugins_layout = QVBoxLayout(plugins_widget)
+        self.plugins_enabled_cb = QCheckBox("启用常用插件能力包")
+        self.plugins_enabled_cb.setChecked(True)
+        self.plugins_enabled_cb.setToolTip(
+            "插件由对应 Skill 与本地工具或 MCP 连接共同组成"
+        )
+        plugins_layout.addWidget(self.plugins_enabled_cb)
+        self.plugin_list = QListWidget()
+        self._plugin_items = {}
+        availability_labels = {
+            "local": "本地可用",
+            "builtin_mcp": "官方只读 MCP（按需连接）",
+            "mcp_required": "需在 MCP 页配置服务",
+        }
+        for plugin_id, definition in COMMON_PLUGINS.items():
+            state = availability_labels.get(
+                definition.get("availability", ""), "需配置"
+            )
+            item = QListWidgetItem(
+                f"{definition['display_name']}  ·  {state}\n"
+                f"{definition['description']}"
+            )
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setData(Qt.ItemDataRole.UserRole, plugin_id)
+            self.plugin_list.addItem(item)
+            self._plugin_items[plugin_id] = item
+        plugins_layout.addWidget(self.plugin_list)
+        plugin_hint = QLabel(
+            "Documents、PDF、Presentations 使用打包的本地工具；"
+            "OpenAI Docs 仅在相关请求中连接官方只读 MCP；"
+            "Browser 必须先配置可用的浏览器 MCP，未连接时不会假装可用。"
+        )
+        plugin_hint.setWordWrap(True)
+        plugins_layout.addWidget(plugin_hint)
+        self.tabs.addTab(plugins_widget, "常用插件")
+
         # ── MCP Tab ──
         mcp_widget = QWidget()
         mcp_layout = QVBoxLayout(mcp_widget)
@@ -284,10 +323,11 @@ class ProjectConfigDialog(QDialog):
             "MCP 连接失败不会禁用本地文件、Git、Shell 和测试工具"
         )
         mcp_layout.addWidget(self.mcp_enabled_cb)
-        mcp_layout.addWidget(QLabel("MCP stdio 服务（JSON 数组）："))
+        mcp_layout.addWidget(QLabel("MCP stdio / Streamable HTTP 服务（JSON 数组）："))
         self.mcp_servers_text = QPlainTextEdit()
         self.mcp_servers_text.setPlaceholderText(
             '[\n  {\n    "name": "github",\n'
+            '    "transport": "stdio",\n'
             '    "command": "npx",\n    "args": ["-y", "server-package"],\n'
             '    "env": {"TOKEN": "${GITHUB_TOKEN}"},\n'
             '    "read_only": true,\n    "allow_tools": ["*"]\n  }\n]'
@@ -452,6 +492,15 @@ class ProjectConfigDialog(QDialog):
                 if name in enabled_builtin else Qt.CheckState.Unchecked
             )
 
+        # Common plugins
+        self.plugins_enabled_cb.setChecked(cfg.plugins.enabled)
+        enabled_plugins = set(cfg.plugins.enabled_plugins)
+        for plugin_id, item in self._plugin_items.items():
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if plugin_id in enabled_plugins else Qt.CheckState.Unchecked
+            )
+
         # MCP
         self.mcp_enabled_cb.setChecked(cfg.mcp.enabled)
         self.mcp_servers_text.setPlainText(json.dumps(
@@ -518,6 +567,13 @@ class ProjectConfigDialog(QDialog):
             ],
             allow_project_skills=self.project_skills_cb.isChecked(),
             max_selected=self.max_skills_spin.value(),
+        )
+        cfg.plugins = PluginConfig(
+            enabled=self.plugins_enabled_cb.isChecked(),
+            enabled_plugins=[
+                plugin_id for plugin_id, item in self._plugin_items.items()
+                if item.checkState() == Qt.CheckState.Checked
+            ],
         )
 
         try:

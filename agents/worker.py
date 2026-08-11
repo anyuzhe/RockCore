@@ -11,11 +11,15 @@ from tools.tool_broker import ToolBroker
 
 logger = logging.getLogger(__name__)
 
-WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
+WRITE_TOOLS = {
+    "write_file", "apply_patch", "insert_before", "insert_after",
+    "write_docx", "write_pptx", "write_pdf",
+}
 REPORT_TASK_TYPES = {"analysis", "review", "testing", "action"}
 ALREADY_SATISFIED_MARKER = "[ALREADY_SATISFIED]"
 STATE_VERIFICATION_TOOLS = {
-    "read_file", "read_pdf", "search_in_file", "search_code", "git_diff",
+    "read_file", "read_pdf", "read_docx", "read_pptx", "search_in_file",
+    "search_code", "git_diff",
 }
 # Some review-oriented coding tasks intentionally edit files only when a defect
 # is found. Keep this narrow so a worker that forgot to edit a normal coding
@@ -27,8 +31,8 @@ NO_CHANGE_MARKERS = (
     "if no issues", "if there are no issues", "skip when no",
 )
 EXPLORATION_TOOLS = {
-    "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
-    "git_status", "git_diff", "read_log",
+    "list_files", "read_file", "read_pdf", "read_docx", "read_pptx",
+    "search_in_file", "search_code", "git_status", "git_diff", "read_log",
 }
 MAX_CONVERSATION_CHARS = 14_000
 
@@ -61,7 +65,9 @@ Available tools:
 - list_files: List files in the project directory
 - read_file: Read a file's contents with start/end line pagination
 - read_pdf: Extract PDF text with start_page/end_page pagination
+- read_docx / read_pptx: Read Word or PowerPoint content when enabled
 - write_file: Write content to a file — USE THIS, do not output code in chat
+- write_docx / write_pptx / write_pdf: Create enabled binary artifacts
 - apply_patch: Search and replace text in a file
 - insert_before / insert_after: Insert text at a specific anchor point
 - search_in_file: Search for text within a specific file
@@ -73,7 +79,8 @@ Available tools:
 CRITICAL: NEVER output code, HTML, or file content in your text response.
 When creating or modifying code, you MUST use write_file, apply_patch,
 insert_before, or insert_after. A coding task is NOT complete until files have
-been written to the workspace. An analysis task is complete when its final
+been written to the workspace. For artifact tasks, write_docx, write_pptx, or
+write_pdf also counts as a workspace write. An analysis task is complete when its final
 response contains a substantive report. Keep other responses brief.
 """
 
@@ -909,6 +916,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             return self.tool_broker.get_tool_definitions(
                 getattr(task, "task_type", None),
                 test_authoring=getattr(task, "task_type", "") == "testing",
+                skills=list(getattr(task, "skills", []) or []),
             )
         except TypeError:
             # Small test doubles and older third-party brokers may expose the

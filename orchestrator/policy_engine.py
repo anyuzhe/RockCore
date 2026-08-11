@@ -271,7 +271,10 @@ class PolicyEngine:
             command = args.get("command", "")
             self.check_command(command)
 
-        if tool_name in ("write_file", "apply_patch", "edit_file", "insert_before", "insert_after"):
+        if tool_name in (
+            "write_file", "apply_patch", "edit_file", "insert_before",
+            "insert_after", "write_docx", "write_pptx", "write_pdf",
+        ):
             path = args.get("path", args.get("file_path", ""))
             protected = getattr(task, "protected_paths", []) or []
             allowed = getattr(task, "allowed_paths", []) or []

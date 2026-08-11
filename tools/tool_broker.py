@@ -8,9 +8,10 @@ from typing import Any
 
 from mcp_runtime.manager import MCPManager
 from mcp_runtime.trust import is_project_mcp_approved
-from orchestrator.agent_config import MCPConfig
+from orchestrator.agent_config import MCPConfig, MCPServerConfig
 from orchestrator.policy_engine import PolicyEngine
 from tools.file_tools import FileTools
+from tools.artifact_tools import ArtifactTools
 from tools.shell_tools import ShellTools
 from tools.search_tools import SearchTools
 from tools.git_tools import GitTools
@@ -31,6 +32,7 @@ class ToolBroker:
         self.policy = policy_engine
         self.mcp_manager = mcp_manager
         self.file_tools = FileTools(self.project_root)
+        self.artifact_tools = ArtifactTools(self.project_root)
         self.shell_tools = ShellTools(self.project_root)
         self.search_tools = SearchTools(self.project_root)
         self.git_tools = GitTools(self.project_root)
@@ -40,6 +42,11 @@ class ToolBroker:
             "list_files": self.file_tools.list_files,
             "read_file": self.file_tools.read_file,
             "read_pdf": self.file_tools.read_pdf,
+            "read_docx": self.artifact_tools.read_docx,
+            "write_docx": self.artifact_tools.write_docx,
+            "read_pptx": self.artifact_tools.read_pptx,
+            "write_pptx": self.artifact_tools.write_pptx,
+            "write_pdf": self.artifact_tools.write_pdf,
             "write_file": self.file_tools.write_file,
             "apply_patch": self.file_tools.apply_patch,
             "insert_before": self.file_tools.insert_before,
@@ -54,7 +61,8 @@ class ToolBroker:
         }
 
     def get_tool_definitions(self, task_type: str | None = None,
-                             test_authoring: bool = False) -> list[dict]:
+                             test_authoring: bool = False,
+                             skills: list[str] | None = None) -> list[dict]:
         """Return only the tools needed by this task type."""
         definitions = [
             {
@@ -294,9 +302,27 @@ class ToolBroker:
                 },
             },
         ]
+        selected_skills = set(skills or [])
+        artifact_definitions = self._artifact_definitions()
+        if "documents" in selected_skills:
+            definitions.extend(
+                item for item in artifact_definitions
+                if item["function"]["name"] in {"read_docx", "write_docx"}
+            )
+        if "presentations" in selected_skills:
+            definitions.extend(
+                item for item in artifact_definitions
+                if item["function"]["name"] in {"read_pptx", "write_pptx"}
+            )
+        if "pdf" in selected_skills:
+            definitions.extend(
+                item for item in artifact_definitions
+                if item["function"]["name"] == "write_pdf"
+            )
         if task_type in {"analysis", "review"}:
             allowed = {
                 "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
+                "read_docx", "read_pptx",
                 "git_status", "git_diff", "read_log",
             }
         elif task_type == "testing" and not test_authoring:
@@ -304,6 +330,7 @@ class ToolBroker:
         elif task_type in {"coding", "testing"}:
             allowed = {
                 "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
+                "read_docx", "read_pptx", "write_docx", "write_pptx", "write_pdf",
                 "write_file", "apply_patch", "insert_before", "insert_after",
                 "run_command", "run_tests", "git_status", "git_diff",
             }
@@ -421,6 +448,7 @@ class ToolBroker:
             os.fspath(project_root) if project_root is not None else os.getcwd()
         )
         self.file_tools = FileTools(self.project_root)
+        self.artifact_tools = ArtifactTools(self.project_root)
         self.shell_tools = ShellTools(self.project_root)
         self.search_tools = SearchTools(self.project_root)
         self.git_tools = GitTools(self.project_root)
@@ -430,6 +458,11 @@ class ToolBroker:
             "list_files": self.file_tools.list_files,
             "read_file": self.file_tools.read_file,
             "read_pdf": self.file_tools.read_pdf,
+            "read_docx": self.artifact_tools.read_docx,
+            "write_docx": self.artifact_tools.write_docx,
+            "read_pptx": self.artifact_tools.read_pptx,
+            "write_pptx": self.artifact_tools.write_pptx,
+            "write_pdf": self.artifact_tools.write_pdf,
             "write_file": self.file_tools.write_file,
             "apply_patch": self.file_tools.apply_patch,
             "insert_before": self.file_tools.insert_before,
@@ -445,25 +478,37 @@ class ToolBroker:
         logger.info(f"ToolBroker project root updated: {project_root}")
 
     async def configure_mcp(self, project_root: str | os.PathLike[str],
-                            config: MCPConfig | None = None) -> dict[str, dict]:
+                            config: MCPConfig | None = None,
+                            trusted_servers: list[MCPServerConfig] | None = None,
+                            ) -> dict[str, dict]:
         """Configure external tools without affecting the local tool registry."""
         if self.mcp_manager is None:
             self.mcp_manager = MCPManager(project_root)
-        if config and config.enabled and not is_project_mcp_approved(
-            project_root, config
-        ):
-            await self.mcp_manager.close()
-            return {
-                "policy": {
-                    "status": "approval_required",
-                    "tools": 0,
-                    "error": (
-                        "项目 MCP 配置尚未由本机用户批准；请在项目设置的 "
-                        "MCP 页确认并保存"
-                    ),
-                }
+        project_config = config or MCPConfig()
+        project_approved = not project_config.enabled or is_project_mcp_approved(
+            project_root, project_config
+        )
+        servers: list[MCPServerConfig] = list(trusted_servers or [])
+        if project_config.enabled and project_approved:
+            servers.extend(project_config.servers)
+        unique_servers = {
+            server.name: server for server in servers if server.name
+        }
+        effective = MCPConfig(
+            enabled=bool(unique_servers),
+            servers=list(unique_servers.values()),
+        )
+        statuses = await self.mcp_manager.configure(project_root, effective)
+        if project_config.enabled and not project_approved:
+            statuses["policy"] = {
+                "status": "approval_required",
+                "tools": 0,
+                "error": (
+                    "项目 MCP 配置尚未由本机用户批准；请在项目设置的 "
+                    "MCP 页确认并保存"
+                ),
             }
-        return await self.mcp_manager.configure(project_root, config)
+        return statuses
 
     async def close(self):
         if self.mcp_manager:
@@ -491,3 +536,104 @@ class ToolBroker:
                 for definition in self.mcp_manager.tool_definitions()
             )
         return names
+
+    @staticmethod
+    def _artifact_definitions() -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_docx",
+                    "description": "Read Word .docx text and tables in paginated blocks.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start_block": {"type": "integer"},
+                            "max_blocks": {"type": "integer"},
+                            "max_chars": {"type": "integer"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_docx",
+                    "description": "Create a local Word .docx from Markdown-like text.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "title": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_pptx",
+                    "description": "Read PowerPoint slide text with pagination.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start_slide": {"type": "integer"},
+                            "max_slides": {"type": "integer"},
+                            "max_chars": {"type": "integer"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_pptx",
+                    "description": "Create a local PowerPoint .pptx from structured slides.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "title": {"type": "string"},
+                            "subtitle": {"type": "string"},
+                            "slides": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "bullets": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                    "required": ["title", "bullets"],
+                                },
+                            },
+                        },
+                        "required": ["path", "slides"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_pdf",
+                    "description": "Create a local PDF with Chinese text support.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "title": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+        ]

@@ -20,6 +20,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.subprocess_utils import no_window_creation_flags, utf8_environment
 from orchestrator.agent_config import MCPServerConfig
 
@@ -286,3 +288,193 @@ class MCPStdioClient:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
+
+
+class MCPStreamableHTTPClient:
+    """Minimal Streamable HTTP MCP client with session and SSE support."""
+
+    def __init__(self, config: MCPServerConfig, project_root: str | Path):
+        self.config = config
+        self.project_root = Path(project_root).resolve()
+        self.server_info: dict[str, Any] = {}
+        self.capabilities: dict[str, Any] = {}
+        self._next_id = 1
+        self._lock = asyncio.Lock()
+        self._session_id = ""
+        self._protocol_version = DEFAULT_PROTOCOL_VERSION
+        self._client: httpx.AsyncClient | None = None
+        self._started = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._started and self._client is not None
+
+    async def start(self):
+        if self.is_running:
+            return
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "User-Agent": "RockCore/1 MCP Client",
+            **resolve_server_headers(self.config.headers),
+        }
+        self._client = httpx.AsyncClient(
+            headers=headers,
+            timeout=float(self.config.timeout_seconds),
+            follow_redirects=True,
+        )
+        try:
+            result = await self._request_started("initialize", {
+                "protocolVersion": DEFAULT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "RockCore", "version": "1"},
+            })
+            negotiated = str(result.get("protocolVersion") or "")
+            if negotiated not in SUPPORTED_PROTOCOL_VERSIONS:
+                raise MCPClientError(
+                    f"MCP 服务 {self.config.name} 返回不支持的协议版本："
+                    f"{negotiated or '<empty>'}"
+                )
+            self._protocol_version = negotiated
+            self.server_info = dict(result.get("serverInfo") or {})
+            self.capabilities = dict(result.get("capabilities") or {})
+            self._started = True
+            await self.notify("notifications/initialized", {})
+        except Exception:
+            await self.close()
+            raise
+
+    async def request(self, method: str, params: dict | None = None) -> Any:
+        if not self.is_running:
+            await self.start()
+        return await self._request_started(method, params or {})
+
+    async def _request_started(self, method: str, params: dict) -> Any:
+        async with self._lock:
+            request_id = self._next_id
+            self._next_id += 1
+            response = await self._post({
+                "jsonrpc": "2.0", "id": request_id,
+                "method": method, "params": params,
+            })
+            message = self._decode_response(response, request_id)
+            if message.get("error"):
+                raise MCPClientError(
+                    f"MCP 服务 {self.config.name} 调用 {method} 失败："
+                    f"{message['error']}"
+                )
+            return message.get("result") or {}
+
+    async def notify(self, method: str, params: dict | None = None):
+        if self._client is None:
+            return
+        async with self._lock:
+            await self._post({
+                "jsonrpc": "2.0", "method": method, "params": params or {},
+            }, allow_empty=True)
+
+    async def list_tools(self) -> list[dict]:
+        result = await self.request("tools/list", {})
+        return [item for item in (result.get("tools") or [])
+                if isinstance(item, dict)]
+
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        result = await self.request("tools/call", {
+            "name": name, "arguments": arguments,
+        })
+        return dict(result) if isinstance(result, dict) else {"content": result}
+
+    async def close(self):
+        client, self._client = self._client, None
+        session_id, self._session_id = self._session_id, ""
+        self._started = False
+        if client is None:
+            return
+        if session_id:
+            try:
+                await client.delete(
+                    self.config.url,
+                    headers={"Mcp-Session-Id": session_id},
+                )
+            except Exception:
+                pass
+        await client.aclose()
+
+    async def _post(self, payload: dict, allow_empty: bool = False) -> httpx.Response:
+        client = self._client
+        if client is None:
+            raise MCPClientError(f"MCP 服务 {self.config.name} 未连接")
+        headers = {"MCP-Protocol-Version": self._protocol_version}
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        try:
+            response = await client.post(
+                self.config.url, json=payload, headers=headers,
+            )
+        except httpx.HTTPError as error:
+            raise MCPClientError(
+                f"MCP 服务 {self.config.name} 网络错误：{error}"
+            ) from error
+        if response.status_code >= 400:
+            detail = response.text.strip()[:1000]
+            raise MCPClientError(
+                f"MCP 服务 {self.config.name} HTTP {response.status_code}"
+                + (f"：{detail}" if detail else "")
+            )
+        new_session = response.headers.get("Mcp-Session-Id", "")
+        if new_session:
+            self._session_id = new_session
+        if not allow_empty and not response.content:
+            raise MCPClientError(f"MCP 服务 {self.config.name} 返回空响应")
+        return response
+
+    def _decode_response(self, response: httpx.Response,
+                         request_id: int) -> dict:
+        content_type = response.headers.get("content-type", "").lower()
+        candidates: list[dict] = []
+        try:
+            if "text/event-stream" in content_type:
+                data_lines: list[str] = []
+                for line in response.text.splitlines():
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].lstrip())
+                    elif not line.strip() and data_lines:
+                        value = json.loads("\n".join(data_lines))
+                        if isinstance(value, dict):
+                            candidates.append(value)
+                        data_lines = []
+                if data_lines:
+                    value = json.loads("\n".join(data_lines))
+                    if isinstance(value, dict):
+                        candidates.append(value)
+            else:
+                value = response.json()
+                if isinstance(value, dict):
+                    candidates.append(value)
+        except (UnicodeError, ValueError, json.JSONDecodeError) as error:
+            raise MCPClientError(
+                f"MCP 服务 {self.config.name} 返回了无效 JSON/SSE"
+            ) from error
+        for message in candidates:
+            if message.get("id") == request_id:
+                return message
+        raise MCPClientError(
+            f"MCP 服务 {self.config.name} 响应缺少请求 id={request_id}"
+        )
+
+
+def resolve_server_headers(values: dict[str, str],
+                           environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Resolve ${NAME} in HTTP headers without exposing secrets in config."""
+    source = os.environ if environ is None else environ
+    result: dict[str, str] = {}
+    for key, raw_value in values.items():
+        def replace(match: re.Match) -> str:
+            name = match.group(1)
+            if name not in source:
+                raise MCPClientError(
+                    f"MCP 环境变量 {name} 未设置（HTTP header {key}）"
+                )
+            return source[name]
+        result[str(key)] = ENV_REFERENCE.sub(replace, str(raw_value))
+    return result

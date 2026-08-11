@@ -8,13 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from orchestrator.agent_config import SkillConfig
+from orchestrator.agent_config import PLUGIN_SKILLS, PluginConfig, SkillConfig
 from skills.trust import is_project_skills_approved
 
 logger = logging.getLogger(__name__)
 
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 EXPLICIT_SKILL = re.compile(r"\$([a-z0-9][a-z0-9-]{0,63})\b", re.I)
+EXPLICIT_PLUGIN = re.compile(r"@([a-z0-9][a-z0-9-]{0,63})\b", re.I)
 MAX_SKILL_BYTES = 128 * 1024
 MAX_SKILL_BODY_CHARS = 12_000
 MAX_TOTAL_SKILL_CHARS = 24_000
@@ -35,21 +36,25 @@ class SkillManager:
 
     def __init__(self, project_root: str | Path = ".",
                  config: SkillConfig | None = None,
-                 builtin_root: str | Path | None = None):
+                 builtin_root: str | Path | None = None,
+                 plugin_config: PluginConfig | None = None):
         self.builtin_root = Path(
             builtin_root or Path(__file__).resolve().parent / "builtin"
         )
         self.project_root = Path(project_root).resolve()
         self.config = config or SkillConfig()
+        self.plugin_config = plugin_config or PluginConfig()
         self._catalog: dict[str, SkillMetadata] = {}
         self._body_cache: dict[Path, str] = {}
         self.project_skills_approved = False
         self.refresh()
 
     def configure(self, project_root: str | Path,
-                  config: SkillConfig | None = None):
+                  config: SkillConfig | None = None,
+                  plugin_config: PluginConfig | None = None):
         self.project_root = Path(project_root).resolve()
         self.config = config or SkillConfig()
+        self.plugin_config = plugin_config or PluginConfig()
         self.refresh()
 
     def refresh(self):
@@ -59,8 +64,12 @@ class SkillManager:
             return
 
         enabled_builtin = set(self.config.enabled_builtin)
+        enabled_plugin_skills = self.plugin_config.skill_names()
         for metadata in self._discover_root(self.builtin_root, "builtin"):
-            if metadata.name in enabled_builtin:
+            if metadata.name in PLUGIN_SKILLS:
+                if metadata.name in enabled_plugin_skills:
+                    catalog[metadata.name] = metadata
+            elif metadata.name in enabled_builtin:
                 catalog[metadata.name] = metadata
 
         self.project_skills_approved = is_project_skills_approved(
@@ -106,6 +115,7 @@ class SkillManager:
             requested = [requested]
         explicit = [str(name).strip().lower() for name in requested]
         explicit += [match.lower() for match in EXPLICIT_SKILL.findall(text)]
+        explicit += [match.lower() for match in EXPLICIT_PLUGIN.findall(text)]
 
         ranked: list[tuple[int, str]] = []
         for index, name in enumerate(dict.fromkeys(explicit)):
@@ -118,6 +128,24 @@ class SkillManager:
 
         if task_type == "review":
             score("code-review", 900)
+        if re.search(r"\b(docx|word document|microsoft word)\b|Word文档|文档排版", text, re.I):
+            score("documents", 920)
+        if re.search(r"\b(pdf)\b|PDF文件|PDF文档", text, re.I):
+            score("pdf", 920)
+        if re.search(r"\b(pptx?|powerpoint|slide deck|slides?)\b|幻灯片|演示文稿", text, re.I):
+            score("presentations", 920)
+        if re.search(
+            r"\b(navigate|click|browser automation|screenshot page|open url)\b|"
+            r"浏览网页|打开网站|点击网页|网页截图|浏览器自动化",
+            text, re.I,
+        ):
+            score("browser", 910)
+        if re.search(
+            r"\b(openai|chatgpt|codex|responses? api|agents? sdk)\b|"
+            r"OpenAI官方文档|Codex文档|ChatGPT文档",
+            text, re.I,
+        ):
+            score("openai-docs", 900)
         if re.search(r"\b(refactor|restructure)\b|重构|解耦", lowered):
             score("refactor", 850)
         if re.search(

@@ -3,6 +3,8 @@
 import asyncio
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +18,7 @@ from mcp_runtime.trust import (
 from orchestrator.agent_config import (
     MCPConfig,
     MCPServerConfig,
+    PluginConfig,
     ProjectAgentConfig,
     SkillConfig,
     load_project_config,
@@ -51,11 +54,12 @@ def test_project_config_round_trips_skills_and_mcp(tmp_path):
     save_project_config(str(tmp_path), config)
     loaded = load_project_config(str(tmp_path))
 
-    assert loaded.config_version == 3
+    assert loaded.config_version == 4
     assert loaded.skills.enabled_builtin == ["bug-fix", "pyqt"]
     assert loaded.skills.max_selected == 2
     assert loaded.mcp.enabled
     assert loaded.mcp.servers[0].env["DEMO_TOKEN"] == "${DEMO_TOKEN}"
+    assert set(loaded.plugins.enabled_plugins) >= {"documents", "openai-docs"}
 
 
 def test_skill_manager_loads_only_selected_bodies_and_project_override(
@@ -100,6 +104,33 @@ def test_explicit_skill_is_honored_without_inventing_unknown_names(tmp_path):
     })
 
     assert selected == ["code-review", "refactor"]
+
+
+def test_common_plugins_select_at_syntax_and_can_be_disabled(tmp_path):
+    manager = SkillManager(tmp_path, SkillConfig(max_selected=3))
+    selected = manager.select_for_task({
+        "title": "Use @documents to create a Word report",
+        "description": "输出 report.docx",
+        "type": "coding",
+        "allowed_paths": ["report.docx"],
+    })
+    assert selected[0] == "documents"
+
+    manager.configure(
+        tmp_path, SkillConfig(max_selected=3),
+        PluginConfig(enabled=True, enabled_plugins=["pdf"]),
+    )
+    assert "documents" not in {item.name for item in manager.list_skills()}
+    assert "pdf" in {item.name for item in manager.list_skills()}
+
+
+def test_openai_docs_builtin_mcp_is_request_scoped():
+    config = ProjectAgentConfig()
+    assert config.builtin_mcp_servers("修复普通 HTML 页面") == []
+    servers = config.builtin_mcp_servers("查询 Codex 官方文档")
+    assert len(servers) == 1
+    assert servers[0].transport == "streamable_http"
+    assert servers[0].url == "https://developers.openai.com/mcp"
 
 
 def test_task_repository_persists_selected_skills(tmp_path):
@@ -286,6 +317,80 @@ def test_windows_mcp_batch_launcher_uses_comspec():
         r"C:\Windows\System32\cmd.exe", "/d", "/s", "/c",
     ]
     assert "mcp.cmd" in command[4]
+
+
+class _HTTPMCPHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        message = json.loads(self.rfile.read(length) or b"{}")
+        if "id" not in message:
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        method = message.get("method")
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "http-test", "version": "1"},
+            }
+        elif method == "tools/list":
+            result = {"tools": [{
+                "name": "search_docs", "description": "Search docs",
+                "inputSchema": {"type": "object", "properties": {}},
+                "annotations": {"readOnlyHint": True},
+            }]}
+        else:
+            result = {"content": [{"type": "text", "text": "ok"}]}
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": message["id"], "result": result,
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Mcp-Session-Id", "test-session")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_DELETE(self):
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
+
+def test_streamable_http_mcp_connects_and_exposes_tools(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HTTPMCPHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    manager = MCPManager(tmp_path)
+    config = MCPConfig(enabled=True, servers=[MCPServerConfig(
+        name="docs", transport="streamable_http",
+        url=f"http://127.0.0.1:{server.server_port}/mcp",
+        read_only=True,
+    )])
+
+    async def exercise():
+        statuses = await manager.configure(tmp_path, config)
+        names = [
+            item["function"]["name"]
+            for item in manager.tool_definitions("analysis")
+        ]
+        await manager.close()
+        return statuses, names
+
+    try:
+        statuses, names = asyncio.run(exercise())
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert statuses["docs"]["status"] == "connected"
+    assert "mcp__docs__search_docs" in names
 
 
 def test_mcp_approval_is_project_local_and_invalidated_by_config_change(tmp_path):
