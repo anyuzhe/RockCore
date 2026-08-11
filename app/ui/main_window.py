@@ -1106,7 +1106,7 @@ class MainWindow(QMainWindow):
             )
             self.task_panel.update_stage(
                 "worker", "interrupted",
-                "已保存文件和进度，等待继续，不计为执行失败",
+                "已保存有效文件或结构化进度，等待继续",
                 repair_round=task_repair_round,
             )
             self.task_panel.append_stage_output(
@@ -1114,19 +1114,45 @@ class MainWindow(QMainWindow):
                 f"待继续原因：{data.get('reason', '达到用户设置的硬上限')}",
                 repair_round=task_repair_round,
             )
+        elif event_type == "task_needs_user_action" and is_selected:
+            self.bridge.task_update.emit(
+                data.get("task_id", ""), "needs_attention"
+            )
+            self.task_panel.update_stage(
+                "worker", "needs_attention",
+                "任务需要用户完成授权、选择或冲突处理",
+                repair_round=task_repair_round,
+            )
+            self.task_panel.append_stage_output(
+                "worker",
+                f"需要处理：{data.get('reason', '请查看任务说明')}",
+                repair_round=task_repair_round,
+            )
         elif event_type == "task_failed" and is_selected:
-            self.bridge.task_update.emit(data.get("task_id", ""), "failed")
             failure_stage = data.get("failure_stage", "")
+            self.bridge.task_update.emit(
+                data.get("task_id", ""),
+                "model_configuration_failed"
+                if failure_stage == "model_configuration" else "failed",
+            )
             prefix = (
-                "RockCore 流程错误"
+                "失败—模型配置不可用"
+                if failure_stage == "model_configuration"
+                else "RockCore 流程错误"
                 if failure_stage in {
                     "budget", "budget_finalization", "validation",
                     "worktree_create", "git_integration",
                 }
                 else "错误"
             )
+            detail = str(data.get("error", "未知错误"))
+            if (
+                failure_stage == "model_configuration"
+                and detail.startswith("模型配置不可用：")
+            ):
+                detail = detail.removeprefix("模型配置不可用：")
             self.task_panel.append_stage_output(
-                "worker", f"{prefix}：{data.get('error', '未知错误')}",
+                "worker", f"{prefix}：{detail}",
                 repair_round=task_repair_round,
             )
             self._capture_diff(data.get("result"))
@@ -1168,6 +1194,26 @@ class MainWindow(QMainWindow):
                 "worker", "running",
                 f"执行模型从 {data.get('from_provider', '?')} 切换到 "
                 f"{data.get('to_provider', '?')}",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_model_fallback" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"模型 {data.get('from_model', '?')} 不可用，正在尝试 "
+                f"{data.get('to_model', '?')}",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_model_fallback_succeeded" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"已自动降级：{data.get('from_model', '?')} → "
+                f"{data.get('to_model', '?')}，任务继续执行",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_provider_fallback_succeeded" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"已自动降级到 {data.get('to_provider', '?')}，任务继续执行",
                 repair_round=task_repair_round,
             )
         elif event_type == "task_refined" and is_selected:
@@ -1241,19 +1287,21 @@ class MainWindow(QMainWindow):
             self.project_panel.update_job_status(finished_job_id, fin_status)
             if fin_status == "failed":
                 self.status_label.setText("任务失败")
-            elif fin_status in {"interrupted", "needs_attention"}:
-                self.status_label.setText("任务需继续处理")
+            elif fin_status == "interrupted":
+                self.status_label.setText("任务已保存有效进度，待继续")
+            elif fin_status == "needs_attention":
+                self.status_label.setText("任务需要你的处理")
             else:
                 self.status_label.setText("任务完成")
             self._capture_diff()
             if is_selected:
                 self._reload_selected_workflow()
         elif event_type == "job_needs_attention":
-            self.status_label.setText("任务已保存，等待继续")
+            self.status_label.setText("任务需要你的处理")
             if is_selected:
                 self.task_panel.append_stage_output(
                     "worker",
-                    f"已保存进度：{data.get('reason', '达到最高自动额度')}",
+                    f"请处理后继续：{data.get('reason', '需要用户完成必要操作')}",
                 )
         elif event_type == "job_failed":
             self.status_label.setText("任务失败")

@@ -139,12 +139,20 @@ class Scheduler:
                         try:
                             r = await task_runner(tid, tdata, **shared_kwargs)
                             results[tid] = r
-                            if (
-                                isinstance(r, dict)
-                                and r.get("status") == "needs_continuation"
-                            ):
-                                # Stop dependent work without mislabelling the
-                                # checkpointed task as completed.
+                            is_failed_result = isinstance(r, dict) and (
+                                r.get("status") in {
+                                    "failed", "blocked", "needs_continuation",
+                                    "needs_user_action",
+                                }
+                                or (
+                                    "error" in r
+                                    and r.get("status") != "completed"
+                                )
+                            )
+                            if is_failed_result:
+                                # Stop dependent work without mislabelling a
+                                # failed, checkpointed, or user-blocked task as
+                                # completed.
                                 self._failed.add(tid)
                             else:
                                 self._completed.add(tid)

@@ -284,8 +284,8 @@ def test_two_repair_rounds_are_recorded_then_stop_with_clear_reason(tmp_path):
             )
 
             repos["_session"].refresh(job)
-            assert job.status == "needs_attention"
-            assert engine.state_machine.get_state(job.job_id) == JobState.WAITING_USER
+            assert job.status == "failed"
+            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
             assert reviewer.calls == 3
             assert planner.calls == 2
             assert execution_calls == [{"R01T001"}, {"R02T001"}]

@@ -3,6 +3,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from orchestrator.agent_config import PROVIDER_MODELS, ProjectAgentConfig
 from orchestrator.event_bus import EventBus
 from orchestrator.model_router import ModelRouter
@@ -149,5 +151,53 @@ def test_router_downgrades_unavailable_kimi_model_and_caches_result():
         assert len(fallback_events) == 2
         assert fallback_events[0]["data"]["from_model"] == "kimi-k2.7-code"
         assert fallback_events[0]["data"]["to_model"] == "kimi-k2.6"
+        success_events = events.get_history("task_model_fallback_succeeded")
+        assert len(success_events) == 2
+        assert success_events[0]["data"]["to_model"] == "kimi-k2.6"
+
+    asyncio.run(scenario())
+
+
+def test_router_tries_every_kimi_candidate_before_reporting_unavailable():
+    class Provider:
+        model = "kimi-k2.7-code"
+        authentication_mode = "api"
+        MAX_OUTPUT_TOKENS = 8_192
+
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def fallback_models(failed_model):
+            return [
+                model for model in ("kimi-k2.6", "kimi-k2.5")
+                if model != failed_model
+            ]
+
+        async def chat_with_tools(self, *_args, **kwargs):
+            model = kwargs.get("model")
+            self.calls.append(model)
+            raise RuntimeError(
+                f"Error code: 404 - Not found the model {model} "
+                "or Permission denied (resource_not_found_error)"
+            )
+
+    async def scenario():
+        provider = Provider()
+        events = EventBus()
+        router = ModelRouter(event_bus=events)
+        router.register_provider("kimi", provider)
+
+        with pytest.raises(RuntimeError, match="resource_not_found_error"):
+            await router.chat_with_tools(
+                "worker", "system", [], [], provider_override="kimi",
+                model="kimi-k2.7-code", allow_provider_fallback=False,
+            )
+
+        assert provider.calls == [
+            "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5",
+        ]
+        assert len(events.get_history("task_model_fallback")) == 2
+        assert not events.get_history("task_model_fallback_succeeded")
 
     asyncio.run(scenario())

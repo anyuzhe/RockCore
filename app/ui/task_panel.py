@@ -806,10 +806,14 @@ class TaskPanel(QWidget):
                 reason = job.get("failure_reason") or "失败原因保留在对应步骤中"
                 hint = job.get("recovery_hint") or "可以直接继续提出修复要求"
                 self.agent_summary.setText(f"本次执行未完成：{reason}。{hint}")
-        elif status in {"interrupted", "needs_attention"}:
+        elif status == "interrupted":
             reason = job.get("failure_reason") or "上次运行未正常结束"
             hint = job.get("recovery_hint") or "可以从检查点继续"
-            self.agent_summary.setText(f"{reason}。{hint}")
+            self.agent_summary.setText(f"已保存有效进度：{reason}。{hint}")
+        elif status == "needs_attention":
+            reason = job.get("failure_reason") or "需要你完成一项操作"
+            hint = job.get("recovery_hint") or "完成后可以继续此需求"
+            self.agent_summary.setText(f"需要你的处理：{reason}。{hint}")
         elif status == "cancelled":
             self.agent_summary.setText("执行已停止。当前结果仍然保留，可以从这里继续。")
         else:

@@ -296,6 +296,38 @@ def test_job_finished_keeps_sidebar_and_header_on_same_terminal_status():
     window.close()
 
 
+def test_successful_model_fallback_and_terminal_statuses_are_explicit():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-FALLBACK",
+        "user_request": "修改页面",
+        "status": "executing",
+        "created_at": "2026-08-11T10:00:00",
+    }
+    window.project_panel.set_jobs([job])
+    window.task_panel.set_workflow(job)
+    window._selected_job_id = "JOB-FALLBACK"
+
+    window._on_event("task_model_fallback_succeeded", {
+        "job_id": "JOB-FALLBACK",
+        "task_id": "T001",
+        "from_model": "kimi-k2.7-code",
+        "to_model": "kimi-k2.6",
+    })
+    output = window.task_panel.stages["worker"].output.toPlainText()
+    assert "已自动降级" in output
+    assert "任务继续执行" in output
+
+    window._on_event("job_finished", {
+        "job_id": "JOB-FALLBACK", "status": "interrupted",
+    })
+    assert window.task_panel.job_status_label.text() == "待继续"
+    assert "待继续" in window.project_panel.job_list.item(0).text()
+    assert "待继续" in window.status_label.text()
+    window.close()
+
+
 def test_switching_from_fast_to_auto_restores_the_full_pipeline(tmp_path):
     _app()
     dialog = ProjectConfigDialog(str(tmp_path))

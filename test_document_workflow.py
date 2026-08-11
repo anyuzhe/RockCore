@@ -468,7 +468,7 @@ def test_execution_marks_budget_exhausted_artifact_done_after_validation(tmp_pat
     asyncio.run(scenario())
 
 
-def test_budget_ceiling_without_artifact_is_saved_for_continuation(tmp_path):
+def test_hard_cost_ceiling_without_artifact_requests_user_action(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
 
@@ -513,8 +513,8 @@ def test_budget_ceiling_without_artifact_is_saved_for_continuation(tmp_path):
             repos["_session"].refresh(task)
             assert result["status"] == "needs_attention"
             assert job.status == "needs_attention"
-            assert task.status == "interrupted"
-            assert engine.event_bus.get_history("task_needs_continuation")
+            assert task.status == "needs_attention"
+            assert engine.event_bus.get_history("task_needs_user_action")
             assert not engine.event_bus.get_history("task_failed")
         finally:
             repos["_session"].close()
@@ -750,7 +750,7 @@ def test_escalation_does_not_retry_a_user_input_requirement(tmp_path):
             _task(), SimpleNamespace(job_id="JOB-DOC"), {}, worker, str(tmp_path)
         )
 
-        assert result["status"] == "needs_continuation"
+        assert result["status"] == "needs_user_action"
         assert result["failure_stage"] == "user_input_required"
         assert worker.calls == 1
 

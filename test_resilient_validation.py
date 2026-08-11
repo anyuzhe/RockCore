@@ -125,7 +125,7 @@ def test_local_html_validation_reports_duplicate_ids(tmp_path):
         repos["_session"].close()
 
 
-def test_provider_balance_error_pauses_fast_without_replanning(tmp_path):
+def test_provider_balance_error_requests_user_action_without_replanning(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
 
@@ -142,10 +142,64 @@ def test_provider_balance_error_pauses_fast_without_replanning(tmp_path):
         result = await engine._execute_single_task_with_escalation(
             task, SimpleNamespace(job_id="JOB-1"), {}, worker, str(tmp_path)
         )
-        assert result["status"] == "needs_continuation"
-        assert result["failure_stage"] == "execution_continuation"
+        assert result["status"] == "needs_user_action"
+        assert result["failure_stage"] == "user_action_required"
         assert "Insufficient Balance" in result["error"]
         assert worker.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_exhausted_model_candidates_are_a_clear_terminal_failure(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    class Model404Worker:
+        max_turns = 8
+        max_exploration_turns = 3
+
+        def scoped_to(self, _root):
+            return self
+
+        async def run(self, *_args, **_kwargs):
+            return {
+                "status": "failed",
+                "error": (
+                    "Error code: 404 - Not found the model kimi-k2.7-code "
+                    "or Permission denied (resource_not_found_error)"
+                ),
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(project_root))
+            job = repos["job"].create("JOB-MODEL-404", project.id, "edit")
+            task = repos["task"].create(
+                "T001", job.id, "Edit", task_type="coding",
+                allowed_paths=["output.py"],
+            )
+            engine.register_agent("worker", Model404Worker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            result = await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(job)
+            repos["_session"].refresh(task)
+            assert result["status"] == "failed"
+            assert job.status == "failed"
+            assert task.status == "model_configuration_failed"
+            failed = engine.event_bus.get_history("task_failed")[-1]["data"]
+            assert failed["failure_stage"] == "model_configuration"
+            assert "模型配置不可用" in failed["error"]
+            assert not engine.event_bus.get_history("task_needs_continuation")
+            assert not engine.event_bus.get_history("task_needs_user_action")
+        finally:
+            repos["_session"].close()
 
     asyncio.run(scenario())
 
@@ -190,7 +244,7 @@ def test_failed_acceptance_preserves_changes_as_continuation(tmp_path):
             )
 
             repos["_session"].refresh(task)
-            assert result["status"] == "needs_attention"
+            assert result["status"] == "interrupted"
             assert task.status == "interrupted"
             assert (project_root / "broken.py").exists()
             event = engine.event_bus.get_history(

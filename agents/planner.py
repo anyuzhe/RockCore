@@ -86,16 +86,19 @@ Rules:
 2. Return repairable=false when completion requires unavailable credentials,
    missing external information, user-only decisions, protected-path changes,
    or mutually contradictory requirements. Give a specific reason.
-3. Do not reject a repair merely because it is difficult. Prefer a small,
+3. Set requires_user_action=true only when the user must provide credentials,
+   information, authorization, or a product decision. Otherwise set it false.
+4. Do not reject a repair merely because it is difficult. Prefer a small,
    focused repair plan when the findings are actionable.
-4. When repairable=true, include one to ten executable tasks. Use relative paths,
+5. When repairable=true, include one to ten executable tasks. Use relative paths,
    direct dependencies only, and real test commands when available.
-5. Do not repeat the original implementation. Plan only the changes needed to
+6. Do not repeat the original implementation. Plan only the changes needed to
    address the review findings and verify them.
 
 Output ONLY valid JSON with this structure:
 {
   "repairable": true,
+  "requires_user_action": false,
   "reason": "Why the findings can or cannot be completed",
   "plan": {
     "summary": "Brief repair plan summary",
@@ -327,6 +330,12 @@ Output ONLY valid JSON.""",
             if isinstance(repairable_value, str):
                 repairable_value = repairable_value.strip().lower() == "true"
             repairable = bool(repairable_value)
+            user_action_value = decision.get("requires_user_action", False)
+            if isinstance(user_action_value, str):
+                user_action_value = (
+                    user_action_value.strip().lower() == "true"
+                )
+            requires_user_action = bool(user_action_value) and not repairable
             reason = str(decision.get("reason") or "").strip()
             plan = decision.get("plan") or {}
             if not isinstance(plan, dict):
@@ -361,6 +370,7 @@ Output ONLY valid JSON.""",
 
             return {
                 "repairable": repairable,
+                "requires_user_action": requires_user_action,
                 "reason": reason,
                 "plan": plan,
             }
@@ -370,6 +380,7 @@ Output ONLY valid JSON.""",
             logger.error("Review repair assessment failed: %s", error)
             return {
                 "repairable": False,
+                "requires_user_action": False,
                 "reason": f"策划者无法完成可修复性判断：{error}",
                 "plan": {"summary": "", "tasks": []},
                 "assessment_error": True,

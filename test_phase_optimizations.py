@@ -420,7 +420,7 @@ def test_continuation_includes_task_failure_checkpoint(tmp_path):
         repos["_session"].close()
 
 
-def test_review_failure_after_completed_work_is_needs_attention(tmp_path):
+def test_review_failure_without_user_action_is_failed(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         repos = engine._get_repos()
@@ -439,9 +439,9 @@ def test_review_failure_after_completed_work_is_needs_attention(tmp_path):
             )
 
             repos["_session"].refresh(job)
-            assert job.status == "needs_attention"
+            assert job.status == "failed"
             assert job.failure_reason.startswith("The final check")
-            assert engine.state_machine.get_state(job.job_id) == JobState.WAITING_USER
+            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
         finally:
             repos["_session"].close()
 

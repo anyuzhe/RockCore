@@ -635,7 +635,7 @@ class _ThrowingProviderWorker:
         raise RuntimeError("Missing credentials for DeepSeek")
 
 
-def test_max_turn_failures_preserve_progress_after_primary_retries(tmp_path):
+def test_max_turn_failures_without_progress_are_terminal_after_retries(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         worker = _RecoveringWorker()
@@ -654,8 +654,8 @@ def test_max_turn_failures_preserve_progress_after_primary_retries(tmp_path):
             str(tmp_path),
         )
 
-        assert result["status"] == "needs_continuation"
-        assert result["failure_stage"] == "budget_continuation"
+        assert result["status"] == "failed"
+        assert result["failure_stage"] == "execution_failed_without_progress"
         assert len(worker.calls) == 3
         assert all(call.get("provider_override") is None for call in worker.calls)
         assert "attempt 1 failed" in worker.calls[1]["recovery_context"]
@@ -1094,8 +1094,8 @@ def test_budget_error_stops_worker_escalation_immediately(tmp_path):
             {}, worker, str(tmp_path),
         )
 
-        assert result["status"] == "needs_continuation"
-        assert result["failure_stage"] == "budget_continuation"
+        assert result["status"] == "failed"
+        assert result["failure_stage"] == "budget_exhausted_without_progress"
         assert "budget exceeded" in result["error"].lower()
         assert worker.calls == 1
         assert not engine.event_bus.get_history("task_replanning")

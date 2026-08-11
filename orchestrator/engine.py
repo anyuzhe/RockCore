@@ -1117,7 +1117,7 @@ class Engine:
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
                     return
-                if job.status in {"failed", "needs_attention"}:
+                if job.status in {"failed", "interrupted", "needs_attention"}:
                     if worker and saved_turns is not None:
                         worker.max_turns = saved_turns
                     return
@@ -1478,12 +1478,12 @@ class Engine:
         )
 
         if errors:
-            logger.warning(f"Plan validation needs user attention: {errors}")
-            repos["job"].update_status(job.job_id, "needs_attention")
+            logger.warning(f"Plan validation failed: {errors}")
+            repos["job"].update_status(job.job_id, "failed")
             self._store_job_failure(
                 repos, job.job_id, f"Plan validation failed: {errors[0]}"
             )
-            self.state_machine.transition(job.job_id, JobState.WAITING_USER)
+            self.state_machine.transition(job.job_id, JobState.FAILED)
             await self.event_bus.publish("plan_rejected", job_id=job.job_id, errors=errors)
             await self.event_bus.publish("phase_summary",
                 phase="planner", agent_type="planner", status="rejected",
@@ -1491,8 +1491,8 @@ class Engine:
                 details={"errors": errors},
             )
             await self.event_bus.publish(
-                "job_needs_attention", job_id=job.job_id,
-                reason=f"计划需要调整：{errors[0]}",
+                "job_failed", job_id=job.job_id,
+                error=f"计划生成失败：{errors[0]}",
                 failure_stage="plan_validation",
             )
             return
@@ -2273,24 +2273,33 @@ class Engine:
                     )
                     error = f"Git isolation failed during {phase}: {detail}"
                     logger.warning("Task %s: %s", task_id, error)
-                    continuation = {
-                        "status": "needs_continuation",
+                    needs_user = self._is_user_action_required(error)
+                    outcome = {
+                        "status": (
+                            "needs_user_action" if needs_user else "failed"
+                        ),
                         "error": error,
                         "failure_stage": "worktree_create",
-                        "checkpoint": {"integration": wt_result},
                     }
-                    repos["task"].update_status_by_pk(t.id, "interrupted")
+                    if needs_user:
+                        outcome["checkpoint"] = {"integration": wt_result}
+                    task_status = "needs_attention" if needs_user else "failed"
+                    repos["task"].update_status_by_pk(t.id, task_status)
                     self._checkpoint_task(
-                        repos, job, t, status="interrupted",
-                        result=continuation, error=error,
+                        repos, job, t, status=task_status,
+                        result=outcome, error=error,
                     )
                     await self.event_bus.publish(
-                        "task_needs_continuation", job_id=job.job_id,
-                        task_id=task_id, reason=error,
+                        (
+                            "task_needs_user_action"
+                            if needs_user else "task_failed"
+                        ),
+                        job_id=job.job_id,
+                        task_id=task_id, reason=error, error=error,
                         failure_stage="worktree_create",
-                        checkpoint=continuation["checkpoint"],
+                        checkpoint=outcome.get("checkpoint", {}),
                     )
-                    return continuation
+                    return outcome
                 else:
                     has_worktree = True
                     task_worktree_root = wt_result.get("path", job.project.root_path if job.project else ".")
@@ -2470,6 +2479,34 @@ class Engine:
                         files=runtime_relocation,
                     )
 
+            if result and result.get("status") == "needs_user_action":
+                reason = str(result.get("error") or "需要用户完成必要操作")
+                repos["task"].update_status_by_pk(t.id, "needs_attention")
+                self._checkpoint_task(
+                    repos, job, t, status="needs_attention", result=result,
+                    error=reason,
+                )
+                await self.event_bus.publish(
+                    "task_needs_user_action",
+                    job_id=job.job_id,
+                    task_id=task_id,
+                    reason=reason,
+                    failure_stage=result.get(
+                        "failure_stage", "user_action_required"
+                    ),
+                    checkpoint=result.get("checkpoint", {}),
+                    worktree_path=(
+                        task_worktree_root if has_worktree else ""
+                    ),
+                )
+                if has_worktree:
+                    preserve = getattr(
+                        self.merge_manager, "preserve_worktree", None
+                    )
+                    if callable(preserve):
+                        preserve(task_id)
+                return result
+
             if result and result.get("status") == "needs_continuation":
                 reason = str(result.get("error") or "任务已保存，等待继续")
                 repos["task"].update_status_by_pk(t.id, "interrupted")
@@ -2545,36 +2582,26 @@ class Engine:
                     )
                     logger.warning(
                         f"Task {task_id}: {t.task_type} task completed without "
-                        "its required output — preserving it for continuation"
+                        "its required output"
                     )
-                    continuation = {
-                        "status": "needs_continuation",
+                    failure = {
+                        "status": "failed",
                         "error": error,
                         "failure_stage": "missing_required_output",
-                        "checkpoint": {
-                            "changes": task_changes,
-                            "worker_result": worker_result,
-                        },
                     }
-                    repos["task"].update_status_by_pk(t.id, "interrupted")
+                    repos["task"].update_status_by_pk(t.id, "failed")
                     self._checkpoint_task(
-                        repos, job, t, status="interrupted",
-                        result=continuation, error=error,
+                        repos, job, t, status="failed",
+                        result=failure, error=error,
                     )
                     await self.event_bus.publish(
-                        "task_needs_continuation", job_id=job.job_id,
-                        task_id=task_id, reason=error,
+                        "task_failed", job_id=job.job_id,
+                        task_id=task_id, error=error,
                         failure_stage="missing_required_output",
-                        checkpoint=continuation["checkpoint"],
-                        worktree_path=(task_worktree_root if has_worktree else ""),
                     )
                     if has_worktree:
-                        preserve = getattr(
-                            self.merge_manager, "preserve_worktree", None
-                        )
-                        if callable(preserve):
-                            preserve(task_id)
-                    return continuation
+                        await self.merge_manager.abort_worktree(task_id)
+                    return failure
 
                 if (
                     recovered_for_validation
@@ -2681,8 +2708,8 @@ class Engine:
                                 merge_result.get("error")
                                 or "目标目录存在同名文件，等待显式合并"
                             )
-                            continuation = {
-                                "status": "needs_continuation",
+                            user_action = {
+                                "status": "needs_user_action",
                                 "error": detail,
                                 "failure_stage": "merge_preflight",
                                 "checkpoint": {
@@ -2690,16 +2717,18 @@ class Engine:
                                     "integration": merge_result,
                                 },
                             }
-                            repos["task"].update_status_by_pk(t.id, "interrupted")
+                            repos["task"].update_status_by_pk(
+                                t.id, "needs_attention"
+                            )
                             self._checkpoint_task(
-                                repos, job, t, status="interrupted",
-                                result=continuation, error=detail,
+                                repos, job, t, status="needs_attention",
+                                result=user_action, error=detail,
                             )
                             await self.event_bus.publish(
-                                "task_needs_continuation",
+                                "task_needs_user_action",
                                 job_id=job.job_id, task_id=task_id,
                                 reason=detail, failure_stage="merge_preflight",
-                                checkpoint=continuation["checkpoint"],
+                                checkpoint=user_action["checkpoint"],
                                 worktree_path=merge_result.get("worktree_path", ""),
                             )
                             preserve = getattr(
@@ -2707,7 +2736,7 @@ class Engine:
                             )
                             if callable(preserve):
                                 preserve(task_id)
-                            return continuation
+                            return user_action
                         if merge_result.get("status") != "merged":
                             conflicts = merge_result.get("conflicts") or []
                             phase = str(merge_result.get("phase") or "merge")
@@ -2724,8 +2753,8 @@ class Engine:
                             error = f"Git integration failed during {phase}: {detail}"
                             if merge_result.get("preserved") and preserved_path:
                                 error += f"; worktree preserved at {preserved_path}"
-                                continuation = {
-                                    "status": "needs_continuation",
+                                user_action = {
+                                    "status": "needs_user_action",
                                     "error": error,
                                     "failure_stage": "git_integration",
                                     "checkpoint": {
@@ -2734,18 +2763,18 @@ class Engine:
                                     },
                                 }
                                 repos["task"].update_status_by_pk(
-                                    t.id, "interrupted"
+                                    t.id, "needs_attention"
                                 )
                                 self._checkpoint_task(
-                                    repos, job, t, status="interrupted",
-                                    result=continuation, error=error,
+                                    repos, job, t, status="needs_attention",
+                                    result=user_action, error=error,
                                 )
                                 await self.event_bus.publish(
-                                    "task_needs_continuation",
+                                    "task_needs_user_action",
                                     job_id=job.job_id, task_id=task_id,
                                     reason=error,
                                     failure_stage="git_integration",
-                                    checkpoint=continuation["checkpoint"],
+                                    checkpoint=user_action["checkpoint"],
                                     worktree_path=preserved_path,
                                 )
                                 preserve = getattr(
@@ -2753,7 +2782,7 @@ class Engine:
                                 )
                                 if callable(preserve):
                                     preserve(task_id)
-                                return continuation
+                                return user_action
                             repos["task"].update_status_by_pk(t.id, "failed")
                             self._checkpoint_task(
                                 repos, job, t, status="failed",
@@ -2861,10 +2890,14 @@ class Engine:
                             preserve(task_id)
                     return continuation
             else:
-                repos["task"].update_status_by_pk(t.id, "failed")
                 failure_stage = (
                     result.get("failure_stage", "") if result else ""
                 )
+                task_failure_status = (
+                    "model_configuration_failed"
+                    if failure_stage == "model_configuration" else "failed"
+                )
+                repos["task"].update_status_by_pk(t.id, task_failure_status)
                 await self.event_bus.publish("task_failed", job_id=job.job_id,
                                               task_id=task_id,
                                               error=result.get("error", "Unknown") if result else "Unknown",
@@ -2873,7 +2906,7 @@ class Engine:
                     await self.merge_manager.abort_worktree(task_id)
                 error = result.get("error", "Unknown") if result else "Unknown"
                 self._checkpoint_task(
-                    repos, job, t, status="failed", result=result,
+                    repos, job, t, status=task_failure_status, result=result,
                     error=error,
                 )
                 raise RuntimeError(error)
@@ -2928,23 +2961,28 @@ class Engine:
                     if isinstance(results.get(tid), dict)
                     and results[tid].get("status") == "needs_continuation"
                 ]
+                attention_tasks = [
+                    tid for tid in failed
+                    if isinstance(results.get(tid), dict)
+                    and results[tid].get("status") == "needs_user_action"
+                ]
                 failure_messages = [
                     str(results[tid].get("error", "")) for tid in failed
                     if isinstance(results.get(tid), dict)
                 ]
                 terminal_status = (
                     "needs_attention"
-                    if continuation_tasks or self.scheduler._completed or any(
+                    if attention_tasks or any(
                         self._is_user_input_required(message)
                         for message in failure_messages
                     )
-                    else "failed"
+                    else ("interrupted" if continuation_tasks else "failed")
                 )
                 repos["job"].update_status(job.job_id, terminal_status)
                 self.state_machine.transition(
                     job.job_id,
                     JobState.WAITING_USER
-                    if terminal_status == "needs_attention"
+                    if terminal_status in {"needs_attention", "interrupted"}
                     else JobState.FAILED,
                 )
                 direct_failures = [tid for tid in failed if tid not in blocked]
@@ -2958,9 +2996,13 @@ class Engine:
                 await self.event_bus.publish("phase_summary",
                     phase="execution", agent_type="worker",
                     status=(
-                        "interrupted" if continuation_tasks else "failed"
+                        "needs_attention" if attention_tasks else (
+                            "interrupted" if continuation_tasks else "failed"
+                        )
                     ),
                     summary=(
+                        f"等待用户处理后继续：{reason}"
+                        if attention_tasks else
                         f"已保存执行进度，等待继续：{reason}"
                         if continuation_tasks
                         else f"任务执行失败：{reason}"
@@ -2973,12 +3015,17 @@ class Engine:
                             {"needs_continuation": continuation_tasks}
                             if continuation_tasks else {}
                         ),
+                        **(
+                            {"needs_user_action": attention_tasks}
+                            if attention_tasks else {}
+                        ),
                     },
                 )
                 return {
                     "status": terminal_status,
                     "reason": reason,
                     "needs_continuation": continuation_tasks,
+                    "needs_user_action": attention_tasks,
                 }
         except Exception as e:
             logger.error(f"Execution failed: {e}")
@@ -3201,16 +3248,30 @@ class Engine:
                         task, "_rockcore_document_progress", {}
                     ),
                 }
+            document_progress = dict(
+                getattr(task, "_rockcore_document_progress", {}) or {}
+            )
+            if document_progress:
+                return {
+                    "status": "needs_continuation",
+                    "error": error,
+                    "failure_stage": "budget_continuation",
+                    "checkpoint": {
+                        "document_progress": document_progress,
+                        "reason": error,
+                    },
+                }
+            if self._is_user_action_required(error):
+                return {
+                    "status": "needs_user_action",
+                    "error": error,
+                    "failure_stage": "user_action_required",
+                    "checkpoint": {"reason": error},
+                }
             return {
-                "status": "needs_continuation",
+                "status": "failed",
                 "error": error,
-                "failure_stage": "budget_continuation",
-                "checkpoint": {
-                    "document_progress": getattr(
-                        task, "_rockcore_document_progress", {}
-                    ),
-                    "reason": error,
-                },
+                "failure_stage": "budget_exhausted_without_progress",
             }
 
         for attempt in range(1, primary_attempts + 2):
@@ -3252,7 +3313,7 @@ class Engine:
                     last_error = str(result["error"])
                     if self._is_user_input_required(last_error):
                         return {
-                            "status": "needs_continuation",
+                            "status": "needs_user_action",
                             "error": last_error,
                             "failure_stage": "user_input_required",
                             "checkpoint": {"reason": last_error},
@@ -3374,7 +3435,7 @@ class Engine:
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
                 if self._is_user_input_required(last_error):
                     return {
-                        "status": "needs_continuation",
+                        "status": "needs_user_action",
                         "error": last_error,
                         "failure_stage": "user_input_required",
                         "checkpoint": {"reason": last_error},
@@ -3418,6 +3479,9 @@ class Engine:
                 ),
             }
 
+        model_configuration_terminal = self._is_model_configuration_error(
+            last_error
+        )
         if (
             self._is_provider_capability_error(last_error)
             or self._is_provider_unavailable(last_error)
@@ -3429,6 +3493,9 @@ class Engine:
             if fallback:
                 if fallback.get("status") == "completed":
                     return fallback
+                model_configuration_terminal = bool(
+                    fallback.get("all_models_unavailable")
+                )
                 last_error = fallback.get("error", last_error)
 
         if not bool(getattr(task, "_rockcore_auto_repair", True)):
@@ -3469,32 +3536,60 @@ class Engine:
                     task, "_rockcore_document_progress", {}
                 ),
             }
-        if self._is_budget_error(last_error) or "max turns" in last_error.lower():
+        if model_configuration_terminal:
+            return {
+                "status": "failed",
+                "error": f"模型配置不可用：{last_error}",
+                "failure_stage": "model_configuration",
+            }
+
+        if self._is_user_action_required(last_error):
+            return {
+                "status": "needs_user_action",
+                "error": last_error,
+                "failure_stage": "user_action_required",
+                "checkpoint": {"reason": last_error},
+            }
+
+        checkpoint_progress = dict(
+            getattr(task, "_rockcore_document_progress", {}) or {}
+        )
+        if (
+            checkpoint_progress
+            and (
+                self._is_budget_error(last_error)
+                or "max turns" in last_error.lower()
+                or self._is_provider_unavailable(last_error)
+                or self._is_stalled_worker_error(last_error)
+            )
+        ):
             return {
                 "status": "needs_continuation",
                 "error": last_error,
-                "failure_stage": "budget_continuation",
+                "failure_stage": "checkpoint_continuation",
                 "checkpoint": {
                     "reason": last_error,
-                    "document_progress": getattr(
-                        task, "_rockcore_document_progress", {}
-                    ),
+                    "document_progress": checkpoint_progress,
                 },
             }
 
+        # No file change or structured progress exists here. Provider, tool,
+        # turn-limit and path failures are terminal rather than pretending the
+        # user has something useful to continue.
         if (
             self._is_provider_capability_error(last_error)
             or self._is_provider_unavailable(last_error)
             or self._is_stalled_worker_error(last_error)
             or self._is_task_path_mismatch(last_error)
+            or self._is_budget_error(last_error)
+            or "max turns" in last_error.lower()
             or "ended without editing files" in last_error.lower()
             or "tool_payload_truncated" in last_error.lower()
         ):
             return {
-                "status": "needs_continuation",
+                "status": "failed",
                 "error": last_error,
-                "failure_stage": "execution_continuation",
-                "checkpoint": {"reason": last_error},
+                "failure_stage": "execution_failed_without_progress",
             }
 
         # Non-budget/model failures with no usable artifact remain failures.
@@ -3711,6 +3806,41 @@ class Engine:
         )
         return any(marker in normalized for marker in markers)
 
+    @staticmethod
+    def _is_model_configuration_error(error: str) -> bool:
+        """Return whether every attempted request rejected the model identity."""
+        normalized = str(error or "").lower()
+        markers = (
+            "not found the model", "model not found",
+            "resource_not_found_error", "unknown model",
+            "model does not exist", "model is not available",
+        )
+        return any(marker in normalized for marker in markers) or (
+            "permission denied" in normalized
+            and ("model" in normalized or "404" in normalized)
+        )
+
+    @classmethod
+    def _is_user_action_required(cls, error: str) -> bool:
+        """Reserve needs_attention for an action only the user can perform."""
+        normalized = str(error or "").lower()
+        if cls._is_model_configuration_error(error):
+            return False
+        if cls._is_user_input_required(error):
+            return True
+        markers = (
+            "invalid api key", "authentication", "authorization required",
+            "missing credentials", "credentials were not found",
+            "credentials unavailable",
+            "approval required", "insufficient balance", "insufficient_balance",
+            "insufficient_quota", "quota exceeded", "billing",
+            "billable api hard cost", "cost limit would be exceeded",
+            "merge conflict", "unresolved git conflict", "permission denied",
+            "access denied", "repository lock", "index.lock",
+            "需要用户", "只能由用户", "用户提供", "需要授权",
+        )
+        return any(marker in normalized for marker in markers)
+
     async def _run_worker_fallback(self, worker, task, worktree_root: str,
                                    original_error: str) -> dict | None:
         """Try one tool-capable alternate worker when the primary provider is unavailable."""
@@ -3752,12 +3882,17 @@ class Engine:
                 fallback_errors.append(f"{provider}: {result['error']}")
         if fallback_errors:
             logger.warning("Worker fallback attempts failed: %s", "; ".join(fallback_errors))
+            all_model_errors = all(
+                self._is_model_configuration_error(error)
+                for error in [original_error, *fallback_errors]
+            )
             return {
                 "status": "failed",
                 "error": (
                     f"Primary worker provider failed: {original_error}; "
                     f"fallback attempts failed: {'; '.join(fallback_errors)}"
                 ),
+                "all_models_unavailable": all_model_errors,
             }
         return None
 
@@ -4038,6 +4173,9 @@ class Engine:
                         "worker" if outcome_status == "execution_failed"
                         else "planner"
                     ),
+                    requires_user_action=(
+                        True if outcome_status == "needs_user_action" else None
+                    ),
                 )
                 return review_result
 
@@ -4067,6 +4205,7 @@ class Engine:
                 "review_summary": review_result.get("summary", ""),
                 "review_issues": review_result.get("issues", []),
                 "repairable": False,
+                "requires_user_action": True,
                 "reason": precondition_reason,
                 "status": "unrepairable",
                 "plan": {"summary": "", "tasks": []},
@@ -4080,7 +4219,7 @@ class Engine:
                 repair_round=round_number,
             )
             return {
-                "status": "unrepairable",
+                "status": "needs_user_action",
                 "reason": precondition_reason,
             }
 
@@ -4142,6 +4281,9 @@ class Engine:
             "review_summary": review_result.get("summary", ""),
             "review_issues": review_result.get("issues", []),
             "repairable": bool(decision.get("repairable")),
+            "requires_user_action": bool(
+                decision.get("requires_user_action")
+            ),
             "reason": reason,
             "status": "assessed",
             "plan": decision.get("plan") or {},
@@ -4161,7 +4303,14 @@ class Engine:
                 details={"reason": reason, "repair_round": round_number},
                 repair_round=round_number,
             )
-            return {"status": repair_record["status"], "reason": reason}
+            return {
+                "status": (
+                    "needs_user_action"
+                    if decision.get("requires_user_action")
+                    else repair_record["status"]
+                ),
+                "reason": reason,
+            }
 
         plan_data = self._namespace_repair_plan(
             decision.get("plan") or {}, round_number
@@ -4268,19 +4417,25 @@ class Engine:
     async def _finish_review_failure(self, job, repos, review_result: dict,
                                      reason: str, status: str,
                                      repair_round: int = 0,
-                                     agent_type: str = "reviewer"):
+                                     agent_type: str = "reviewer",
+                                     requires_user_action: bool | None = None):
         """Persist and publish a review failure with an actionable explanation."""
         if self._is_cancelled(job.job_id, job, repos):
             return
-        repos["job"].update_status(job.job_id, "needs_attention")
+        if requires_user_action is None:
+            requires_user_action = self._is_user_action_required(reason)
+        terminal_status = "needs_attention" if requires_user_action else "failed"
+        repos["job"].update_status(job.job_id, terminal_status)
         self._store_job_failure(repos, job.job_id, reason)
-        if self.state_machine.get_state(job.job_id) != JobState.WAITING_USER:
-            if not self.state_machine.transition(
-                job.job_id, JobState.WAITING_USER
-            ):
+        target_state = (
+            JobState.WAITING_USER if requires_user_action else JobState.FAILED
+        )
+        if self.state_machine.get_state(job.job_id) != target_state:
+            if not self.state_machine.transition(job.job_id, target_state):
                 logger.warning(
-                    "Could not transition %s to WAITING_USER from %s",
+                    "Could not transition %s to %s from %s",
                     job.job_id,
+                    target_state.name,
                     self.state_machine.get_state(job.job_id).name,
                 )
         await self.event_bus.publish(
@@ -4294,8 +4449,11 @@ class Engine:
             repair_round=repair_round,
         )
         await self.event_bus.publish(
-            "job_needs_attention", job_id=job.job_id, reason=reason,
-            failure_stage="review_repair_incomplete",
+            "job_needs_attention" if requires_user_action else "job_failed",
+            job_id=job.job_id,
+            **({"reason": reason} if requires_user_action else {"error": reason}),
+            failure_stage="review_user_action_required"
+            if requires_user_action else "review_repair_incomplete",
             repair_round=repair_round,
         )
 
@@ -4353,6 +4511,8 @@ class Engine:
     def _friendly_provider_error(error: str) -> str:
         """Translate common provider failures into concise user-facing reasons."""
         normalized = (error or "").lower()
+        if Engine._is_model_configuration_error(error):
+            return "模型配置不可用；已尝试同供应商候选模型和可用备用供应商"
         if "credit_balance_exhausted" in normalized or "no credits remaining" in normalized:
             return (
                 "Platform API 账户无可用余额，或认证通道配置错误"
@@ -4372,6 +4532,12 @@ class Engine:
     @classmethod
     def _failure_details(cls, error: str) -> tuple[str, str]:
         normalized = (error or "").lower()
+        if cls._is_model_configuration_error(error):
+            return (
+                "model_configuration",
+                "模型配置不可用。请在设置中选择供应商当前开放的模型 ID；"
+                "RockCore 已自动尝试可用候选项，无需继续同一任务。",
+            )
         if cls._is_user_input_required(error):
             if "password" in normalized or "encrypted" in normalized:
                 return (
@@ -4820,7 +4986,7 @@ Prefer these existing files when relevant:
         if job.status == "cancelled":
             worker.max_turns = saved_turns
             return
-        if job.status in {"failed", "needs_attention"}:
+        if job.status in {"failed", "interrupted", "needs_attention"}:
             worker.max_turns = saved_turns
             return
 

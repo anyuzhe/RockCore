@@ -30,7 +30,7 @@ JOB_STATUS = {
     "done": ("#55a86b", "已完成"),
     "failed": ("#d96868", "失败"),
     "cancelled": ("#8f8f98", "已停止"),
-    "interrupted": ("#d9914f", "已中断，可继续"),
+    "interrupted": ("#d9914f", "待继续"),
     "needs_attention": ("#d9914f", "需处理"),
     "governing": ("#d4a94f", "分析中"),
     "planning": ("#d4a94f", "规划中"),

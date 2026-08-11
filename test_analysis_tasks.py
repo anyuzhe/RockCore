@@ -197,7 +197,7 @@ def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
 
             for task in (first, second, third):
                 repos["_session"].refresh(task)
-            assert first.status == "interrupted"
+            assert first.status == "failed"
             assert second.status == "blocked"
             assert third.status == "blocked"
 
@@ -206,7 +206,6 @@ def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
                 "done": 0,
                 "failed": 1,
                 "blocked": 2,
-                "needs_continuation": ["T001"],
             }
         finally:
             repos["_session"].close()
@@ -216,6 +215,12 @@ def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
 
 def test_blocked_tasks_have_a_distinct_user_facing_status():
     assert STATUS_STYLE["blocked"]["text"] == "已阻塞"
+
+
+def test_model_configuration_failure_has_an_explicit_status():
+    assert STATUS_STYLE["model_configuration_failed"]["text"] == (
+        "失败—模型配置不可用"
+    )
 
 
 def test_read_only_report_budget_allows_paginated_cross_file_reads(tmp_path):
