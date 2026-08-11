@@ -218,7 +218,7 @@ def test_blocked_tasks_have_a_distinct_user_facing_status():
     assert STATUS_STYLE["blocked"]["text"] == "已阻塞"
 
 
-def test_read_only_report_budget_leaves_a_final_report_turn(tmp_path):
+def test_read_only_report_budget_allows_paginated_cross_file_reads(tmp_path):
     (tmp_path / "game.js").write_text("const state = 'playing';\n" * 450)
     (tmp_path / "index.html").write_text("<button id='restart'>Restart</button>\n" * 180)
     task = SimpleNamespace(
@@ -233,4 +233,4 @@ def test_read_only_report_budget_leaves_a_final_report_turn(tmp_path):
     )
 
     assert budget["max_turns"] == 12
-    assert budget["exploration_turns"] == 4
+    assert budget["exploration_turns"] == 16

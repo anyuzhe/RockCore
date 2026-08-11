@@ -1993,7 +1993,10 @@ class Engine:
             # A fast preset may set the coding budget to 8, which is too short
             # for a two-file audit and previously caused false dependency failure.
             turns = max(base_turns, 12 if total_lines >= 600 else 10)
-            exploration = min(max(base_exploration, 4), max(4, turns - 2))
+            minimum_exploration = (
+                16 if total_lines >= 400 or len(files) >= 3 else 12
+            )
+            exploration = max(base_exploration, minimum_exploration)
             reasons.append("read-only report")
         elif task_type in {"testing", "review"}:
             turns = min(base_turns, 18 if len(files) > 2 else 14)
@@ -2001,7 +2004,10 @@ class Engine:
             reasons.append("validation task")
         else:
             turns = base_turns
-            exploration = base_exploration
+            # Coding tasks commonly need several paginated reads across HTML,
+            # CSS, and JS before a safe edit. This is only a convergence reminder,
+            # so begin with enough room for a real cross-file inspection.
+            exploration = max(base_exploration, 12)
             if total_lines >= 400:
                 turns += 6
                 exploration += 2
@@ -2025,7 +2031,10 @@ class Engine:
 
         cap = 20 if mode == "fast" else 50
         turns = max(6, min(cap, turns))
-        exploration = max(2, min(12, exploration, max(2, turns // 2)))
+        # This value counts individual tool operations, not model turns. Parallel
+        # reads and pagination can legitimately use several operations in one turn,
+        # so keep the reminder generous and never turn it into a hard read limit.
+        exploration = max(6, min(40, exploration, max(6, turns * 2)))
         estimated_input_per_turn = min(
             40_000,
             10_000

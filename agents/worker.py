@@ -53,7 +53,8 @@ CRITICAL RULES:
    create or modify files unless the task explicitly requests a report artifact.
 5. For coding tasks: use write_file to create files, read_file to check existing ones.
 6. For testing tasks: run the test command and report results.
-7. For coding tasks, use at most 4 exploratory reads before you start editing.
+7. For coding tasks, start editing once the relevant code is understood. The
+   exploration allowance is a soft, task-sized reminder, not a read ban.
 8. After a successful patch, verify but do NOT re-explore the whole project.
 9. NEVER use absolute paths. NEVER access ~/.ai_engineering_studio or similar.
 10. For coding tasks, it is better to make changes and hit the turn limit than
@@ -102,7 +103,7 @@ class WorkerAgent:
     """DeepSeek Worker: executes tasks using tools."""
 
     def __init__(self, model_router: ModelRouter, tool_broker: ToolBroker,
-                 max_turns: int = 25, max_exploration_turns: int = 4,
+                 max_turns: int = 25, max_exploration_turns: int = 16,
                  context_manager=None, skill_manager=None):
         self.model_router = model_router
         self.tool_broker = tool_broker
@@ -357,7 +358,25 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     else 32_000 if is_document_task
                     else MAX_CONVERSATION_CHARS
                 )
+                # Provider tool protocols require every assistant tool-call batch
+                # to be followed immediately by all matching tool results. Repair
+                # legacy/interrupted histories before compaction, then validate the
+                # compacted payload before it leaves RockCore.
+                messages = self._repair_tool_message_sequence(messages)
                 messages = self._compact_messages(messages, max_chars=compact_limit)
+                integrity_errors = self._tool_message_integrity_errors(messages)
+                if integrity_errors:
+                    logger.warning(
+                        "Worker repaired invalid tool history before provider call: %s",
+                        "; ".join(integrity_errors),
+                    )
+                    messages = self._repair_tool_message_sequence(messages)
+                    remaining_errors = self._tool_message_integrity_errors(messages)
+                    if remaining_errors:
+                        raise RuntimeError(
+                            "RockCore could not build a valid tool message sequence: "
+                            + "; ".join(remaining_errors)
+                        )
                 model_kwargs = (
                     {"model": model_override} if model_override else {}
                 )
@@ -616,6 +635,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
 
                 exploration_blocked = False
                 meaningful_progress = False
+                batch_notices: list[str] = []
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
                     argument_error = tc.get("argument_error")
@@ -818,16 +838,14 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 exploration_calls >= self.max_exploration_turns
                                 and not exploration_warning_sent
                             ):
-                                messages.append({
-                                    "role": "user",
-                                    "content": (
-                                        "The suggested exploration allowance has "
-                                        "been reached. It is a soft threshold, not "
-                                        "a ban: continue any new, necessary read, "
-                                        "but avoid repeating searches and move to "
-                                        "the concrete edit or report promptly."
-                                    ),
-                                })
+                                batch_notices.append(
+                                    "The suggested exploration allowance has been "
+                                    f"reached ({exploration_calls} operations). It is "
+                                    "a soft threshold, not a ban: continue any new, "
+                                    "necessary paginated read, but avoid repeating "
+                                    "searches and move to the concrete edit or report "
+                                    "when the evidence is sufficient."
+                                )
                                 exploration_warning_sent = True
                         if (
                             is_mutating_mcp
@@ -874,17 +892,14 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     if result.get("error_code") == "tool_arguments_truncated":
                         truncated_tool_failures += 1
                         force_tool_call = True
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "The previous write-tool JSON was cut off before it "
-                                "could run. Do not resend the whole file. Send a "
-                                "complete payload under 12000 characters now: write "
-                                "a small valid skeleton first, then use separate "
-                                "insert_before/insert_after/apply_patch calls for "
-                                "the remaining sections."
-                            ),
-                        })
+                        batch_notices.append(
+                            "The previous write-tool JSON was cut off before it "
+                            "could run. Do not resend the whole file. Send a "
+                            "complete payload under 12000 characters now: write "
+                            "a small valid skeleton first, then use separate "
+                            "insert_before/insert_after/apply_patch calls for "
+                            "the remaining sections."
+                        )
                         if truncated_tool_failures >= 3:
                             return self._failure(
                                 "TOOL_PAYLOAD_TRUNCATED: the provider repeatedly "
@@ -898,20 +913,27 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         repeated_errors[signature] = repeated_errors.get(signature, 0) + 1
                         count = repeated_errors[signature]
                         if count == 2:
-                            messages.append({
-                                "role": "user",
-                                "content": (
-                                    "The same tool failure occurred twice. Stop "
-                                    "repeating this method and switch to a different "
-                                    "built-in tool or strategy now."
-                                ),
-                            })
+                            batch_notices.append(
+                                "The same tool failure occurred twice. Stop "
+                                "repeating this method and switch to a different "
+                                "built-in tool or strategy now."
+                            )
                         elif count >= 3:
                             return self._failure(
                                 "REPEATED_TOOL_FAILURE: the same tool strategy "
                                 f"failed {count} times: {signature}",
                                 tool_calls_made, total_input, total_output,
                             )
+
+                # Do not insert user guidance between an assistant tool_calls
+                # message and its tool replies. OpenAI-compatible providers reject
+                # that sequence with HTTP 400. Deliver all guidance once the whole
+                # parallel batch has been closed.
+                if batch_notices:
+                    messages.append({
+                        "role": "user",
+                        "content": "\n\n".join(dict.fromkeys(batch_notices)),
+                    })
 
                 if exploration_blocked:
                     messages.append({
@@ -996,6 +1018,110 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
             }
+
+    @staticmethod
+    def _tool_message_integrity_errors(messages: list[dict]) -> list[str]:
+        """Return protocol errors for assistant tool-call/result message groups."""
+        errors: list[str] = []
+        consumed_tool_indexes: set[int] = set()
+        for index, message in enumerate(messages):
+            if message.get("role") != "assistant" or not message.get("tool_calls"):
+                continue
+            expected = [
+                str(call.get("id") or "")
+                for call in message.get("tool_calls") or []
+            ]
+            if not all(expected) or len(expected) != len(set(expected)):
+                errors.append(f"assistant message {index} has invalid tool-call ids")
+                continue
+            actual: list[str] = []
+            cursor = index + 1
+            while cursor < len(messages) and messages[cursor].get("role") == "tool":
+                actual.append(str(messages[cursor].get("tool_call_id") or ""))
+                consumed_tool_indexes.add(cursor)
+                cursor += 1
+            if actual != expected:
+                errors.append(
+                    f"assistant message {index} expects {expected!r}, got {actual!r}"
+                )
+        for index, message in enumerate(messages):
+            if message.get("role") == "tool" and index not in consumed_tool_indexes:
+                errors.append(f"orphan tool message {index}")
+        return errors
+
+    @staticmethod
+    def _repair_tool_message_sequence(messages: list[dict]) -> list[dict]:
+        """Close/reorder tool-result batches without discarding later guidance.
+
+        Older runs may contain a user warning between parallel tool results. Move
+        such warnings after the complete batch. If an interrupted history really
+        lost a result, synthesize an explicit unavailable result so the provider
+        can accept the history and the model can safely repeat that read if needed.
+        """
+        repaired: list[dict] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            tool_calls = (
+                message.get("tool_calls")
+                if message.get("role") == "assistant"
+                else None
+            )
+            if not tool_calls:
+                if message.get("role") != "tool":
+                    repaired.append(message)
+                else:
+                    logger.warning(
+                        "Worker dropped orphan tool result %s while repairing history",
+                        message.get("tool_call_id"),
+                    )
+                index += 1
+                continue
+
+            repaired.append(message)
+            expected_ids = [str(call.get("id") or "") for call in tool_calls]
+            expected_set = set(expected_ids)
+            results: dict[str, dict] = {}
+            deferred: list[dict] = []
+            cursor = index + 1
+            while cursor < len(messages):
+                candidate = messages[cursor]
+                if candidate.get("role") == "assistant":
+                    break
+                if candidate.get("role") == "tool":
+                    tool_call_id = str(candidate.get("tool_call_id") or "")
+                    if tool_call_id in expected_set and tool_call_id not in results:
+                        results[tool_call_id] = candidate
+                    else:
+                        logger.warning(
+                            "Worker dropped unmatched/duplicate tool result %s",
+                            tool_call_id,
+                        )
+                else:
+                    deferred.append(candidate)
+                cursor += 1
+
+            for tool_call_id in expected_ids:
+                result = results.get(tool_call_id)
+                if result is None:
+                    logger.warning(
+                        "Worker synthesized missing tool result %s", tool_call_id,
+                    )
+                    result = {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": json.dumps({
+                            "status": "error",
+                            "error": (
+                                "Historical tool result was unavailable after "
+                                "conversation recovery; repeat only if still needed."
+                            ),
+                        }),
+                    }
+                repaired.append(result)
+            repaired.extend(deferred)
+            index = cursor
+        return repaired
 
     @staticmethod
     def _compact_messages(messages: list[dict],

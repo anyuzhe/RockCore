@@ -54,7 +54,7 @@ def test_project_config_round_trips_skills_and_mcp(tmp_path):
     save_project_config(str(tmp_path), config)
     loaded = load_project_config(str(tmp_path))
 
-    assert loaded.config_version == 5
+    assert loaded.config_version == 6
     assert loaded.skills.enabled_builtin == ["bug-fix", "pyqt"]
     assert loaded.skills.max_selected == 2
     assert loaded.mcp.enabled

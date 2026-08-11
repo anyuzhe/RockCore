@@ -864,7 +864,12 @@ def test_default_worker_budgets_use_reliable_soft_limits():
         "normal": 32,
         "complex": 48,
     }
-    assert config.complexity_exploration["simple"] == 6
+    assert config.worker.max_exploration_turns == 20
+    assert config.complexity_exploration == {
+        "simple": 12,
+        "normal": 20,
+        "complex": 32,
+    }
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -888,7 +893,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 5
+    assert config.config_version == 6
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -909,7 +914,7 @@ def test_large_existing_task_receives_a_dynamic_budget(tmp_path):
     )
 
     assert budget["max_turns"] == 31
-    assert budget["exploration_turns"] == 6
+    assert budget["exploration_turns"] == 14
     assert budget["existing_files"] == 2
     assert budget["total_lines"] == 770
 
@@ -954,6 +959,85 @@ def test_worker_compacts_history_without_splitting_recent_tool_pair():
     assert "recent-call" in ids
     assert ids == tool_response_ids
     assert serialized_size <= 5_000
+
+
+def test_worker_repairs_interleaved_parallel_tool_results():
+    messages = [
+        {"role": "user", "content": "inspect files"},
+        {
+            "role": "assistant",
+            "content": "parallel reads",
+            "tool_calls": [
+                {"id": "read-1", "function": {"name": "read_file", "arguments": "{}"}},
+                {"id": "read-2", "function": {"name": "read_file", "arguments": "{}"}},
+                {"id": "read-3", "function": {"name": "read_file", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "read-1", "content": "one"},
+        {"role": "user", "content": "soft exploration reminder"},
+        {"role": "tool", "tool_call_id": "read-2", "content": "two"},
+        {"role": "tool", "tool_call_id": "read-3", "content": "three"},
+    ]
+
+    repaired = WorkerAgent._repair_tool_message_sequence(messages)
+
+    assert WorkerAgent._tool_message_integrity_errors(repaired) == []
+    assert [item["role"] for item in repaired[1:]] == [
+        "assistant", "tool", "tool", "tool", "user",
+    ]
+    assert repaired[-1]["content"] == "soft exploration reminder"
+
+
+def test_parallel_read_soft_notice_is_sent_after_complete_tool_batch():
+    class ParallelRouter:
+        def __init__(self):
+            self.calls = 0
+            self.second_messages = []
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            self.calls += 1
+            messages = _args[2]
+            if self.calls == 1:
+                return {
+                    "content": "Reading three relevant files.",
+                    "tool_calls": [
+                        {
+                            "id": f"read-{number}",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": f"file-{number}.js"}),
+                            },
+                        }
+                        for number in range(1, 4)
+                    ],
+                    "usage": {},
+                }
+            self.second_messages = list(messages)
+            assert WorkerAgent._tool_message_integrity_errors(messages) == []
+            return {
+                "content": "Analysis report with complete findings.",
+                "tool_calls": [],
+                "usage": {},
+            }
+
+    async def scenario():
+        router = ParallelRouter()
+        worker = WorkerAgent(
+            router, _RecordingBroker(), max_turns=4,
+            max_exploration_turns=2,
+        )
+        result = await worker.run(_task("analysis"), project_root=".")
+
+        assert result["status"] == "completed"
+        roles = [message["role"] for message in router.second_messages]
+        assistant_index = roles.index("assistant")
+        assert roles[assistant_index + 1:assistant_index + 4] == [
+            "tool", "tool", "tool",
+        ]
+        assert roles[assistant_index + 4] == "user"
+        assert "soft threshold" in router.second_messages[-1]["content"]
+
+    asyncio.run(scenario())
 
 
 def test_model_router_auto_expands_soft_token_budget_before_provider_call():

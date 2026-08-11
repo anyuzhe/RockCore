@@ -170,9 +170,12 @@ class ProjectConfigDialog(QDialog):
         form.addRow("最大轮次：", self.worker_max_turns)
 
         self.worker_exploration = QSpinBox()
-        self.worker_exploration.setRange(1, 20)
-        self.worker_exploration.setValue(4)
-        form.addRow("探索轮次上限：", self.worker_exploration)
+        self.worker_exploration.setRange(4, 100)
+        self.worker_exploration.setValue(20)
+        self.worker_exploration.setToolTip(
+            "按读取/搜索工具操作计数；达到后仅提醒收敛，不禁止继续读取"
+        )
+        form.addRow("探索操作软提醒：", self.worker_exploration)
 
         self.worker_retry = QSpinBox()
         self.worker_retry.setRange(1, 5)
@@ -448,7 +451,7 @@ class ProjectConfigDialog(QDialog):
         if ridx >= 0:
             self.worker_reasoning.setCurrentIndex(ridx)
         self.worker_max_turns.setValue(cfg.worker.max_turns or 32)
-        self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 4)
+        self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 20)
         self.worker_retry.setValue(cfg.worker.retry_count or 2)
         self.worker_emergency_after.setValue(
             cfg.worker.emergency_after_failures or 3

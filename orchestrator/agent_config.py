@@ -43,7 +43,7 @@ class AgentProfile:
 
 @dataclass
 class WorkerProfile(AgentProfile):
-    max_exploration_turns: int = 4
+    max_exploration_turns: int = 16
     patch_recovery_turns: int = 2
     emergency_after_failures: int = 3
     fallback_provider: str = "kimi"
@@ -258,7 +258,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 5
+    config_version: int = 6
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -274,7 +274,7 @@ class ProjectAgentConfig:
     worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(
         enabled=True, provider="deepseek", model="deepseek-v4-flash",
         reasoning_effort="default", max_turns=32,
-        max_exploration_turns=6, patch_recovery_turns=2, retry_count=2,
+        max_exploration_turns=20, patch_recovery_turns=2, retry_count=2,
         emergency_after_failures=3, fallback_provider="kimi",
         fallback_model="kimi-k2.7",
     ))
@@ -294,9 +294,9 @@ class ProjectAgentConfig:
         "complex": 48,
     })
     complexity_exploration: dict[str, int] = field(default_factory=lambda: {
-        "simple": 6,
-        "normal": 8,
-        "complex": 10,
+        "simple": 12,
+        "normal": 20,
+        "complex": 32,
     })
 
     # ── Features ──
@@ -339,8 +339,20 @@ class ProjectAgentConfig:
             cfg._upgrade_legacy_recommendations()
         if source_version < 5:
             cfg._upgrade_completion_limits()
-        cfg.config_version = 5
+        if source_version < 6:
+            cfg._upgrade_exploration_limits()
+        cfg.config_version = 6
         return cfg
+
+    def _upgrade_exploration_limits(self):
+        """Raise former built-in soft reminders without changing custom limits."""
+        if self.worker.max_exploration_turns in {4, 6}:
+            self.worker.max_exploration_turns = 20
+        old_exploration = {"simple": 6, "normal": 8, "complex": 10}
+        new_exploration = {"simple": 12, "normal": 20, "complex": 32}
+        for level, old_value in old_exploration.items():
+            if self.complexity_exploration.get(level) == old_value:
+                self.complexity_exploration[level] = new_exploration[level]
 
     def _upgrade_completion_limits(self):
         """Raise former built-in ceilings without overwriting custom values."""
@@ -417,7 +429,7 @@ class ProjectAgentConfig:
 
     def get_exploration_turns(self, complexity: str) -> int:
         return self.complexity_exploration.get(complexity,
-                                                self.worker.max_exploration_turns or 4)
+                                                self.worker.max_exploration_turns or 16)
 
     # ── Presets ──
 
@@ -428,7 +440,8 @@ class ProjectAgentConfig:
             mode="fast",
             governor=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=False, provider="kimi", model="kimi-k3", max_turns=0),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=10, max_exploration_turns=3, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=10, max_exploration_turns=10, retry_count=2, emergency_after_failures=3),
+            complexity_exploration={"simple": 10, "normal": 14, "complex": 20},
             reviewer=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
             complexity_turns={"simple": 8, "normal": 10, "complex": 12},
@@ -443,7 +456,7 @@ class ProjectAgentConfig:
             mode="standard",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=8),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=32, max_exploration_turns=6, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=32, max_exploration_turns=20, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
             complexity_turns={"simple": 20, "normal": 32, "complex": 48},
@@ -459,7 +472,7 @@ class ProjectAgentConfig:
             mode="strict",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=10),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=6, retry_count=2, emergency_after_failures=3),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=20, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
             complexity_turns={"simple": 20, "normal": 30, "complex": 40},
