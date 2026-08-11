@@ -1,6 +1,7 @@
 """Merge Manager — Git Worktree lifecycle and conflict resolution for V4."""
 
 import asyncio
+import hashlib
 import logging
 import shutil
 from pathlib import Path
@@ -37,38 +38,69 @@ class MergeManager:
             self.target_branch = current.stdout.strip() if current.returncode == 0 else "main"
         except OSError:
             self.target_branch = "main"
-        self._untracked_input_assets = self._find_untracked_input_assets()
+        self._untracked_baseline = self._snapshot_untracked_files()
+        self._untracked_input_assets = {
+            path for path in self._untracked_baseline
+            if Path(path).suffix.lower() in self.INPUT_ASSET_SUFFIXES
+        }
         self._active_worktrees: dict[str, dict] = {}
         self._merge_lock = asyncio.Lock()
 
-    def _find_untracked_input_assets(self) -> set[str]:
-        """Remember user source assets that must not become task outputs."""
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _snapshot_untracked_files(self) -> dict[str, str]:
+        """Record pre-existing user files so unchanged copies are never outputs."""
         try:
             result = run_process(
                 ["git", "ls-files", "--others", "--exclude-standard", "-z"],
                 capture_output=True, text=True, cwd=self.project_root,
             )
             if result.returncode != 0:
-                return set()
-            return {
-                path for path in result.stdout.split("\0") if path
-                and Path(path).suffix.lower() in self.INPUT_ASSET_SUFFIXES
-            }
+                return {}
+            snapshot = {}
+            for relative in (path for path in result.stdout.split("\0") if path):
+                if len(snapshot) >= 500:
+                    break
+                source = (self.project_root / relative).resolve()
+                try:
+                    source.relative_to(self.project_root)
+                    if (
+                        not source.is_file() or source.is_symlink()
+                        or source.stat().st_size > 128 * 1024 * 1024
+                    ):
+                        continue
+                    snapshot[relative] = self._file_digest(source)
+                except (OSError, ValueError):
+                    continue
+            return snapshot
         except (OSError, ValueError):
-            return set()
+            return {}
 
-    def _unstage_input_assets(self, worktree_path: str) -> tuple[bool, str]:
-        """Keep pre-existing untracked PDFs/media out of Worker commits."""
-        present_assets = [
-            path for path in sorted(self._untracked_input_assets)
-            if (Path(worktree_path) / path).is_file()
-        ]
-        if not present_assets:
+    def _unstage_unchanged_preserved_files(
+        self, worktree_path: str, preserved_paths: set[str],
+    ) -> tuple[bool, str]:
+        """Unstage only preserved user files whose bytes are still unchanged."""
+        unchanged = []
+        for relative in sorted(preserved_paths):
+            path = Path(worktree_path) / relative
+            expected = self._untracked_baseline.get(relative)
+            try:
+                if path.is_file() and expected and self._file_digest(path) == expected:
+                    unchanged.append(relative)
+            except OSError:
+                continue
+        if not unchanged:
             return True, ""
         result = run_process(
             [
                 "git", "reset", "-q", "HEAD", "--",
-                *present_assets,
+                *unchanged,
             ],
             capture_output=True, text=True, cwd=worktree_path,
         )
@@ -79,10 +111,16 @@ class MergeManager:
             return False, error
         return True, ""
 
-    def _copy_untracked_input_assets(self, worktree_path: str) -> None:
-        """Make local source documents readable inside an isolated worktree."""
+    def _copy_preserved_files(self, worktree_path: str,
+                              include_all: bool = False) -> set[str]:
+        """Make inputs/checkpoint artifacts available without overwriting history."""
         worktree = Path(worktree_path).resolve()
-        for relative in sorted(self._untracked_input_assets):
+        candidates = (
+            set(self._untracked_baseline) if include_all
+            else set(self._untracked_input_assets)
+        )
+        copied = set()
+        for relative in sorted(candidates):
             source = (self.project_root / relative).resolve()
             destination = (worktree / relative).resolve()
             try:
@@ -91,18 +129,125 @@ class MergeManager:
             except ValueError:
                 logger.warning("Skipped unsafe input asset path: %s", relative)
                 continue
-            if not source.is_file() or source.is_symlink():
+            if (
+                not source.is_file() or source.is_symlink()
+                or destination.exists()
+            ):
                 continue
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+                copied.add(relative)
             except OSError as error:
                 logger.warning(
                     "Could not copy input asset %s into worktree: %s",
                     relative, error,
                 )
+        return copied
 
-    async def create_task_worktree(self, task_id: str, job_id: str) -> dict:
+    def _resolve_continuation_state(self, source_job_id: str,
+                                    task_id: str = "") -> dict:
+        """Locate the newest branch/worktree belonging to the source job."""
+        source = str(source_job_id or "").strip().lower()
+        if not source:
+            return {}
+        result = run_process(
+            [
+                "git", "for-each-ref", "--sort=-committerdate",
+                "--format=%(refname:short)", f"refs/heads/ai/{source}/*",
+            ],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        branches = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not branches:
+            return {}
+        worktrees = run_process(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        current_path = ""
+        worktree_by_branch = {}
+        for line in worktrees.stdout.splitlines():
+            if line.startswith("worktree "):
+                current_path = line[9:].strip()
+            elif line.startswith("branch refs/heads/"):
+                worktree_by_branch[line[18:].strip()] = current_path
+        task_segment = f"/{str(task_id or '').strip().lower()}"
+        matching = [
+            branch for branch in branches
+            if task_segment and (
+                branch.endswith(task_segment)
+                or f"{task_segment}-run" in branch
+            )
+        ]
+        candidates = matching or branches
+        branch = candidates[0]
+        for candidate in candidates:
+            candidate_path = worktree_by_branch.get(candidate, "")
+            if not candidate_path:
+                continue
+            dirty = run_process(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, cwd=candidate_path,
+            )
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                branch = candidate
+                break
+        state = {
+            "ref": branch, "branch": branch,
+            "worktree_path": worktree_by_branch.get(branch, ""),
+        }
+        return state
+
+    def _overlay_continuation_changes(self, source_path: str,
+                                      destination_path: str) -> list[str]:
+        """Copy modified/untracked checkpoint files from a preserved worktree."""
+        if not source_path:
+            return []
+        source_root = Path(source_path).resolve()
+        destination_root = Path(destination_path).resolve()
+        if not source_root.is_dir() or source_root == destination_root:
+            return []
+        result = run_process(
+            ["git", "ls-files", "-m", "-o", "--exclude-standard", "-z"],
+            capture_output=True, text=True, cwd=source_root,
+        )
+        copied = []
+        for relative in (item for item in result.stdout.split("\0") if item):
+            source = (source_root / relative).resolve()
+            destination = (destination_root / relative).resolve()
+            try:
+                source.relative_to(source_root)
+                destination.relative_to(destination_root)
+            except ValueError:
+                continue
+            if not source.is_file() or source.is_symlink():
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+                copied.append(relative)
+            except OSError as error:
+                logger.warning("Could not restore checkpoint file %s: %s", relative, error)
+        return copied
+
+    def _continuation_committed_files(self, start_point: str) -> list[str]:
+        """List source-branch outputs not yet present on the target branch."""
+        if not start_point or start_point == "HEAD":
+            return []
+        result = run_process(
+            [
+                "git", "diff", "--name-only", "-z",
+                self.target_branch, start_point,
+            ],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        if result.returncode != 0:
+            return []
+        return [item for item in result.stdout.split("\0") if item]
+
+    async def create_task_worktree(self, task_id: str, job_id: str,
+                                   source_job_id: str = "") -> dict:
         """Create an isolated worktree, avoiding stale branch/path collisions."""
         if task_id in self._active_worktrees:
             active = self._active_worktrees[task_id]
@@ -114,6 +259,8 @@ class MergeManager:
                 "branch": active.get("branch", ""),
             }
 
+        continuation = self._resolve_continuation_state(source_job_id, task_id)
+        start_point = continuation.get("ref") or "HEAD"
         base_branch = f"ai/{job_id.lower()}/{task_id.lower()}"
         last_result = {}
         for run_number in range(1, 26):
@@ -121,18 +268,38 @@ class MergeManager:
             branch = base_branch + suffix
             path_name = task_id if run_number == 1 else f"{task_id}{suffix}"
             wt_path = str(self.worktrees_base / path_name)
-            result = await self.git_tools.create_worktree(branch, wt_path)
+            try:
+                result = await self.git_tools.create_worktree(
+                    branch, wt_path, start_point=start_point
+                )
+            except TypeError:
+                # Compatibility for small test doubles and third-party Git adapters.
+                result = await self.git_tools.create_worktree(branch, wt_path)
             last_result = result
             if result.get("status") == "created":
-                self._copy_untracked_input_assets(wt_path)
+                preserved = self._copy_preserved_files(
+                    wt_path, include_all=bool(source_job_id)
+                )
+                resumed_files = self._overlay_continuation_changes(
+                    continuation.get("worktree_path", ""), wt_path
+                )
+                resumed_files = list(dict.fromkeys(
+                    self._continuation_committed_files(start_point)
+                    + resumed_files
+                ))
                 self._active_worktrees[task_id] = {
                     "branch": branch,
                     "path": wt_path,
                     "task_id": task_id,
                     "status": "active",
+                    "preserved_paths": preserved,
+                    "resumed_from": continuation.get("branch", ""),
+                    "resumed_files": resumed_files,
                 }
                 result["collision_recovered"] = run_number > 1
                 result["run_number"] = run_number
+                result["resumed_from"] = continuation.get("branch", "")
+                result["resumed_files"] = resumed_files
                 logger.info("Worktree created: %s at %s", branch, wt_path)
                 return result
             error = str(result.get("error") or "")
@@ -203,7 +370,9 @@ class MergeManager:
                     task_id, "stage", self._process_output(stage_result)
                 )
 
-            assets_unstaged, unstage_error = self._unstage_input_assets(wt_path)
+            assets_unstaged, unstage_error = self._unstage_unchanged_preserved_files(
+                wt_path, set(wt_info.get("preserved_paths") or set())
+            )
             if not assets_unstaged:
                 return self._integration_failure(
                     task_id, "unstage_input_assets", unstage_error
@@ -220,27 +389,32 @@ class MergeManager:
             staged_paths = [
                 item for item in staged_result.stdout.split("\0") if item
             ]
+            reuse_existing_commit = False
             if not staged_paths:
-                return self._integration_failure(
-                    task_id,
-                    "commit",
-                    "No task output remained staged after excluding input assets",
-                )
+                staged_paths = self._continuation_committed_files(branch)
+                reuse_existing_commit = bool(staged_paths)
+                if not reuse_existing_commit:
+                    return self._integration_failure(
+                        task_id,
+                        "commit",
+                        "No task output remained staged after excluding input assets",
+                    )
 
-            identity_error = self._ensure_git_identity(wt_path)
-            if identity_error:
-                return self._integration_failure(
-                    task_id, "git_identity", identity_error
-                )
+            if not reuse_existing_commit:
+                identity_error = self._ensure_git_identity(wt_path)
+                if identity_error:
+                    return self._integration_failure(
+                        task_id, "git_identity", identity_error
+                    )
 
-            commit_result = run_process(
-                ["git", "commit", "-m", commit_message],
-                capture_output=True, text=True, cwd=wt_path,
-            )
-            if commit_result.returncode != 0:
-                return self._integration_failure(
-                    task_id, "commit", self._process_output(commit_result)
+                commit_result = run_process(
+                    ["git", "commit", "-m", commit_message],
+                    capture_output=True, text=True, cwd=wt_path,
                 )
+                if commit_result.returncode != 0:
+                    return self._integration_failure(
+                        task_id, "commit", self._process_output(commit_result)
+                    )
 
             commit_hash_result = run_process(
                 ["git", "rev-parse", "HEAD"],
@@ -252,6 +426,19 @@ class MergeManager:
                     self._process_output(commit_hash_result),
                 )
             commit_hash = commit_hash_result.stdout.strip()
+
+            preflight = self._preflight_untracked_collisions(
+                task_id, staged_paths, wt_path
+            )
+            if preflight.get("status") == "pending_merge":
+                wt_info["status"] = "pending_merge"
+                return preflight
+            if preflight.get("status") == "failed":
+                return self._integration_failure(
+                    task_id, "merge_preflight",
+                    str(preflight.get("error") or "Merge preflight failed"),
+                    details=preflight,
+                )
 
             merge_result = await self.git_tools.merge_branch(branch, self.target_branch)
             if merge_result.get("status") == "conflict":
@@ -307,11 +494,74 @@ class MergeManager:
                 "staged_paths": staged_paths,
                 "verified": True,
                 "cleanup_warnings": cleanup_warnings,
+                "preflight": preflight,
             }
 
         except Exception as e:
             logger.error(f"Merge failed for {task_id}: {e}")
             return self._integration_failure(task_id, "unexpected", str(e))
+
+    def _preflight_untracked_collisions(self, task_id: str,
+                                        staged_paths: list[str],
+                                        worktree_path: str) -> dict:
+        """Resolve identical target files and preserve differing collisions."""
+        result = run_process(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        if result.returncode != 0:
+            return {"status": "failed", "error": self._process_output(result)}
+        target_untracked = {item for item in result.stdout.split("\0") if item}
+        collisions = sorted(set(staged_paths).intersection(target_untracked))
+        if not collisions:
+            return {"status": "clear", "identical": [], "different": []}
+        identical = []
+        different = []
+        for relative in collisions:
+            target = self.project_root / relative
+            source = Path(worktree_path) / relative
+            try:
+                if (
+                    target.is_file() and source.is_file()
+                    and self._file_digest(target) == self._file_digest(source)
+                ):
+                    identical.append(relative)
+                else:
+                    different.append(relative)
+            except OSError:
+                different.append(relative)
+        if different:
+            return {
+                "status": "pending_merge", "phase": "merge_preflight",
+                "task_id": task_id,
+                "branch": self._active_worktrees.get(task_id, {}).get("branch", ""),
+                "worktree_path": worktree_path, "preserved": True,
+                "conflicts": different, "identical": identical,
+                "error": (
+                    "Target contains untracked files with different content; "
+                    "both copies were preserved for explicit merge resolution"
+                ),
+            }
+        identity_error = self._ensure_git_identity(str(self.project_root))
+        if identity_error:
+            return {"status": "failed", "error": identity_error}
+        stage = run_process(
+            ["git", "add", "--", *identical],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        if stage.returncode != 0:
+            return {"status": "failed", "error": self._process_output(stage)}
+        commit = run_process(
+            [
+                "git", "commit", "--only", "-m",
+                f"RockCore preflight: adopt identical outputs for {task_id}",
+                "--", *identical,
+            ],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        if commit.returncode != 0:
+            return {"status": "failed", "error": self._process_output(commit)}
+        return {"status": "resolved", "identical": identical, "different": []}
 
     async def _handle_conflict(self, task_id: str, merge_result: dict) -> dict:
         """Handle merge conflicts — flag for user resolution."""

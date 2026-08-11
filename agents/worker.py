@@ -60,6 +60,8 @@ CRITICAL RULES:
 12. For PDF input, use read_pdf with page ranges. Never install PDF packages and
     never call pdftotext through run_command. For long documents, process pages
     incrementally and write/update the requested artifact as you go.
+13. When the requested final artifact is a PDF, create it with write_pdf. Never
+    implement a custom PDF/font/TTC parser or generator in project source files.
 
 Available tools:
 - list_files: List files in the project directory
@@ -174,7 +176,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "\nThis is a document-processing task. Use read_pdf directly "
                 "and paginate with next_page. Do not install dependencies or "
                 "retry shell-based PDF extraction. For a long source, write "
-                "the output incrementally so completed page ranges are preserved."
+                "the output incrementally so completed page ranges are preserved. "
+                "If the final artifact is PDF, call write_pdf directly and verify "
+                "that PDF with read_pdf. Do not create a custom font, TTC, cmap, "
+                "or PDF parser/generator script."
             )
         if finalization_mode:
             task_context += (
@@ -214,9 +219,21 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         external_action_signatures: set[tuple[str, str]] = set()
         verified_existing_state = False
         pending_document_pages: dict[str, int] = {}
+        repeated_errors: dict[str, int] = {}
+        no_progress_turns = 0
+        stall_warning_sent = False
         allow_no_change = self._allows_no_change(task)
         progress_warning_turn = max(1, math.ceil(self.max_turns * 0.70))
         finish_warning_turn = max(1, math.ceil(self.max_turns * 0.85))
+
+        tool_definitions = self._tool_definitions(task)
+        required_arguments = {
+            str(item.get("function", {}).get("name") or ""): set(
+                item.get("function", {}).get("parameters", {}).get("required") or []
+            )
+            for item in tool_definitions
+            if isinstance(item, dict)
+        }
 
         try:
             for turn in range(self.max_turns):
@@ -335,7 +352,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     self.agent_type,
                     system_prompt,
                     messages,
-                    tools=self._tool_definitions(task),
+                    tools=tool_definitions,
                     provider_override=provider_override,
                     task=task,
                     attachments=(
@@ -548,6 +565,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 })
 
                 exploration_blocked = False
+                meaningful_progress = False
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
                     argument_error = None
@@ -559,6 +577,15 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     except (TypeError, json.JSONDecodeError) as error:
                         argument_error = f"Invalid tool arguments: {error}"
                         args = {}
+                    missing = sorted(
+                        name for name in required_arguments.get(func_name, set())
+                        if name not in args or args.get(name) is None
+                    )
+                    if not argument_error and missing:
+                        argument_error = (
+                            "Missing required tool argument(s): "
+                            + ", ".join(missing)
+                        )
 
                     exploration_signature = (
                         func_name,
@@ -587,7 +614,44 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         and is_exploration
                         and exploration_signature in seen_exploration_calls
                     )
-                    if (
+                    artifact_manifest = dict(
+                        getattr(task, "_rockcore_artifact_manifest", None) or {}
+                    )
+                    document_requires_pdf = bool(
+                        artifact_manifest.get("kind") == "pdf"
+                        and artifact_manifest.get("require_changed_output")
+                    )
+                    requested_path = str(args.get("path") or "").lower()
+                    command = str(args.get("command") or "").lower()
+                    custom_document_code = (
+                        document_requires_pdf
+                        and (
+                            (
+                                func_name in WRITE_TOOLS
+                                and func_name != "write_pdf"
+                                and requested_path.endswith((
+                                    ".py", ".js", ".ts", ".c", ".cpp"
+                                ))
+                            )
+                            or (
+                                func_name == "run_command"
+                                and any(marker in command for marker in (
+                                    "pdftotext", "pip install", "pypdf",
+                                    "reportlab", "fonttools", "ttc", "cmap",
+                                ))
+                            )
+                        )
+                    )
+                    if custom_document_code:
+                        result = {
+                            "status": "rejected",
+                            "error": (
+                                "Dedicated PDF pipeline required. Use read_pdf and "
+                                "write_pdf directly; do not build/install a custom "
+                                "PDF or font parser/generator."
+                            ),
+                        }
+                    elif (
                         budget_finalization_mode
                         and is_exploration
                     ):
@@ -717,6 +781,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         if is_exploration:
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
+                            meaningful_progress = True
                         if (
                             is_mutating_mcp
                             and result.get("status") not in {"error", "rejected"}
@@ -732,12 +797,14 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         ):
                             has_written = True
                             force_tool_call = False
+                            meaningful_progress = True
                         if (
                             func_name in STATE_VERIFICATION_TOOLS
                             and result.get("status") not in {"error", "rejected"}
                             and not result.get("error")
                         ):
                             verified_existing_state = True
+                            meaningful_progress = True
                     tool_calls_made.append({
                         "tool": func_name,
                         "args": args,
@@ -757,6 +824,28 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
 
                     logger.info(f"Worker: {func_name} -> {result.get('status', 'ok')}")
 
+                    if result.get("status") in {"error", "rejected"} or result.get("error"):
+                        signature = re.sub(
+                            r"\d+", "#", str(result.get("error") or result.get("status"))
+                        ).lower()[:300]
+                        repeated_errors[signature] = repeated_errors.get(signature, 0) + 1
+                        count = repeated_errors[signature]
+                        if count == 2:
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "The same tool failure occurred twice. Stop "
+                                    "repeating this method and switch to a different "
+                                    "built-in tool or strategy now."
+                                ),
+                            })
+                        elif count >= 3:
+                            return self._failure(
+                                "REPEATED_TOOL_FAILURE: the same tool strategy "
+                                f"failed {count} times: {signature}",
+                                tool_calls_made, total_input, total_output,
+                            )
+
                 if exploration_blocked:
                     messages.append({
                         "role": "user",
@@ -772,6 +861,28 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             "the task is fully implemented."
                         ),
                     })
+
+                if meaningful_progress:
+                    no_progress_turns = 0
+                else:
+                    no_progress_turns += 1
+                    if no_progress_turns >= 4 and not stall_warning_sent:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "No measurable progress was made in four turns. "
+                                "Change strategy now: use the dedicated built-in "
+                                "tool, make the smallest concrete edit, or finish "
+                                "with the current verified artifact."
+                            ),
+                        })
+                        stall_warning_sent = True
+                    if no_progress_turns >= 8:
+                        return self._failure(
+                            "NO_PROGRESS: eight consecutive turns produced no "
+                            "new evidence, file change, or artifact progress",
+                            tool_calls_made, total_input, total_output,
+                        )
 
             else:
                 logger.warning(f"Worker: task {task.task_id} reached max turns ({self.max_turns})")

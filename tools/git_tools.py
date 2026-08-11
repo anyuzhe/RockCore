@@ -100,16 +100,23 @@ class GitTools:
 
     # ── Worktree operations (V4) ────────────────────────────────
 
-    async def create_worktree(self, branch_name: str, worktree_path: str) -> dict:
-        """Create a new git worktree with a branch."""
+    async def create_worktree(self, branch_name: str, worktree_path: str,
+                              start_point: str = "HEAD") -> dict:
+        """Create a new git worktree, optionally from a continuation ref."""
         try:
             result = run_process(
-                ["git", "worktree", "add", "-b", branch_name, worktree_path, "HEAD"],
+                [
+                    "git", "worktree", "add", "-b", branch_name,
+                    worktree_path, start_point or "HEAD",
+                ],
                 capture_output=True, text=True, cwd=self.project_root
             )
             if result.returncode != 0:
                 return {"error": result.stderr, "status": "failed"}
-            return {"branch": branch_name, "path": worktree_path, "status": "created"}
+            return {
+                "branch": branch_name, "path": worktree_path,
+                "status": "created", "start_point": start_point or "HEAD",
+            }
         except Exception as e:
             return {"error": str(e), "status": "failed"}
 

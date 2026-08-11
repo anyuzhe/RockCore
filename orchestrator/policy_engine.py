@@ -192,6 +192,33 @@ class PolicyEngine:
 
             if task.get("type", "coding") == "coding":
                 description = str(task.get("description") or "").lower()
+                if "=== continuation context ===" in description:
+                    paths = [
+                        str(path or "").strip()
+                        for path in (task.get("allowed_paths") or [])
+                    ]
+                    broad_only = not paths or all(
+                        not path or path in {"*", "**", "**/*", "./*"}
+                        for path in paths
+                    )
+                    acceptance = str(
+                        task.get("acceptance_command") or ""
+                    ).strip()
+                    title = str(task.get("title") or "").strip().lower()
+                    vague_title = title in {
+                        "继续", "继续执行", "继续完成", "继续上一个任务",
+                        "continue", "continue task", "finish task",
+                    }
+                    if broad_only and not acceptance:
+                        errors.append(
+                            f"continuation_quality: Task {task_id} has only a "
+                            "wildcard scope and no acceptance condition"
+                        )
+                    if vague_title and broad_only:
+                        errors.append(
+                            f"continuation_quality: Task {task_id} does not name "
+                            "the remaining output or target files"
+                        )
                 absolute_read_only = any(marker in description for marker in (
                     "不创建或修改任何项目文件",
                     "不创建或修改项目文件",

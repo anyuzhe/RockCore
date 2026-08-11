@@ -384,9 +384,38 @@ class Engine:
             except OSError:
                 pass
 
+        output_name_markers = {
+            "summary", "output", "result", "final", "condensed",
+            "摘要", "总结", "精简", "整理版", "最终版", "输出",
+        }
+        output_pdfs = {
+            path for path in pdf_files
+            if len(pdf_files) > 1 and any(
+                marker in path.stem.lower() for marker in output_name_markers
+            )
+        }
+        source_pdfs = pdf_files - output_pdfs
+        if not source_pdfs:
+            source_pdfs = set(pdf_files)
+            output_pdfs = set()
+        for pattern in allowed_paths:
+            normalized = str(pattern or "").replace("\\", "/").lstrip("./")
+            if not normalized or "*" in normalized or not normalized.lower().endswith(".pdf"):
+                continue
+            candidate = (root / normalized).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if candidate not in source_pdfs and (
+                not candidate.exists()
+                or any(marker in candidate.stem.lower() for marker in output_name_markers)
+            ):
+                output_pdfs.add(candidate)
+
         total_bytes = 0
         total_pages = 0
-        for path in pdf_files:
+        for path in source_pdfs:
             try:
                 total_bytes += path.stat().st_size
             except OSError:
@@ -416,8 +445,8 @@ class Engine:
         # Real runs repeatedly include conversation/tool context. Twelve
         # thousand input tokens per source page plus a 300k workflow reserve is
         # intentionally conservative; the RMB ceiling remains the hard spend
-        # protection. Four turns per eight-page batch leaves room for reading,
-        # condensation, incremental writing, and verification.
+        # protection. The dedicated document tools keep each eight-page batch
+        # bounded while still leaving room for incremental writing and checks.
         processing_input_budget = min(
             19_000_000,
             max(400_000, estimated_pages * 12_000 + 300_000),
@@ -429,7 +458,11 @@ class Engine:
         input_budget = min(
             20_000_000, processing_input_budget + finalization_reserve
         )
-        turns = min(240, max(32, 20 + page_batches * 4))
+        # A dedicated read_pdf/write_pdf pipeline needs roughly two tool turns
+        # per page batch plus verification. Cap one attempt so a broken custom
+        # strategy cannot consume hundreds of calls; Token ceilings remain
+        # generous and unfinished page ranges are checkpointed for continuation.
+        turns = min(64, max(24, 12 + page_batches * 3))
         exploration = min(
             max(12, page_batches + 12),
             max(12, turns - 12),
@@ -437,6 +470,21 @@ class Engine:
         finalization_turns = 12
         api_call_budget = turns + finalization_turns + 24
         output_budget = max(200_000, estimated_pages * 1_500)
+        concrete_non_pdf_outputs = [
+            str(path) for path in allowed_paths
+            if path and "*" not in str(path)
+            and Path(str(path)).suffix.lower() in {
+                ".md", ".txt", ".docx", ".pptx", ".html"
+            }
+        ]
+        requires_pdf_output = bool(output_pdfs) or (
+            not concrete_non_pdf_outputs
+            and "pdf" in text
+            and any(marker in text for marker in (
+                "生成", "创建", "输出", "整理成", "精简成",
+                "generate", "create", "output", "export",
+            ))
+        )
         return {
             "level": level,
             "input_budget": input_budget,
@@ -447,13 +495,23 @@ class Engine:
             "exploration_turns": exploration,
             "api_call_budget": api_call_budget,
             "output_budget": output_budget,
-            "pdf_count": len(pdf_files),
+            "pdf_count": len(source_pdfs),
             "pdf_bytes": total_bytes,
             "pdf_pages": total_pages,
+            "source_pdfs": [
+                path.relative_to(root).as_posix()
+                for path in sorted(source_pdfs)
+            ],
+            "output_pdfs": [
+                path.relative_to(root).as_posix()
+                for path in sorted(output_pdfs)
+            ],
+            "requires_pdf_output": requires_pdf_output,
             "estimated_pages": estimated_pages,
             "page_batches": page_batches,
             "reason": (
-                f"document={level}, pdfs={len(pdf_files)}, "
+                f"document={level}, source_pdfs={len(source_pdfs)}, "
+                f"output_pdfs={len(output_pdfs)}, "
                 f"pages={total_pages or f'~{estimated_pages}'}, "
                 f"batches={page_batches}, size={total_bytes} bytes"
             ),
@@ -1010,6 +1068,42 @@ class Engine:
         self._prune_transitive_dependencies(plan_data)
         self._assign_plan_skills(plan_data)
 
+        protected_paths = (
+            constitution.protected_paths if constitution else []
+        )
+        preliminary_errors = self.policy_engine.check_task_plan(
+            plan_data, {"protected_paths": protected_paths}
+        )
+        quality_errors = [
+            error for error in preliminary_errors
+            if str(error).startswith("continuation_quality:")
+        ]
+        if planner and quality_errors:
+            await self.event_bus.publish(
+                "plan_replanning", job_id=job.job_id,
+                reason="continuation_quality", errors=quality_errors,
+            )
+            rejection = (
+                continuation_context
+                + "\n\n=== PLAN QUALITY REJECTION ===\n"
+                + "\n".join(f"- {error}" for error in quality_errors)
+                + "\nCreate a concrete continuation plan. Name the remaining "
+                  "artifact/files, preserve completed work, and include a "
+                  "deterministic acceptance command or a concrete file scope."
+            )
+            revised = await planner.run(
+                job, constitution, continuation_context=rejection[:12000]
+            )
+            if revised.get("tasks"):
+                plan_data = revised
+                self._optimize_plan(plan_data, effective_complexity)
+                self._serialize_overlapping_tasks(plan_data)
+                self._prune_transitive_dependencies(plan_data)
+                self._assign_plan_skills(plan_data)
+            else:
+                plan_data = self._direct_plan_data(job, repos, proj_config)
+                self._assign_plan_skills(plan_data)
+
         plan = repos["plan"].create(
             job_id=job.id,
             summary=plan_data.get("summary", ""),
@@ -1019,7 +1113,7 @@ class Engine:
         # Validate plan against constitution
         self.state_machine.transition(job.job_id, JobState.PLAN_CHECK)
         errors = self.policy_engine.check_task_plan(
-            plan_data, {"protected_paths": constitution.protected_paths if constitution else []}
+            plan_data, {"protected_paths": protected_paths}
         )
         repos["plan"].update_validation(plan.id, validated=len(errors) == 0, errors=errors)
 
@@ -1057,15 +1151,49 @@ class Engine:
     def _direct_plan_data(self, job, repos, proj_config=None) -> dict:
         """Build one executable task when planning is explicitly unavailable."""
         description = self._request_with_context(job, repos, proj_config)
+        title = job.user_request[:60]
+        allowed_paths = ["*"]
+        if getattr(job, "source_job_id", None):
+            source = repos["job"].get_by_id(job.source_job_id)
+            if source:
+                title = f"继续完成：{source.user_request[:48]}"
+                concrete = []
+                for previous in repos["task"].list_by_job(source.id):
+                    if previous.status == "done":
+                        continue
+                    concrete.extend(
+                        str(path) for path in (previous.allowed_paths or [])
+                        if path and "*" not in str(path)
+                    )
+                    data = dict(previous.result_data or {})
+                    changes = data.get("changes") or {}
+                    concrete.extend(changes.get("changed") or [])
+                if concrete:
+                    allowed_paths = list(dict.fromkeys(concrete))[:40]
+                else:
+                    root = Path(job.project.root_path if job.project else ".")
+                    try:
+                        existing = [
+                            path.relative_to(root).as_posix()
+                            for path in root.rglob("*")
+                            if path.is_file()
+                            and not {".git", ".ai"}.intersection(
+                                path.relative_to(root).parts
+                            )
+                        ][:40]
+                    except OSError:
+                        existing = []
+                    if existing:
+                        allowed_paths = existing
         return {
             "summary": f"单步执行：{job.user_request[:100]}",
             "tasks": [{
                 "id": "T001",
-                "title": job.user_request[:60],
+                "title": title,
                 "type": "coding",
                 "description": description,
                 "dependencies": [],
-                "allowed_paths": ["*"],
+                "allowed_paths": allowed_paths,
                 "acceptance_command": "",
             }],
         }
@@ -1097,10 +1225,21 @@ class Engine:
     def _assign_plan_skills(self, plan_data: dict):
         """Normalize model suggestions against the discovered Skill catalog."""
         for task_data in plan_data.get("tasks", []):
-            task_data["skills"] = (
+            selected = (
                 self.skill_manager.select_for_task(task_data)
                 if self.skill_manager else []
             )
+            task_text = " ".join((
+                str(task_data.get("title") or ""),
+                str(task_data.get("description") or ""),
+                " ".join(map(str, task_data.get("allowed_paths") or [])),
+            ))
+            if self._is_document_request(task_text) and "pdf" not in selected:
+                if self.skill_manager and any(
+                    item.name == "pdf" for item in self.skill_manager.list_skills()
+                ):
+                    selected.insert(0, "pdf")
+            task_data["skills"] = selected
 
     @classmethod
     def _optimize_plan(cls, plan_data: dict, complexity: str = "normal"):
@@ -1731,7 +1870,15 @@ class Engine:
             # Create worktree for this task
             has_worktree = False
             if self.merge_manager:
-                wt_result = await self.merge_manager.create_task_worktree(task_id, job.job_id)
+                try:
+                    wt_result = await self.merge_manager.create_task_worktree(
+                        task_id, job.job_id,
+                        source_job_id=str(job.source_job_id or ""),
+                    )
+                except TypeError:
+                    wt_result = await self.merge_manager.create_task_worktree(
+                        task_id, job.job_id
+                    )
                 if wt_result.get("status") != "created":
                     phase = str(wt_result.get("phase") or "worktree_create")
                     detail = str(
@@ -1756,6 +1903,15 @@ class Engine:
             else:
                 task_worktree_root = job.project.root_path if job.project else "."
             task_baseline = self.test_manager.capture_snapshot(task_worktree_root)
+            # Files restored from a previous preserved worktree are unfinished
+            # task output, not a new baseline. Keep them visible to change
+            # detection so they are validated and integrated even when the
+            # continuation only needs to verify and finalize them.
+            resumed_paths = (
+                wt_result.get("resumed_files") or []
+            ) if has_worktree else []
+            for resumed_path in resumed_paths:
+                task_baseline.pop(str(resumed_path).replace("\\", "/"), None)
             task_worker = worker.scoped_to(task_worktree_root)
             base_exploration = (
                 proj_config.get_exploration_turns(complexity)
@@ -1784,6 +1940,15 @@ class Engine:
                 )
                 t._rockcore_input_budget = document_profile["input_budget"]
                 t._rockcore_document_profile = dict(document_profile)
+                t._rockcore_artifact_manifest = {
+                    "kind": "pdf",
+                    "inputs": list(document_profile.get("source_pdfs") or []),
+                    "outputs": list(document_profile.get("output_pdfs") or []),
+                    "require_changed_output": bool(
+                        document_profile.get("requires_pdf_output")
+                    ),
+                    "require_extractable_text": True,
+                }
                 document_job_budget = (
                     self.model_router.cost_engine.reserve_document_budget(
                         job.job_id,
@@ -1809,6 +1974,7 @@ class Engine:
                 )
             else:
                 t._rockcore_document_profile = None
+                t._rockcore_artifact_manifest = None
                 if complexity == "simple":
                     task_worker.max_turns = min(task_worker.max_turns, 18)
                 t._rockcore_input_budget = int(budget["input_budget"])
@@ -1996,6 +2162,34 @@ class Engine:
                         merge_msg = f"AI {job.job_id}: {task_id} - {t.title}"
                         merge_result = await self.merge_manager.commit_and_merge(task_id, merge_msg)
                         integration_result = merge_result
+                        if merge_result.get("status") == "pending_merge":
+                            detail = str(
+                                merge_result.get("error")
+                                or "目标目录存在同名文件，等待显式合并"
+                            )
+                            continuation = {
+                                "status": "needs_continuation",
+                                "error": detail,
+                                "failure_stage": "merge_preflight",
+                                "checkpoint": {
+                                    "changes": task_changes,
+                                    "integration": merge_result,
+                                },
+                            }
+                            repos["task"].update_status_by_pk(t.id, "interrupted")
+                            self._checkpoint_task(
+                                repos, job, t, status="interrupted",
+                                result=continuation, error=detail,
+                            )
+                            await self.event_bus.publish(
+                                "task_needs_continuation",
+                                job_id=job.job_id, task_id=task_id,
+                                reason=detail, failure_stage="merge_preflight",
+                                checkpoint=continuation["checkpoint"],
+                                worktree_path=merge_result.get("worktree_path", ""),
+                            )
+                            self.merge_manager.preserve_worktree(task_id)
+                            return continuation
                         if merge_result.get("status") != "merged":
                             conflicts = merge_result.get("conflicts") or []
                             phase = str(merge_result.get("phase") or "merge")
@@ -2387,7 +2581,7 @@ class Engine:
         initial_turn_budget = getattr(worker, "max_turns", 16)
         document_profile = getattr(task, "_rockcore_document_profile", None)
         continuation_turn_budget = (
-            min(96, max(24, initial_turn_budget // 2))
+            min(32, max(16, initial_turn_budget // 2))
             if document_profile else
             min(12, max(8, initial_turn_budget // 2))
         )
@@ -2400,6 +2594,7 @@ class Engine:
         ))))
         primary_attempts = min(configured_attempts, emergency_after)
         budget_finalization_retry = False
+        document_continuations = 0
 
         async def extend_after_budget(error: str, attempt: int) -> bool:
             nonlocal document_budget_extensions, budget_finalization_retry
@@ -2528,6 +2723,12 @@ class Engine:
                         break
                     if self._is_provider_unavailable(last_error):
                         break
+                    if self._is_stalled_worker_error(last_error):
+                        logger.warning(
+                            "Task %s stalled; switching provider/strategy",
+                            task.task_id,
+                        )
+                        break
                     if "ended without editing files" in last_error.lower():
                         logger.warning(
                             f"Task {task.task_id}: model ended before editing; "
@@ -2557,9 +2758,33 @@ class Engine:
                             "Max turns reached: partial changes require completion"
                             + progress_detail
                         )
+                        artifact_manifest = dict(
+                            getattr(task, "_rockcore_artifact_manifest", None) or {}
+                        )
+                        validate_artifact_first = bool(
+                            artifact_manifest.get("require_changed_output")
+                        )
+                        if validate_artifact_first and (
+                            not document_progress or document_continuations >= 1
+                        ):
+                            await self.event_bus.publish(
+                                "task_pending_validation",
+                                job_id=job.job_id,
+                                task_id=task.task_id,
+                                reason=last_error,
+                            )
+                            return {
+                                "status": "pending_validation",
+                                "error": last_error,
+                                "failure_stage": "turn_limit_validation",
+                                "pending_event_published": True,
+                                "document_progress": document_progress,
+                            }
+                        if document_progress:
+                            document_continuations += 1
                         logger.warning(
-                            f"Task {task.task_id}: max turns with partial changes; "
-                            "continuing in the same worktree"
+                            f"Task {task.task_id}: max turns with unread pages; "
+                            "allowing one bounded continuation"
                         )
                         await self.event_bus.publish(
                             "task_continuing",
@@ -2600,6 +2825,8 @@ class Engine:
                         "on the same provider; switching to fallback"
                     )
                     break
+                if self._is_stalled_worker_error(last_error):
+                    break
 
         if (
             "max turns" in last_error.lower()
@@ -2624,6 +2851,7 @@ class Engine:
         if (
             self._is_provider_capability_error(last_error)
             or self._is_provider_unavailable(last_error)
+            or self._is_stalled_worker_error(last_error)
         ):
             fallback = await self._run_worker_fallback(
                 worker, task, worktree_root, last_error
@@ -2811,7 +3039,7 @@ class Engine:
 
         task._rockcore_input_budget = enlarged
         continuation_turns = min(
-            96, max(24, int(profile.get("max_turns", 48)) // 2)
+            32, max(16, int(profile.get("max_turns", 48)) // 2)
         )
         worker.max_turns = max(worker.max_turns, continuation_turns)
         required_calls = (
@@ -2853,6 +3081,15 @@ class Engine:
         return (
             "[allowed_path]" in normalized
             or "path not in allowed set" in normalized
+        )
+
+    @staticmethod
+    def _is_stalled_worker_error(error: str) -> bool:
+        """Stop retrying a strategy that has produced no useful progress."""
+        normalized = str(error or "").lower()
+        return (
+            "no_progress:" in normalized
+            or "repeated_tool_failure:" in normalized
         )
 
     @staticmethod

@@ -7,6 +7,7 @@ from pathlib import Path
 from memory.context_manager import ContextManager
 from memory.repo_map import RepoMap
 from orchestrator.engine import Engine
+from orchestrator.policy_engine import PolicyEngine
 from orchestrator.state_machine import JobState
 
 
@@ -66,6 +67,25 @@ def test_repository_map_migrates_legacy_windows_separators(tmp_path):
     assert "site/index.html [markup]" in repo_map.get_context_summary()
     assert repo_map.get_category_files("markup") == ["site/index.html"]
     assert repo_map.get_symbols_for_file("src/app.py")[0]["name"] == "render"
+
+
+def test_vague_continuation_plan_is_rejected_before_execution():
+    errors = PolicyEngine().check_task_plan(
+        {
+            "tasks": [{
+                "id": "T001",
+                "title": "继续完成",
+                "type": "coding",
+                "description": "=== CONTINUATION CONTEXT ===\n继续上次工作",
+                "dependencies": [],
+                "allowed_paths": ["*"],
+                "acceptance_command": "",
+            }],
+        },
+        {"protected_paths": []},
+    )
+
+    assert any(error.startswith("continuation_quality:") for error in errors)
 
 
 class _AnalysisAwareWorker:

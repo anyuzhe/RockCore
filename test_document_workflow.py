@@ -71,9 +71,33 @@ def test_document_budget_scales_with_actual_page_count(tmp_path, monkeypatch):
     assert long["input_budget"] == 2_365_440
     assert long["pdf_pages"] == 151
     assert long["page_batches"] == 19
-    assert long["max_turns"] == 96
-    assert long["api_call_budget"] == 132
+    assert long["max_turns"] == 64
+    assert long["api_call_budget"] == 100
     assert long["exploration_turns"] > medium["exploration_turns"]
+
+
+def test_document_profile_does_not_count_existing_summary_as_source(
+    tmp_path, monkeypatch,
+):
+    (tmp_path / "original-book.pdf").write_bytes(b"book")
+    (tmp_path / "summary.pdf").write_bytes(b"old output")
+    monkeypatch.setattr(
+        Engine, "_pdf_page_count",
+        staticmethod(lambda path: 151 if path.name == "original-book.pdf" else 65),
+    )
+
+    profile = Engine._document_task_profile(
+        _task(
+            description="把 PDF 全书精简并输出成 summary.pdf",
+            allowed_paths=["*.pdf"],
+        ),
+        str(tmp_path),
+    )
+
+    assert profile["pdf_pages"] == 151
+    assert profile["source_pdfs"] == ["original-book.pdf"]
+    assert profile["output_pdfs"] == ["summary.pdf"]
+    assert profile["requires_pdf_output"] is True
 
 
 def test_document_reservation_keeps_paid_api_cost_limit_unchanged():
@@ -111,6 +135,49 @@ def test_generated_pdf_receives_structural_validation(tmp_path):
     assert valid["status"] == "passed"
     assert broken["status"] == "failed"
     assert "PDF" in broken["issues"][0]
+
+
+def test_pdf_artifact_validation_requires_the_final_pdf_to_change(tmp_path):
+    try:
+        from pypdf import PdfWriter
+    except ImportError:
+        from PyPDF2 import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    with (tmp_path / "summary.pdf").open("wb") as handle:
+        writer.write(handle)
+    (tmp_path / "make_summary.py").write_text("print('old')\n", encoding="utf-8")
+    baseline = TestManager.capture_snapshot(tmp_path)
+    (tmp_path / "make_summary.py").write_text("print('new')\n", encoding="utf-8")
+
+    class Runs:
+        @staticmethod
+        def create(*_args):
+            return SimpleNamespace(id=1)
+
+        @staticmethod
+        def update_result(*_args):
+            return None
+
+    task = _task(
+        description="生成最终 PDF",
+        allowed_paths=["summary.pdf", "make_summary.py"],
+    )
+    task.id = 1
+    task.job = None
+    task._rockcore_artifact_manifest = {
+        "kind": "pdf", "inputs": [], "outputs": ["summary.pdf"],
+        "require_changed_output": True, "require_extractable_text": True,
+    }
+
+    result = asyncio.run(TestManager().validate_project(
+        task, {"test_run": Runs()}, baseline_snapshot=baseline,
+        project_root=tmp_path,
+    ))
+
+    assert result["status"] == "failed"
+    assert "final PDF was not created or updated" in result["output"]
 
 
 def test_worker_cannot_finish_while_pdf_reports_unread_pages():
@@ -347,10 +414,15 @@ def test_execution_marks_budget_exhausted_artifact_done_after_validation(tmp_pat
             return self
 
         async def run(self, *_args, **_kwargs):
-            output = PdfWriter()
-            output.add_blank_page(width=595, height=842)
-            with (self.root / "summary.pdf").open("wb") as handle:
-                output.write(handle)
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+            from reportlab.pdfgen import canvas
+
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+            output = canvas.Canvas(str(self.root / "summary.pdf"))
+            output.setFont("STSong-Light", 12)
+            output.drawString(72, 780, "精简后的正文内容")
+            output.save()
             return {
                 "status": "failed",
                 "error": (

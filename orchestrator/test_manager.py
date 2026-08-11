@@ -181,6 +181,15 @@ class TestManager:
 
         # Only execute if it's an actual shell command
         if not self._is_shell_command(command):
+            manifest = dict(
+                getattr(task, "_rockcore_artifact_manifest", None) or {}
+            )
+            if manifest.get("require_changed_output"):
+                return await self._validate_project(
+                    task, repos, event_bus,
+                    baseline_snapshot=baseline_snapshot,
+                    project_root=cwd,
+                )
             return await self._validate_output(task, repos, event_bus)
 
         if self._uses_git(command) and not self.is_git_repo(cwd):
@@ -218,6 +227,20 @@ class TestManager:
                 else output.count("FAILED") if proc.returncode != 0 else 0
             )
             status = "passed" if proc.returncode == 0 else "failed"
+            if status == "passed":
+                artifact_issues, _ = self._validate_artifact_manifest(
+                    task, Path(cwd),
+                    self.snapshot_diff(cwd, baseline_snapshot),
+                )
+                if artifact_issues:
+                    status = "failed"
+                    passed = 0
+                    failed = max(1, len(artifact_issues))
+                    output = (
+                        output.rstrip()
+                        + "\nArtifact validation failed: "
+                        + "; ".join(artifact_issues[:5])
+                    )
             repos["test_run"].update_result(
                 tr.id, passed, failed, 0, output, duration, status
             )
@@ -295,6 +318,72 @@ class TestManager:
         return {"status": status, "passed": 1 if status == "passed" else 0,
                 "failed": 0, "output": f"Output validation: {status}"}
 
+    @classmethod
+    def _validate_artifact_manifest(cls, task: Any, root: Path,
+                                    diff: dict) -> tuple[list[str], list[str]]:
+        """Validate the requested final artifact independently of helper files."""
+        manifest = dict(
+            getattr(task, "_rockcore_artifact_manifest", None) or {}
+        )
+        if not (
+            manifest.get("kind") == "pdf"
+            and manifest.get("require_changed_output")
+        ):
+            return [], []
+        issues = []
+        checked = []
+        changed_set = set(diff["changed"])
+        input_paths = {
+            str(path).replace("\\", "/")
+            for path in (manifest.get("inputs") or [])
+        }
+        output_paths = [
+            str(path).replace("\\", "/")
+            for path in (manifest.get("outputs") or [])
+        ]
+        if not output_paths:
+            output_paths = [
+                relative for relative in diff["changed"]
+                if relative.lower().endswith(".pdf")
+                and relative not in input_paths
+            ]
+        changed_outputs = [
+            relative for relative in output_paths
+            if relative in changed_set and (root / relative).is_file()
+        ]
+        if not changed_outputs:
+            expected = ", ".join(output_paths) or "a new PDF artifact"
+            issues.append(
+                "Requested final PDF was not created or updated: " + expected
+            )
+        input_digests = set()
+        for relative in input_paths:
+            path = root / relative
+            try:
+                if path.is_file():
+                    input_digests.add(hashlib.sha256(path.read_bytes()).hexdigest())
+            except OSError:
+                continue
+        for relative in changed_outputs:
+            path = root / relative
+            result = cls._validate_pdf(
+                path,
+                require_extractable_text=bool(
+                    manifest.get("require_extractable_text", True)
+                ),
+            )
+            checked.append(relative)
+            issues.extend(result["issues"])
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                if digest in input_digests:
+                    issues.append(
+                        f"{path.name}: output is byte-identical to an input PDF"
+                    )
+            except OSError:
+                pass
+        return issues, checked
+
     async def _validate_project(self, task: Any, repos: dict,
                                 event_bus: EventBus | None = None,
                                 baseline_snapshot: dict | None = None,
@@ -327,9 +416,17 @@ class TestManager:
 
         issues = []
         checked = []
+        artifact_issues, artifact_checked = self._validate_artifact_manifest(
+            task, root, diff
+        )
+        issues.extend(artifact_issues)
+        checked.extend(artifact_checked)
         for path in candidates:
+            relative = path.relative_to(root).as_posix()
+            if relative in checked:
+                continue
             result = self._validate_source(path)
-            checked.append(path.relative_to(root).as_posix())
+            checked.append(relative)
             issues.extend(result["issues"])
 
         # A review task verifies accumulated job changes; it does not need to edit again.
@@ -426,7 +523,8 @@ class TestManager:
         return {"status": "passed" if not issues else "failed", "issues": issues}
 
     @staticmethod
-    def _validate_pdf(path: Path) -> dict:
+    def _validate_pdf(path: Path,
+                      require_extractable_text: bool = False) -> dict:
         """Check that a generated PDF is readable, non-empty, and has pages."""
         issues = []
         try:
@@ -447,6 +545,19 @@ class TestManager:
                     # masquerade as a structurally valid multi-page artifact.
                     reader.pages[0].mediabox
                     reader.pages[-1].mediabox
+                    if require_extractable_text:
+                        indexes = sorted({
+                            0, min(1, len(reader.pages) - 1),
+                            len(reader.pages) - 1,
+                        })
+                        extracted = "".join(
+                            str(reader.pages[index].extract_text() or "")
+                            for index in indexes
+                        )
+                        if not extracted.strip():
+                            issues.append(
+                                f"{path.name}: generated PDF has no extractable text"
+                            )
         except (OSError, ValueError, TypeError, IndexError) as error:
             issues.append(f"{path.name}: invalid PDF: {error}")
         except Exception as error:

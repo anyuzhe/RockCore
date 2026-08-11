@@ -115,6 +115,104 @@ def test_preserved_continuation_releases_active_slot_without_deleting_files(
     asyncio.run(scenario())
 
 
+def test_continuation_restores_source_branch_and_uncommitted_checkpoint(tmp_path):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        first = await manager.create_task_worktree("T001", "JOB-SOURCE")
+        first_path = Path(first["path"])
+        (first_path / "checkpoint.md").write_text(
+            "pages 1-80 complete", encoding="utf-8"
+        )
+        manager.preserve_worktree("T001")
+
+        resumed = await manager.create_task_worktree(
+            "T001", "JOB-CONTINUE", source_job_id="JOB-SOURCE"
+        )
+        resumed_path = Path(resumed["path"])
+        assert resumed["resumed_from"] == "ai/job-source/t001"
+        assert "checkpoint.md" in resumed["resumed_files"]
+        assert (resumed_path / "checkpoint.md").read_text(
+            encoding="utf-8"
+        ) == "pages 1-80 complete"
+        await manager.abort_worktree("T001")
+
+    asyncio.run(scenario())
+
+
+def test_continuation_can_integrate_already_committed_source_output(tmp_path):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        first = await manager.create_task_worktree("T001", "JOB-SOURCE")
+        first_path = Path(first["path"])
+        (first_path / "completed.md").write_text("done\n", encoding="utf-8")
+        assert _git(first_path, "add", "completed.md").returncode == 0
+        assert _git(
+            first_path, "-c", "user.name=Test", "-c",
+            "user.email=test@example.com", "commit", "-m", "checkpoint",
+        ).returncode == 0
+        manager.preserve_worktree("T001")
+
+        resumed = await manager.create_task_worktree(
+            "T001", "JOB-CONTINUE", source_job_id="JOB-SOURCE"
+        )
+        assert resumed["resumed_files"] == ["completed.md"]
+        merged = await manager.commit_and_merge("T001", "finish continuation")
+        assert merged["status"] == "merged"
+
+    asyncio.run(scenario())
+    assert (project / "completed.md").read_text(encoding="utf-8") == "done\n"
+
+
+def test_different_untracked_target_collision_becomes_pending_merge(tmp_path):
+    project = _initialize_project(tmp_path)
+    (project / "output.txt").write_text("user version\n", encoding="utf-8")
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-COLLISION")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("worker version\n", encoding="utf-8")
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "pending_merge"
+    assert result["preserved"] is True
+    assert result["conflicts"] == ["output.txt"]
+    assert (project / "output.txt").read_text(encoding="utf-8") == "user version\n"
+    assert (Path(result["worktree_path"]) / "output.txt").read_text(
+        encoding="utf-8"
+    ) == "worker version\n"
+
+
+def test_identical_untracked_target_collision_is_resolved_and_merged(tmp_path):
+    project = _initialize_project(tmp_path)
+    (project / "output.txt").write_text("same\n", encoding="utf-8")
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-IDENTICAL")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("same\n", encoding="utf-8")
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "merged"
+    assert result["preflight"]["status"] == "resolved"
+    assert result["preflight"]["identical"] == ["output.txt"]
+
+
 def test_commit_failure_preserves_worktree_and_never_merges(
     tmp_path, monkeypatch,
 ):

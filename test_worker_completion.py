@@ -390,6 +390,47 @@ def test_worker_returns_tool_argument_errors_to_the_model():
     asyncio.run(scenario())
 
 
+def test_pdf_worker_rejects_custom_generator_and_stops_repeated_strategy():
+    class Router:
+        calls = 0
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            self.calls += 1
+            return {
+                "content": "Building a custom PDF generator.",
+                "tool_calls": [{
+                    "id": f"custom-{self.calls}",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps({
+                            "path": "make_pdf.py",
+                            "content": "# custom font parser",
+                        }),
+                    },
+                }],
+                "usage": {},
+            }
+
+    async def scenario():
+        task = _task()
+        task.title = "把 PDF 书籍精简成 summary.pdf"
+        task.description = "读取 source.pdf 并生成最终 PDF"
+        task.allowed_paths = ["*"]
+        task._rockcore_artifact_manifest = {
+            "kind": "pdf", "require_changed_output": True,
+        }
+        broker = _RecordingBroker()
+        result = await WorkerAgent(
+            Router(), broker, max_turns=10
+        ).run(task, project_root=".")
+
+        assert result["status"] == "failed"
+        assert "REPEATED_TOOL_FAILURE" in result["error"]
+        assert broker.executed == []
+
+    asyncio.run(scenario())
+
+
 def test_worker_continues_after_a_tool_exception():
     async def scenario():
         router = _ToolExceptionRouter()
