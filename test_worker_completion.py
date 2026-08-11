@@ -390,6 +390,84 @@ def test_worker_returns_tool_argument_errors_to_the_model():
     asyncio.run(scenario())
 
 
+def test_worker_recovers_from_truncated_large_write_with_smaller_payload():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+            self.max_tokens = []
+            self.second_messages = []
+
+        async def chat_with_tools(self, *_args, **kwargs):
+            self.calls += 1
+            self.max_tokens.append(kwargs.get("max_tokens"))
+            if self.calls == 1:
+                return {
+                    "content": "Writing the complete game implementation.",
+                    "tool_calls": [{
+                        "id": "oversized-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": (
+                                '{"path":"game.js","content":"'
+                                + ("x" * 20_000)
+                            ),
+                        },
+                    }],
+                    "finish_reason": "length",
+                    "usage": {"output_tokens": 4_096},
+                }
+            if self.calls == 2:
+                self.second_messages = list(_args[2])
+                return {
+                    "content": "Switching to a small complete skeleton.",
+                    "tool_calls": [{
+                        "id": "small-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": "game.js",
+                                "content": "(() => { 'use strict'; })();\n",
+                            }),
+                        },
+                    }],
+                    "finish_reason": "tool_calls",
+                    "usage": {},
+                }
+            return {
+                "content": "The implementation is complete.",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "usage": {},
+            }
+
+    async def scenario():
+        router = Router()
+        broker = _RecordingBroker()
+        result = await WorkerAgent(
+            router, broker, max_turns=5
+        ).run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["write_file"]
+        assert router.max_tokens[0] == 12_288
+        assert any(
+            "under 12000 characters" in str(message.get("content", ""))
+            for message in router.second_messages
+        )
+        malformed_history = next(
+            message for message in router.second_messages
+            if message.get("tool_calls")
+        )
+        recorded_arguments = malformed_history["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        assert json.loads(recorded_arguments)["_rockcore_recovery"] == (
+            "tool payload was truncated"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_pdf_worker_rejects_custom_generator_and_stops_repeated_strategy():
     class Router:
         calls = 0
