@@ -15,6 +15,7 @@ from typing import Any
 
 from app.subprocess_utils import command_basename, quote_command_arg, run_process
 from app.text_utils import read_text_compatible
+from app.python_validation import run_embedded_python_command
 from .event_bus import EventBus
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Commands that are safe to run via shell. Natural-language acceptance criteria
 # like "完成结构化分析报告" are NOT valid commands.
 VALID_TEST_COMMANDS = {
-    "pytest", "python3", "python", "npm", "pnpm", "yarn", "node",
+    "pytest", "python3", "python", "py", "npm", "pnpm", "yarn", "node",
     "cargo", "go", "make", "cmake", "ctest", "deno", "bun",
     "mypy", "ruff", "black", "flake8", "eslint", "tsc", "vitest", "jest",
     "pip", "poetry", "ls", "cat", "head", "tail", "test", "echo",
@@ -144,6 +145,8 @@ class TestManager:
             or (root_path / "tests").is_dir()
             or list(root_path.glob("test_*.py"))
         ):
+            if getattr(sys, "frozen", False):
+                return "python -m unittest discover -v"
             return f"{quote_command_arg(sys.executable)} -m pytest -q"
         if (root_path / "Cargo.toml").is_file():
             return "cargo test"
@@ -195,14 +198,25 @@ class TestManager:
 
         start = time.time()
         try:
-            proc = run_process(
-                command, shell=True, capture_output=True,
-                text=True, timeout=self.DEFAULT_TIMEOUT, cwd=cwd,
+            proc = run_embedded_python_command(
+                command, cwd, timeout=self.DEFAULT_TIMEOUT
             )
+            used_embedded_python = proc is not None
+            if proc is None:
+                proc = run_process(
+                    command, shell=True, capture_output=True,
+                    text=True, timeout=self.DEFAULT_TIMEOUT, cwd=cwd,
+                )
             duration = int((time.time() - start) * 1000)
             output = proc.stdout + "\n" + proc.stderr
-            passed = output.count("passed") if proc.returncode == 0 else 0
-            failed = output.count("FAILED") if proc.returncode != 0 else 0
+            passed = (
+                1 if used_embedded_python and proc.returncode == 0
+                else output.count("passed") if proc.returncode == 0 else 0
+            )
+            failed = (
+                1 if used_embedded_python and proc.returncode != 0
+                else output.count("FAILED") if proc.returncode != 0 else 0
+            )
             status = "passed" if proc.returncode == 0 else "failed"
             repos["test_run"].update_result(
                 tr.id, passed, failed, 0, output, duration, status
@@ -333,10 +347,14 @@ class TestManager:
                 test_command = self.discover_test_command(root)
             if test_command:
                 try:
-                    proc = run_process(
-                        test_command, shell=True, capture_output=True, text=True,
-                        timeout=self.DEFAULT_TIMEOUT, cwd=str(root),
+                    proc = run_embedded_python_command(
+                        test_command, root, timeout=self.DEFAULT_TIMEOUT
                     )
+                    if proc is None:
+                        proc = run_process(
+                            test_command, shell=True, capture_output=True, text=True,
+                            timeout=self.DEFAULT_TIMEOUT, cwd=str(root),
+                        )
                     test_output = (proc.stdout + "\n" + proc.stderr).strip()
                     if proc.returncode != 0:
                         issues.append(

@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -141,49 +142,160 @@ def _auth_file_login_hint(auth_path: Path) -> str:
     return ""
 
 
-def _find_codex_binary(environ: dict | None = None) -> str:
+def _expand_binary_path(value: str, environment: dict) -> str:
+    """Expand user and Windows-style environment variables deterministically."""
+    expanded = str(value or "").strip().strip('"')
+    if not expanded:
+        return ""
+    expanded = re.sub(
+        r"%([^%]+)%",
+        lambda match: str(environment.get(match.group(1), match.group(0))),
+        expanded,
+    )
+    return os.path.expandvars(expanded)
+
+
+def _bounded_codex_search(root: Path, *, max_depth: int = 6,
+                          max_results: int = 32) -> list[str]:
+    """Search a known install root without walking the user's whole profile."""
+    results: list[str] = []
+    if not root.is_dir():
+        return results
+    try:
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            try:
+                depth = len(current_path.relative_to(root).parts)
+            except ValueError:
+                continue
+            directories[:] = sorted(directories)
+            if depth >= max_depth:
+                directories[:] = []
+            names = {name.lower(): name for name in files}
+            for executable in ("codex.exe", "codex.cmd", "codex.ps1"):
+                actual = names.get(executable)
+                if actual:
+                    results.append(str(current_path / actual))
+                    if len(results) >= max_results:
+                        return results
+    except OSError:
+        # WindowsApps and Store package directories can reject enumeration.
+        return results
+    return results
+
+
+def _windows_codex_install_candidates(environment: dict) -> list[str]:
+    """Return Codex launchers from standard Windows and editor installs."""
+    appdata = environment.get("APPDATA", "")
+    localappdata = environment.get("LOCALAPPDATA", "")
+    userprofile = environment.get("USERPROFILE", "")
+    programfiles = environment.get("ProgramFiles", "")
+    programfiles_x86 = environment.get("ProgramFiles(x86)", "")
+    candidates = [
+        str(Path(appdata) / "npm" / name) if appdata else ""
+        for name in ("codex.cmd", "codex.exe", "codex.ps1")
+    ]
+    candidates.extend([
+        str(Path(localappdata) / "npm" / name) if localappdata else ""
+        for name in ("codex.cmd", "codex.exe", "codex.ps1")
+    ])
+    candidates.extend([
+        str(Path(localappdata) / "Programs" / "ChatGPT" / "resources" / "codex.exe")
+        if localappdata else "",
+        str(Path(localappdata) / "Programs" / "ChatGPT" / "codex.exe")
+        if localappdata else "",
+        str(Path(localappdata) / "Programs" / "Codex" / "codex.exe")
+        if localappdata else "",
+        str(Path(localappdata) / "Microsoft" / "WindowsApps" / "codex.exe")
+        if localappdata else "",
+        str(Path(programfiles) / "nodejs" / "codex.cmd") if programfiles else "",
+        str(Path(programfiles_x86) / "nodejs" / "codex.cmd")
+        if programfiles_x86 else "",
+        str(Path(userprofile) / ".codex" / "bin" / "codex.exe")
+        if userprofile else "",
+        str(Path(userprofile) / ".codex" / "bin" / "codex.cmd")
+        if userprofile else "",
+        str(Path(userprofile) / ".local" / "bin" / "codex.exe")
+        if userprofile else "",
+    ])
+
+    # Codex/ChatGPT editor extensions contain their own native CLI. These are
+    # common on machines where the user is logged in but npm's global `codex`
+    # launcher is not installed or is absent from a GUI application's PATH.
+    extension_roots: list[Path] = []
+    if userprofile:
+        profile = Path(userprofile)
+        extension_roots.extend([
+            profile / ".vscode" / "extensions",
+            profile / ".vscode-insiders" / "extensions",
+            profile / ".cursor" / "extensions",
+            profile / ".windsurf" / "extensions",
+        ])
+    for extension_root in extension_roots:
+        try:
+            extension_dirs = [
+                entry for entry in extension_root.iterdir()
+                if entry.is_dir() and entry.name.lower().startswith(
+                    ("openai.chatgpt-", "openai.codex-")
+                )
+            ]
+            extension_dirs.sort(
+                key=lambda entry: entry.stat().st_mtime_ns, reverse=True
+            )
+        except OSError:
+            continue
+        for extension_dir in extension_dirs[:8]:
+            candidates.extend(_bounded_codex_search(extension_dir, max_depth=5))
+
+    # Desktop/winget layouts have changed across releases. Limit recursive
+    # lookup to known vendor roots so discovery stays fast and predictable.
+    recursive_roots: list[Path] = []
+    if localappdata:
+        local = Path(localappdata)
+        recursive_roots.extend([
+            local / "Programs" / "ChatGPT",
+            local / "Programs" / "Codex",
+            local / "ChatGPT",
+            local / "Codex",
+        ])
+        for package_root in (
+            local / "Microsoft" / "WinGet" / "Packages",
+            local / "Packages",
+        ):
+            try:
+                recursive_roots.extend(
+                    entry for entry in package_root.iterdir()
+                    if entry.is_dir() and "openai" in entry.name.lower()
+                    and any(
+                        marker in entry.name.lower()
+                        for marker in ("codex", "chatgpt")
+                    )
+                )
+            except OSError:
+                continue
+    for root in recursive_roots:
+        candidates.extend(_bounded_codex_search(root, max_depth=6))
+    return candidates
+
+
+def _find_codex_binary(environ: dict | None = None,
+                       configured_binary: str = "") -> str:
     """Find Codex even when a desktop launch did not inherit the shell PATH."""
     environment = os.environ if environ is None else environ
-    configured = environment.get("CODEX_BINARY", "")
     candidates = [
-        configured,
+        configured_binary,
+        environment.get("CODEX_BINARY", ""),
         shutil.which("codex", path=environment.get("PATH")),
         shutil.which("codex.cmd", path=environment.get("PATH")),
         shutil.which("codex.exe", path=environment.get("PATH")),
+        shutil.which("codex.ps1", path=environment.get("PATH")),
     ]
     windows_environment = sys.platform == "win32" or any(
-        environment.get(name) for name in ("APPDATA", "LOCALAPPDATA")
+        environment.get(name)
+        for name in ("APPDATA", "LOCALAPPDATA", "USERPROFILE")
     )
     if windows_environment:
-        appdata = environment.get("APPDATA", "")
-        localappdata = environment.get("LOCALAPPDATA", "")
-        userprofile = environment.get("USERPROFILE", "")
-        programfiles = environment.get("ProgramFiles", "")
-        programfiles_x86 = environment.get("ProgramFiles(x86)", "")
-        candidates.extend([
-            str(Path(appdata) / "npm" / "codex.cmd") if appdata else "",
-            str(Path(appdata) / "npm" / "codex.exe") if appdata else "",
-            str(Path(localappdata) / "npm" / "codex.cmd") if localappdata else "",
-            str(Path(localappdata) / "npm" / "codex.exe") if localappdata else "",
-            str(Path(localappdata) / "Programs" / "ChatGPT" / "resources" / "codex.exe")
-            if localappdata else "",
-            str(Path(localappdata) / "Programs" / "ChatGPT" / "codex.exe")
-            if localappdata else "",
-            str(Path(localappdata) / "Programs" / "Codex" / "codex.exe")
-            if localappdata else "",
-            str(Path(localappdata) / "Microsoft" / "WindowsApps" / "codex.exe")
-            if localappdata else "",
-            str(Path(programfiles) / "nodejs" / "codex.cmd")
-            if programfiles else "",
-            str(Path(programfiles_x86) / "nodejs" / "codex.cmd")
-            if programfiles_x86 else "",
-            str(Path(userprofile) / ".codex" / "bin" / "codex.exe")
-            if userprofile else "",
-            str(Path(userprofile) / ".codex" / "bin" / "codex.cmd")
-            if userprofile else "",
-            str(Path(userprofile) / ".local" / "bin" / "codex.exe")
-            if userprofile else "",
-        ])
+        candidates.extend(_windows_codex_install_candidates(environment))
     else:
         candidates.extend([
             "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -193,7 +305,7 @@ def _find_codex_binary(environ: dict | None = None) -> str:
     for candidate in candidates:
         if not candidate:
             continue
-        path = Path(candidate)
+        path = Path(_expand_binary_path(str(candidate), environment)).expanduser()
         if not path.is_file():
             continue
         if sys.platform == "win32" or path.suffix.lower() in {
@@ -233,17 +345,21 @@ def _detect_chatgpt_login(
     auth_path: Path | None = None,
     environ: dict | None = None,
     runner: Callable[..., Any] | None = None,
+    configured_binary: str = "",
 ) -> tuple[bool, str, str]:
     """Ask Codex which login mode is active without reading or exposing tokens."""
     environment = os.environ if environ is None else environ
     codex_home = _resolve_codex_home(auth_path, environment)
     selected_auth_path = Path(auth_path) if auth_path else codex_home / "auth.json"
-    binary = _find_codex_binary(environment)
+    binary = _find_codex_binary(
+        environment, configured_binary=configured_binary
+    )
     if not binary:
         detail = (
-            "auth.json exists, but Codex CLI was not found"
+            "已找到 auth.json，但未找到 Codex CLI；请安装 Codex CLI，"
+            "或在设置中选择 codex.exe/codex.cmd"
             if selected_auth_path.exists()
-            else "codex CLI unavailable"
+            else "未找到 Codex CLI 或 ChatGPT 登录"
         )
         return False, detail, ""
 
@@ -290,6 +406,7 @@ def get_codex_auth_status(
     auth_path: Path | None = None,
     *,
     configured_api_key: str = "",
+    configured_binary: str = "",
     environ: dict | None = None,
     login_status_runner: Callable[..., Any] | None = None,
 ) -> dict:
@@ -300,7 +417,8 @@ def get_codex_auth_status(
     if configured_api_key:
         platform_key, platform_source = configured_api_key, "RockCore 设置"
     chatgpt_authenticated, chatgpt_source, binary = _detect_chatgpt_login(
-        auth_path=auth_path, environ=environ, runner=login_status_runner
+        auth_path=auth_path, environ=environ, runner=login_status_runner,
+        configured_binary=configured_binary,
     )
     if platform_key:
         mode = "platform_api"
@@ -356,6 +474,7 @@ class CodexProvider(BaseProvider):
         codex_home = _resolve_codex_home(auth_path, environ)
         runtime = _load_codex_runtime_config(codex_home / "config.toml")
         configured_key = str(self.config.get("api_key", "") or "").strip()
+        configured_binary = str(self.config.get("binary", "") or "").strip()
         detected_key, detected_source = _load_platform_api_key(
             auth_path=auth_path, environ=environ
         )
@@ -365,6 +484,7 @@ class CodexProvider(BaseProvider):
             auth_path=auth_path,
             environ=environ,
             runner=login_status_runner,
+            configured_binary=configured_binary,
         )
         self.chatgpt_authenticated = logged_in
         self.chatgpt_source = login_source

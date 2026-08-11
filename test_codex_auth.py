@@ -77,6 +77,30 @@ def test_chatgpt_login_is_detected_through_codex_status_without_reading_token():
     assert binary == sys.executable
 
 
+def test_provider_uses_binary_selected_in_rockcore_settings(tmp_path):
+    executable = tmp_path / "Codex Tools" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+    auth_path = tmp_path / ".codex" / "auth.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text(json.dumps({
+        "tokens": {"access_token": "must-not-be-exposed"}
+    }))
+
+    provider = CodexProvider(
+        {"binary": str(executable)},
+        auth_path=auth_path,
+        environ={"PATH": ""},
+        login_status_runner=lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="Logged in using ChatGPT", stderr=""
+        ),
+    )
+
+    assert provider.chatgpt_authenticated
+    assert provider.codex_binary == str(executable)
+    assert provider.api_key == ""
+
+
 def test_chatgpt_probe_and_exec_use_selected_codex_home(tmp_path):
     codex_home = tmp_path / "Windows 用户" / ".codex"
     codex_home.mkdir(parents=True)

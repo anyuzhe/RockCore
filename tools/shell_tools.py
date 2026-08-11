@@ -13,6 +13,7 @@ from app.subprocess_utils import (
     no_window_creation_flags,
     utf8_environment,
 )
+from app.python_validation import run_embedded_python_command
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class ShellTools:
         self.project_root = project_root
         self.allowed_commands = allowed_commands or {
             "pytest", "npm", "pnpm", "yarn", "python", "python3",
+            "py",
             "cmake", "ctest", "make", "ruff", "flake8", "black",
             "eslint", "tsc", "vitest", "jest", "mypy",
             "git", "pip", "pip3", "poetry", "cargo", "go",
@@ -58,6 +60,20 @@ class ShellTools:
             }
 
         try:
+            embedded = await asyncio.to_thread(
+                run_embedded_python_command, command, self.project_root,
+                timeout=timeout,
+            )
+            if embedded is not None:
+                return {
+                    "stdout": str(embedded.stdout or "")[:max_output],
+                    "stderr": str(embedded.stderr or "")[:max_output],
+                    "return_code": int(embedded.returncode),
+                    "status": (
+                        "success" if embedded.returncode == 0 else "failed"
+                    ),
+                    "runtime": "rockcore_embedded_python",
+                }
             if sys.platform == "win32":
                 proc = subprocess.Popen(
                     command,

@@ -174,6 +174,37 @@ def test_codex_binary_is_found_in_windows_local_npm_directory(
     assert binary == str(launcher)
 
 
+def test_codex_binary_is_found_inside_vscode_chatgpt_extension(tmp_path):
+    userprofile = tmp_path / "Work station"
+    executable = (
+        userprofile / ".vscode" / "extensions"
+        / "openai.chatgpt-1.2.3-win32-x64" / "bin"
+        / "x86_64-pc-windows-msvc" / "codex.exe"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary({
+        "USERPROFILE": str(userprofile),
+        "LOCALAPPDATA": str(tmp_path / "Local"),
+        "PATH": "",
+    })
+
+    assert binary == str(executable)
+
+
+def test_configured_codex_binary_with_spaces_takes_precedence(tmp_path):
+    executable = tmp_path / "Codex Tools" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"MZ")
+
+    binary = _find_codex_binary(
+        {"PATH": ""}, configured_binary=str(executable)
+    )
+
+    assert binary == str(executable)
+
+
 def test_gb18030_project_file_is_read_without_mojibake(tmp_path):
     source = tmp_path / "旧项目.txt"
     source.write_bytes("中文内容：兼容 Windows".encode("gb18030"))

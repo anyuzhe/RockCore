@@ -18,6 +18,7 @@ hiddenimports += collect_submodules("pypdf")
 hiddenimports += collect_submodules("docx")
 hiddenimports += collect_submodules("pptx")
 hiddenimports += collect_submodules("reportlab")
+hiddenimports += collect_submodules("unittest")
 
 a = Analysis(
     [str(APP)],

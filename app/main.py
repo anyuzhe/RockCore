@@ -361,6 +361,10 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Required for the isolated Python acceptance runner in PyInstaller builds.
+    # It must run before qasync starts the desktop event loop.
+    import multiprocessing
+    multiprocessing.freeze_support()
     import qasync
     try:
         qasync.run(main())

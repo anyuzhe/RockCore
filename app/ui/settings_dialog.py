@@ -8,7 +8,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QPushButton, QLabel, QTabWidget, QWidget, QMessageBox, QSpinBox,
-    QDoubleSpinBox, QComboBox, QGroupBox, QToolButton
+    QDoubleSpinBox, QComboBox, QGroupBox, QToolButton, QFileDialog
 )
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QPainter, QPainterPath, QPen
@@ -206,6 +206,7 @@ class SettingsDialog(QDialog):
         auth_status = get_codex_auth_status(
             auth_path,
             configured_api_key=configured_codex.get("api_key", ""),
+            configured_binary=configured_codex.get("binary", ""),
         )
 
         self.codex_chatgpt_status = QLabel()
@@ -225,6 +226,30 @@ class SettingsDialog(QDialog):
                 "color: #f44336; font-weight: bold; padding: 8px;"
             )
         codex_layout.addWidget(self.codex_chatgpt_status)
+
+        cli_group = QGroupBox("ChatGPT 登录通道（本机 Codex CLI）")
+        cli_layout = QFormLayout(cli_group)
+        self.codex_binary = QLineEdit(configured_codex.get("binary", ""))
+        self.codex_binary.setPlaceholderText(
+            auth_status["codex_binary"] or "自动查找，或手动选择 codex.exe/codex.cmd"
+        )
+        binary_field = QWidget()
+        binary_field_layout = QHBoxLayout(binary_field)
+        binary_field_layout.setContentsMargins(0, 0, 0, 0)
+        binary_field_layout.setSpacing(6)
+        binary_field_layout.addWidget(self.codex_binary, 1)
+        self.codex_binary_browse = QPushButton("选择…")
+        self.codex_binary_browse.clicked.connect(self._browse_codex_binary)
+        binary_field_layout.addWidget(self.codex_binary_browse)
+        cli_layout.addRow("Codex CLI：", binary_field)
+        cli_note = QLabel(
+            "RockCore 会自动查找 PATH、npm、ChatGPT/Codex 安装目录，以及 "
+            "VS Code、Cursor、Windsurf 扩展中的 Codex CLI。"
+        )
+        cli_note.setWordWrap(True)
+        cli_note.setStyleSheet("color: #888;")
+        cli_layout.addRow("", cli_note)
+        codex_layout.addWidget(cli_group)
 
         platform_group = QGroupBox("Platform API（按 API 用量计费，可选）")
         platform_layout = QFormLayout(platform_group)
@@ -262,8 +287,8 @@ class SettingsDialog(QDialog):
             f"Codex CLI：{auth_status['codex_binary'] or '未找到'}\n"
             f"代理：{auth_status['proxy_source']}\n"
             f"认证文件：{auth_path}\n"
-            "Windows 会自动查找 PATH、npm、WindowsApps 与 Codex/ChatGPT 安装目录；"
-            "自定义位置可设置 CODEX_BINARY。"
+            "auth.json 是登录凭据，Codex CLI 是执行组件；两者都可用时才能走 "
+            "ChatGPT 登录通道。"
         )
         info_label.setStyleSheet("color: #888; padding: 4px 8px;")
         info_label.setWordWrap(True)
@@ -403,6 +428,16 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
 
+    def _browse_codex_binary(self):
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Codex CLI",
+            self.codex_binary.text().strip() or str(Path.home()),
+            "Codex CLI (codex.exe codex.cmd codex.bat codex.ps1);;所有文件 (*)",
+        )
+        if selected:
+            self.codex_binary.setText(selected)
+
     def _save(self):
         self._config["kimi"] = {
             "api_key": self.kimi_api_key.text().strip(),
@@ -416,6 +451,7 @@ class SettingsDialog(QDialog):
         self._config["codex"] = {
             **previous_codex,
             "api_key": self.codex_api_key.text().strip(),
+            "binary": self.codex_binary.text().strip(),
             "sandbox_mode": previous_codex.get("sandbox_mode", "read_only"),
         }
         self._config["max_concurrent_workers"] = self.max_workers.value()

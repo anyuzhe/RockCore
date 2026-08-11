@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Any
 
+from app.python_validation import run_embedded_python_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,6 +20,26 @@ class TestTools:
     async def run_tests(self, command: str = "pytest", timeout: int = 300) -> dict:
         """Run tests and return results."""
         try:
+            embedded = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_embedded_python_command, command, self.project_root,
+                    timeout=max(1, timeout - 1),
+                ),
+                timeout=timeout,
+            )
+            if embedded is not None:
+                stdout_str = str(embedded.stdout or "")
+                stderr_str = str(embedded.stderr or "")
+                output = stdout_str + ("\n" + stderr_str if stderr_str else "")
+                return {
+                    "status": "passed" if embedded.returncode == 0 else "failed",
+                    "output": output[:5000],
+                    "passed": 1 if embedded.returncode == 0 else 0,
+                    "failed": 0 if embedded.returncode == 0 else 1,
+                    "skipped": 0,
+                    "return_code": int(embedded.returncode),
+                    "runtime": "rockcore_embedded_python",
+                }
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
