@@ -71,8 +71,8 @@ def test_document_budget_scales_with_actual_page_count(tmp_path, monkeypatch):
     assert long["input_budget"] == 2_365_440
     assert long["pdf_pages"] == 151
     assert long["page_batches"] == 19
-    assert long["max_turns"] == 64
-    assert long["api_call_budget"] == 100
+    assert long["max_turns"] == 192
+    assert long["api_call_budget"] == 300
     assert long["exploration_turns"] > medium["exploration_turns"]
     assert short["final_outputs"] == ["summary.md"]
 

@@ -9,7 +9,7 @@ from orchestrator.agent_config import ProjectAgentConfig
 from orchestrator.cost_engine import BudgetExceededError, JobBudget
 from orchestrator.engine import Engine
 from orchestrator.event_bus import EventBus
-from orchestrator.model_router import ModelRouter
+from orchestrator.model_router import DEFAULT_REQUEST_TIMEOUT, ModelRouter
 
 
 def _task(task_type="coding"):
@@ -832,6 +832,11 @@ def test_model_router_translates_provider_timeout():
     asyncio.run(scenario())
 
 
+def test_model_router_default_timeout_allows_long_reasoning_requests():
+    assert DEFAULT_REQUEST_TIMEOUT == 540
+    assert ModelRouter().request_timeout == 540
+
+
 def test_model_router_normalizes_sync_and_malformed_provider_output():
     async def scenario():
         router = ModelRouter(provider_map={"worker": "deepseek"})
@@ -860,15 +865,17 @@ def test_default_worker_budgets_use_reliable_soft_limits():
     config = ProjectAgentConfig()
 
     assert config.complexity_turns == {
-        "simple": 20,
-        "normal": 32,
-        "complex": 48,
+        "simple": 60,
+        "normal": 96,
+        "complex": 144,
     }
-    assert config.worker.max_exploration_turns == 20
+    assert config.worker.max_turns == 96
+    assert config.worker.max_exploration_turns == 60
+    assert config.worker.patch_recovery_turns == 6
     assert config.complexity_exploration == {
-        "simple": 12,
-        "normal": 20,
-        "complex": 32,
+        "simple": 36,
+        "normal": 60,
+        "complex": 96,
     }
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
@@ -893,7 +900,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 7
+    assert config.config_version == 8
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -913,10 +920,45 @@ def test_large_existing_task_receives_a_dynamic_budget(tmp_path):
         task, str(tmp_path), base_turns=16, base_exploration=4
     )
 
-    assert budget["max_turns"] == 31
-    assert budget["exploration_turns"] == 14
+    assert budget["max_turns"] == 61
+    assert budget["exploration_turns"] == 42
     assert budget["existing_files"] == 2
     assert budget["total_lines"] == 770
+
+
+def test_version_seven_project_limits_are_tripled_once():
+    legacy = {
+        "config_version": 7,
+        "planner": {
+            "enabled": True, "provider": "kimi", "model": "kimi-k3",
+            "max_turns": 8,
+        },
+        "worker": {
+            "enabled": True, "provider": "deepseek",
+            "model": "deepseek-v4-flash", "max_turns": 50,
+            "max_exploration_turns": 20, "patch_recovery_turns": 2,
+        },
+        "complexity_turns": {"simple": 20, "normal": 32, "complex": 48},
+        "complexity_exploration": {
+            "simple": 12, "normal": 20, "complex": 32,
+        },
+    }
+
+    upgraded = ProjectAgentConfig.from_dict(legacy)
+    reloaded = ProjectAgentConfig.from_dict(upgraded.to_dict())
+
+    assert upgraded.config_version == 8
+    assert upgraded.planner.max_turns == 24
+    assert upgraded.worker.max_turns == 150
+    assert upgraded.worker.max_exploration_turns == 60
+    assert upgraded.worker.patch_recovery_turns == 6
+    assert upgraded.complexity_turns == {
+        "simple": 60, "normal": 96, "complex": 144,
+    }
+    assert upgraded.complexity_exploration == {
+        "simple": 36, "normal": 60, "complex": 96,
+    }
+    assert reloaded.to_dict() == upgraded.to_dict()
 
 
 def test_worker_compacts_history_without_splitting_recent_tool_pair():

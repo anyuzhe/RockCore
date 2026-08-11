@@ -23,7 +23,10 @@ ROUTING_STRATEGY = {
     "reviewer": {"provider": "codex", "priority": "accuracy"},
     "emergency_coder": {"provider": "codex", "priority": "write_access"},
 }
-DEFAULT_REQUEST_TIMEOUT = 180
+# Long reasoning/model-queue requests can legitimately take several minutes.
+# Keep the RMB cost ceiling as the hard protection and avoid terminating useful
+# provider work merely because the former three-minute client timer elapsed.
+DEFAULT_REQUEST_TIMEOUT = 540
 
 
 class ModelRouter:

@@ -657,13 +657,13 @@ class Engine:
         # per page batch plus verification. Cap one attempt so a broken custom
         # strategy cannot consume hundreds of calls; Token ceilings remain
         # generous and unfinished page ranges are checkpointed for continuation.
-        turns = min(64, max(24, 12 + page_batches * 3))
+        turns = min(192, max(72, 36 + page_batches * 9))
         exploration = min(
-            max(12, page_batches + 12),
-            max(12, turns - 12),
+            max(36, page_batches * 3 + 36),
+            max(36, turns - 36),
         )
-        finalization_turns = 12
-        api_call_budget = turns + finalization_turns + 24
+        finalization_turns = 36
+        api_call_budget = turns + finalization_turns + 72
         output_budget = max(200_000, estimated_pages * 1_500)
         concrete_non_pdf_outputs = [
             str(path).replace("\\", "/").lstrip("./") for path in allowed_paths
@@ -1996,49 +1996,49 @@ class Engine:
             # Read-only reports need a final model turn after search/read calls.
             # A fast preset may set the coding budget to 8, which is too short
             # for a two-file audit and previously caused false dependency failure.
-            turns = max(base_turns, 12 if total_lines >= 600 else 10)
+            turns = max(base_turns, 36 if total_lines >= 600 else 30)
             minimum_exploration = (
-                16 if total_lines >= 400 or len(files) >= 3 else 12
+                48 if total_lines >= 400 or len(files) >= 3 else 36
             )
             exploration = max(base_exploration, minimum_exploration)
             reasons.append("read-only report")
         elif task_type in {"testing", "review"}:
-            turns = min(base_turns, 18 if len(files) > 2 else 14)
-            exploration = min(max(base_exploration, 3), max(3, turns // 2))
+            turns = min(base_turns, 54 if len(files) > 2 else 42)
+            exploration = min(max(base_exploration, 9), max(9, turns // 2))
             reasons.append("validation task")
         else:
             turns = base_turns
             # Coding tasks commonly need several paginated reads across HTML,
             # CSS, and JS before a safe edit. This is only a convergence reminder,
             # so begin with enough room for a real cross-file inspection.
-            exploration = max(base_exploration, 12)
+            exploration = max(base_exploration, 36)
             if total_lines >= 400:
-                turns += 6
-                exploration += 2
+                turns += 18
+                exploration += 6
                 reasons.append(f"existing_code={total_lines} lines")
             if total_lines >= 1000:
-                turns += 6
-                exploration += 1
+                turns += 18
+                exploration += 3
                 reasons.append("large codebase slice")
             if len(files) >= 2:
-                turns += 3
+                turns += 9
                 reasons.append(f"files={len(files)}")
             if len(files) >= 5:
-                turns += 3
-                exploration += 1
+                turns += 9
+                exploration += 3
             if dependency_count >= 4:
-                turns += 3
+                turns += 9
                 reasons.append(f"dependencies={dependency_count}")
             if behavior_count >= 4 or len(description) >= 320:
-                turns += 3
+                turns += 9
                 reasons.append("multiple behaviors")
 
-        cap = 20 if mode == "fast" else 50
-        turns = max(6, min(cap, turns))
+        cap = 60 if mode == "fast" else 150
+        turns = max(18, min(cap, turns))
         # This value counts individual tool operations, not model turns. Parallel
         # reads and pagination can legitimately use several operations in one turn,
         # so keep the reminder generous and never turn it into a hard read limit.
-        exploration = max(6, min(40, exploration, max(6, turns * 2)))
+        exploration = max(18, min(120, exploration, max(18, turns * 2)))
         estimated_input_per_turn = min(
             40_000,
             10_000
@@ -2115,11 +2115,11 @@ class Engine:
         document_root = job.project.root_path if job.project else "."
         base_turns = (
             proj_config.get_worker_turns(complexity)
-            if proj_config else getattr(worker, "max_turns", 24)
+            if proj_config else getattr(worker, "max_turns", 72)
         )
         base_exploration = (
             proj_config.get_exploration_turns(complexity)
-            if proj_config else getattr(worker, "max_exploration_turns", 4)
+            if proj_config else getattr(worker, "max_exploration_turns", 12)
         )
         mode = proj_config.mode if proj_config else "auto"
         planned_task_budgets: dict[str, dict] = {}
@@ -2318,14 +2318,14 @@ class Engine:
             task_worker = worker.scoped_to(task_worktree_root)
             base_exploration = (
                 proj_config.get_exploration_turns(complexity)
-                if proj_config else getattr(task_worker, "max_exploration_turns", 4)
+                if proj_config else getattr(task_worker, "max_exploration_turns", 12)
             )
             budget = dict(
                 planned_task_budgets.get(task_id)
                 or self._estimate_task_budget(
                     t,
                     task_worktree_root,
-                    getattr(task_worker, "max_turns", 24),
+                    getattr(task_worker, "max_turns", 72),
                     base_exploration,
                     proj_config.mode if proj_config else "auto",
                 )
@@ -3186,9 +3186,9 @@ class Engine:
         initial_turn_budget = getattr(worker, "max_turns", 16)
         document_profile = getattr(task, "_rockcore_document_profile", None)
         continuation_turn_budget = (
-            min(32, max(16, initial_turn_budget // 2))
+            min(96, max(48, initial_turn_budget // 2))
             if document_profile else
-            min(12, max(8, initial_turn_budget // 2))
+            min(36, max(24, initial_turn_budget // 2))
         )
         document_budget_extensions = 0
         configured_attempts = max(
@@ -3611,12 +3611,12 @@ class Engine:
     def _enter_document_finalization_mode(task, worker) -> None:
         """Constrain a document continuation to artifact checks and completion."""
         profile = getattr(task, "_rockcore_document_profile", None) or {}
-        turns = max(4, int(profile.get("finalization_turns", 12) or 12))
+        turns = max(12, int(profile.get("finalization_turns", 36) or 36))
         task._rockcore_finalization_mode = True
         worker.max_turns = min(max(1, int(worker.max_turns)), turns)
         if hasattr(worker, "max_exploration_turns"):
             worker.max_exploration_turns = min(
-                max(1, int(worker.max_exploration_turns)), 3
+                max(1, int(worker.max_exploration_turns)), 9
             )
 
     async def _prepare_document_attempt_budget(
@@ -3719,7 +3719,7 @@ class Engine:
 
         task._rockcore_input_budget = enlarged
         continuation_turns = min(
-            32, max(16, int(profile.get("max_turns", 48)) // 2)
+            96, max(48, int(profile.get("max_turns", 144)) // 2)
         )
         worker.max_turns = max(worker.max_turns, continuation_turns)
         required_calls = (

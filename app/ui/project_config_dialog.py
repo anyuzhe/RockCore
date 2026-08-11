@@ -165,13 +165,13 @@ class ProjectConfigDialog(QDialog):
         form.addRow("推理强度：", self.worker_reasoning)
 
         self.worker_max_turns = QSpinBox()
-        self.worker_max_turns.setRange(4, 100)
-        self.worker_max_turns.setValue(32)
+        self.worker_max_turns.setRange(4, 300)
+        self.worker_max_turns.setValue(96)
         form.addRow("最大轮次：", self.worker_max_turns)
 
         self.worker_exploration = QSpinBox()
-        self.worker_exploration.setRange(4, 100)
-        self.worker_exploration.setValue(20)
+        self.worker_exploration.setRange(4, 300)
+        self.worker_exploration.setValue(60)
         self.worker_exploration.setToolTip(
             "按读取/搜索工具操作计数；达到后仅提醒收敛，不禁止继续读取"
         )
@@ -215,8 +215,8 @@ class ProjectConfigDialog(QDialog):
         form.addRow("备用模型：", self.worker_fallback_model)
 
         self.worker_patch_recovery = QSpinBox()
-        self.worker_patch_recovery.setRange(0, 5)
-        self.worker_patch_recovery.setValue(2)
+        self.worker_patch_recovery.setRange(0, 15)
+        self.worker_patch_recovery.setValue(6)
         form.addRow("补丁修复轮次：", self.worker_patch_recovery)
         worker_layout.addWidget(gb)
 
@@ -226,8 +226,8 @@ class ProjectConfigDialog(QDialog):
         self._complexity_spins = {}
         for key, label in [("simple", "简单"), ("normal", "普通"), ("complex", "复杂")]:
             spin = QSpinBox()
-            spin.setRange(4, 50)
-            spin.setValue({"simple": 16, "normal": 24, "complex": 36}[key])
+            spin.setRange(4, 150)
+            spin.setValue({"simple": 60, "normal": 96, "complex": 144}[key])
             form2.addRow(f"{label}：", spin)
             self._complexity_spins[key] = spin
         worker_layout.addWidget(gb2)
@@ -450,8 +450,8 @@ class ProjectConfigDialog(QDialog):
         ridx = self.worker_reasoning.findData(cfg.worker.reasoning_effort)
         if ridx >= 0:
             self.worker_reasoning.setCurrentIndex(ridx)
-        self.worker_max_turns.setValue(cfg.worker.max_turns or 32)
-        self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 20)
+        self.worker_max_turns.setValue(cfg.worker.max_turns or 96)
+        self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 60)
         self.worker_retry.setValue(cfg.worker.retry_count or 2)
         self.worker_emergency_after.setValue(
             cfg.worker.emergency_after_failures or 3
@@ -468,14 +468,14 @@ class ProjectConfigDialog(QDialog):
         )
         if fallback_model_index >= 0:
             self.worker_fallback_model.setCurrentIndex(fallback_model_index)
-        self.worker_patch_recovery.setValue(cfg.worker.patch_recovery_turns or 2)
+        self.worker_patch_recovery.setValue(cfg.worker.patch_recovery_turns or 6)
 
         # Complexity
         for key in ("simple", "normal", "complex"):
             if key in self._complexity_spins:
                 self._complexity_spins[key].setValue(
                     cfg.complexity_turns.get(
-                        key, {"simple": 16, "normal": 24, "complex": 36}[key]
+                        key, {"simple": 60, "normal": 96, "complex": 144}[key]
                     )
                 )
 

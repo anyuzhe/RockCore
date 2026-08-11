@@ -110,7 +110,7 @@ class WorkerAgent:
     """DeepSeek Worker: executes tasks using tools."""
 
     def __init__(self, model_router: ModelRouter, tool_broker: ToolBroker,
-                 max_turns: int = 25, max_exploration_turns: int = 16,
+                 max_turns: int = 75, max_exploration_turns: int = 48,
                  context_manager=None, skill_manager=None):
         self.model_router = model_router
         self.tool_broker = tool_broker

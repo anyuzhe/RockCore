@@ -45,7 +45,7 @@ def test_project_config_migrates_legacy_k27_aliases():
         },
     })
 
-    assert config.config_version == 7
+    assert config.config_version == 8
     assert config.planner.model == "kimi-k2.7-code"
     assert config.worker.fallback_model == "kimi-k2.7-code"
 

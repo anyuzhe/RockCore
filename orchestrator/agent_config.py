@@ -59,8 +59,8 @@ class AgentProfile:
 
 @dataclass
 class WorkerProfile(AgentProfile):
-    max_exploration_turns: int = 16
-    patch_recovery_turns: int = 2
+    max_exploration_turns: int = 48
+    patch_recovery_turns: int = 6
     emergency_after_failures: int = 3
     fallback_provider: str = "kimi"
     fallback_model: str = KIMI_K27_CODE_MODEL
@@ -274,7 +274,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 7
+    config_version: int = 8
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -285,12 +285,12 @@ class ProjectAgentConfig:
     ))
     planner: AgentProfile = field(default_factory=lambda: AgentProfile(
         enabled=True, provider="kimi", model="kimi-k3",
-        reasoning_effort="default", max_turns=8,
+        reasoning_effort="default", max_turns=24,
     ))
     worker: WorkerProfile = field(default_factory=lambda: WorkerProfile(
         enabled=True, provider="deepseek", model="deepseek-v4-flash",
-        reasoning_effort="default", max_turns=32,
-        max_exploration_turns=20, patch_recovery_turns=2, retry_count=2,
+        reasoning_effort="default", max_turns=96,
+        max_exploration_turns=60, patch_recovery_turns=6, retry_count=2,
         emergency_after_failures=3, fallback_provider="kimi",
         fallback_model=KIMI_K27_CODE_MODEL,
     ))
@@ -305,14 +305,14 @@ class ProjectAgentConfig:
 
     # ── Per-complexity turn overrides ──
     complexity_turns: dict[str, int] = field(default_factory=lambda: {
-        "simple": 20,
-        "normal": 32,
-        "complex": 48,
+        "simple": 60,
+        "normal": 96,
+        "complex": 144,
     })
     complexity_exploration: dict[str, int] = field(default_factory=lambda: {
-        "simple": 12,
-        "normal": 20,
-        "complex": 32,
+        "simple": 36,
+        "normal": 60,
+        "complex": 96,
     })
 
     # ── Features ──
@@ -357,9 +357,46 @@ class ProjectAgentConfig:
             cfg._upgrade_completion_limits()
         if source_version < 6:
             cfg._upgrade_exploration_limits()
+        if source_version < 8:
+            cfg._triple_runtime_limits(data)
         cfg._normalize_provider_model_ids()
-        cfg.config_version = 7
+        cfg.config_version = 8
         return cfg
+
+    def _triple_runtime_limits(self, source: dict):
+        """Triple persisted non-monetary ceilings once for existing projects."""
+        profile_names = (
+            "governor", "planner", "worker", "reviewer", "emergency_coder",
+        )
+        for name in profile_names:
+            profile_data = source.get(name)
+            profile = getattr(self, name)
+            if (
+                isinstance(profile_data, dict)
+                and "max_turns" in profile_data
+                and profile.max_turns > 0
+            ):
+                profile.max_turns *= 3
+        worker_data = source.get("worker")
+        if isinstance(worker_data, dict):
+            if "max_exploration_turns" in worker_data:
+                self.worker.max_exploration_turns = max(
+                    1, self.worker.max_exploration_turns * 3
+                )
+            if "patch_recovery_turns" in worker_data:
+                self.worker.patch_recovery_turns = max(
+                    0, self.worker.patch_recovery_turns * 3
+                )
+        if "complexity_turns" in source:
+            self.complexity_turns = {
+                key: max(1, int(value) * 3)
+                for key, value in self.complexity_turns.items()
+            }
+        if "complexity_exploration" in source:
+            self.complexity_exploration = {
+                key: max(1, int(value) * 3)
+                for key, value in self.complexity_exploration.items()
+            }
 
     def _normalize_provider_model_ids(self):
         """Migrate persisted display aliases to callable provider API IDs."""
@@ -457,7 +494,7 @@ class ProjectAgentConfig:
 
     def get_exploration_turns(self, complexity: str) -> int:
         return self.complexity_exploration.get(complexity,
-                                                self.worker.max_exploration_turns or 16)
+                                                self.worker.max_exploration_turns or 48)
 
     # ── Presets ──
 
@@ -468,11 +505,11 @@ class ProjectAgentConfig:
             mode="fast",
             governor=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             planner=AgentProfile(enabled=False, provider="kimi", model="kimi-k3", max_turns=0),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=10, max_exploration_turns=10, retry_count=2, emergency_after_failures=3),
-            complexity_exploration={"simple": 10, "normal": 14, "complex": 20},
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=30, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
+            complexity_exploration={"simple": 30, "normal": 42, "complex": 60},
             reviewer=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
-            complexity_turns={"simple": 8, "normal": 10, "complex": 12},
+            complexity_turns={"simple": 24, "normal": 30, "complex": 36},
             continuation_context=True,
             auto_repair=False,
         )
@@ -483,11 +520,12 @@ class ProjectAgentConfig:
         return cls(
             mode="standard",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
-            planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=8),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=32, max_exploration_turns=20, retry_count=2, emergency_after_failures=3),
+            planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=24),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=96, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
-            complexity_turns={"simple": 20, "normal": 32, "complex": 48},
+            complexity_turns={"simple": 60, "normal": 96, "complex": 144},
+            complexity_exploration={"simple": 36, "normal": 60, "complex": 96},
             continuation_context=True,
             auto_validation=True,
             auto_repair=True,
@@ -499,11 +537,12 @@ class ProjectAgentConfig:
         return cls(
             mode="strict",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
-            planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=10),
-            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=30, max_exploration_turns=20, retry_count=2, emergency_after_failures=3),
+            planner=AgentProfile(enabled=True, provider="kimi", model="kimi-k3", max_turns=30),
+            worker=WorkerProfile(enabled=True, provider="deepseek", model="deepseek-v4-flash", max_turns=90, max_exploration_turns=60, patch_recovery_turns=6, retry_count=2, emergency_after_failures=3),
             reviewer=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
             emergency_coder=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="max"),
-            complexity_turns={"simple": 20, "normal": 30, "complex": 40},
+            complexity_turns={"simple": 60, "normal": 90, "complex": 120},
+            complexity_exploration={"simple": 36, "normal": 60, "complex": 96},
             continuation_context=True,
             auto_validation=True,
             auto_repair=True,

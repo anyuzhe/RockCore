@@ -237,5 +237,5 @@ def test_read_only_report_budget_allows_paginated_cross_file_reads(tmp_path):
         task, str(tmp_path), base_turns=8, base_exploration=4, mode="fast"
     )
 
-    assert budget["max_turns"] == 12
-    assert budget["exploration_turns"] == 16
+    assert budget["max_turns"] == 36
+    assert budget["exploration_turns"] == 48
