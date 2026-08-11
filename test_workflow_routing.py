@@ -86,6 +86,82 @@ def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
     asyncio.run(scenario())
 
 
+def test_image_scope_promotes_broad_low_risk_work_to_planned_route(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id,
+            "请分析附加图片并完成图片中表达的需求。",
+            str(tmp_path),
+        )
+        repos = engine._get_repos()
+        try:
+            job = repos["job"].get_by_id(result["job_id"])
+            job.attachments = [{"name": "需求.png", "path": "managed.png"}]
+            repos["_session"].commit()
+        finally:
+            repos["_session"].close()
+
+        calls = []
+
+        async def governor(job, repos, *_args, **_kwargs):
+            calls.append("governor")
+            repos["constitution"].create(
+                job_id=job.id,
+                goal="分析项目中的所有 PDF，提炼精华并导出 PDF",
+                constraints=[],
+                acceptance_criteria=["生成最终 PDF"],
+                risk="low",
+                protected_paths=[],
+                requires_final_review=True,
+                raw_output={
+                    "image_observations": [
+                        "分析目录里的 PDF 文件并提炼精华内容",
+                        "将结果导出为 PDF",
+                    ]
+                },
+            )
+            return {
+                "risk": "low",
+                "risk_score": 20,
+                "risk_reasons": ["只读分析并生成新文档"],
+                "source": "governor",
+            }
+
+        async def planner(*_args, **_kwargs):
+            calls.append("planner")
+
+        async def execution(*_args, **_kwargs):
+            calls.append("worker")
+
+        async def skip_review(*_args, **_kwargs):
+            calls.append("skip-review")
+
+        async def simple(*_args, **_kwargs):
+            calls.append("simple")
+
+        async def finalize(*_args, **_kwargs):
+            pass
+
+        engine._run_governor = governor
+        engine._run_planner = planner
+        engine._run_execution = execution
+        engine._skip_review = skip_review
+        engine._run_simple = simple
+        engine._finalize = finalize
+
+        await engine.run_job(result["job_id"], str(tmp_path))
+
+        assert calls == ["governor", "planner", "worker", "skip-review"]
+
+    asyncio.run(scenario())
+
+
 def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

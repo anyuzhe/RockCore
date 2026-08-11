@@ -81,6 +81,46 @@ def test_job_rejects_an_unmanaged_image_path(tmp_path, monkeypatch):
         repos["_session"].close()
 
 
+def test_governor_image_understanding_reaches_direct_worker_task(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        job = repos["job"].create(
+            "JOB-IMAGE", project.id,
+            "请分析附加图片并完成图片中表达的需求。",
+            attachments=[{"name": "需求.png", "path": str(tmp_path / "需求.png")}],
+        )
+        repos["constitution"].create(
+            job_id=job.id,
+            goal="分析目录中的 PDF，提炼精华并导出 PDF",
+            constraints=[],
+            acceptance_criteria=["生成最终 PDF"],
+            risk="low",
+            protected_paths=[],
+            requires_final_review=True,
+            raw_output={
+                "image_observations": [
+                    "分析目录里面的 PDF 文件",
+                    "给出内容中的精华并导出成 PDF",
+                ]
+            },
+        )
+
+        description = engine._request_with_context(job, repos)
+        plan = engine._direct_plan_data(job, repos)
+
+        assert "GOVERNOR IMAGE UNDERSTANDING" in description
+        assert "分析目录里面的 PDF 文件" in description
+        assert plan["tasks"][0]["title"] == "分析目录中的 PDF，提炼精华并导出 PDF"
+        assert "导出成 PDF" in plan["tasks"][0]["description"]
+        assert engine._classify_request(
+            engine._governed_attachment_scope(job, repos)
+        ) == "normal"
+    finally:
+        repos["_session"].close()
+
+
 def test_composer_accepts_clipboard_image_without_text(tmp_path, monkeypatch):
     _app()
     monkeypatch.setattr(image_attachments, "app_data_dir", lambda: tmp_path / "data")

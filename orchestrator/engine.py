@@ -690,13 +690,21 @@ class Engine:
 
             governor_completed = False
             if proj_config.mode == "fast":
-                # Fast mode explicitly opts out of model governance.
-                risk_assessment = {
-                    "risk": precheck["level"],
-                    "risk_score": precheck["score"],
-                    "risk_reasons": precheck["reasons"],
-                    "source": "fast_mode_rules",
-                }
+                # Text-only fast mode opts out of governance. Image requests
+                # still need one vision-capable pass so a text Worker receives
+                # the actual requirement instead of an attachment filename.
+                if getattr(job, "attachments", None) and self.get_agent("governor"):
+                    risk_assessment = await self._run_governor(
+                        job, repos, proj_config, fallback_precheck=precheck
+                    )
+                    governor_completed = True
+                else:
+                    risk_assessment = {
+                        "risk": precheck["level"],
+                        "risk_score": precheck["score"],
+                        "risk_reasons": precheck["reasons"],
+                        "source": "fast_mode_rules",
+                    }
                 workflow_route = "low"
             else:
                 if proj_config.governor.enabled:
@@ -724,6 +732,23 @@ class Engine:
                     if proj_config.mode == "auto"
                     else "configured"
                 )
+
+            # Risk and workload size are different. A low-risk screenshot can
+            # still describe a large document task. Reclassify from Governor's
+            # visual observations before deciding to bypass the Planner.
+            if getattr(job, "attachments", None) and governor_completed:
+                governed_scope = self._governed_attachment_scope(job, repos)
+                if governed_scope:
+                    governed_complexity = self._classify_request(governed_scope)
+                    complexity_rank = {"simple": 0, "normal": 1, "complex": 2}
+                    if (
+                        complexity_rank[governed_complexity]
+                        > complexity_rank[complexity]
+                    ):
+                        complexity = governed_complexity
+                        job._rockcore_complexity = complexity
+                    if workflow_route == "low" and complexity != "simple":
+                        workflow_route = "medium"
 
             assessed_risk = self._normalized_risk_level(
                 risk_assessment.get("risk"), precheck["level"]
@@ -1157,7 +1182,7 @@ class Engine:
     def _direct_plan_data(self, job, repos, proj_config=None) -> dict:
         """Build one executable task when planning is explicitly unavailable."""
         description = self._request_with_context(job, repos, proj_config)
-        title = job.user_request[:60]
+        title = self._effective_task_title(job, repos)
         allowed_paths = ["*"]
         if getattr(job, "source_job_id", None):
             source = repos["job"].get_by_id(job.source_job_id)
@@ -4053,7 +4078,45 @@ Prefer these existing files when relevant:
         request = job.user_request + attachment_context(
             getattr(job, "attachments", None)
         )
+        governed_scope = self._governed_attachment_scope(job, repos)
+        if governed_scope:
+            request += (
+                "\n\n=== GOVERNOR IMAGE UNDERSTANDING ===\n"
+                + governed_scope
+                + "\nUse these extracted image requirements as task context."
+            )
         return request if not context else f"{request}\n{context}"
+
+    @staticmethod
+    def _governed_attachment_scope(job, repos) -> str:
+        """Return concrete image requirements extracted by the Governor."""
+        if not getattr(job, "attachments", None):
+            return ""
+        constitution = repos["constitution"].get_by_job(job.id)
+        if not constitution:
+            return ""
+        raw = dict(constitution.raw_output or {})
+        observations = [
+            str(item).strip() for item in raw.get("image_observations", [])
+            if str(item).strip()
+        ][:12]
+        if not observations:
+            return ""
+        lines = []
+        goal = str(constitution.goal or "").strip()
+        if goal:
+            lines.append(f"Goal: {goal}")
+        lines.extend(f"- {item}" for item in observations)
+        return "\n".join(lines)
+
+    def _effective_task_title(self, job, repos) -> str:
+        """Use the visually resolved goal instead of an attachment placeholder."""
+        if self._governed_attachment_scope(job, repos):
+            constitution = repos["constitution"].get_by_job(job.id)
+            goal = str(getattr(constitution, "goal", "") or "").strip()
+            if goal:
+                return goal[:60]
+        return str(job.user_request or "")[:60]
 
     async def _run_simple(self, job, repos,
                           proj_config: ProjectAgentConfig | None = None,
@@ -4077,15 +4140,10 @@ Prefer these existing files when relevant:
         if self._is_cancelled(job.job_id, job, repos):
             return
 
-        # Build continuation context (if enabled in config)
-        cont_context = self._continuation_context(job, repos, proj_config)
-        from app.image_attachments import attachment_context
-
-        description = job.user_request + attachment_context(
-            getattr(job, "attachments", None)
+        has_continuation = bool(
+            self._continuation_context(job, repos, proj_config)
         )
-        if cont_context:
-            description += "\n" + cont_context
+        description = self._request_with_context(job, repos, proj_config)
 
         normalized_risk = (
             "high" if job.risk_level == "critical" else job.risk_level
@@ -4099,7 +4157,7 @@ Prefer these existing files when relevant:
                 raw_output={"source": "fast_mode_rules"},
             )
         direct_task = {
-            "title": job.user_request[:60],
+            "title": self._effective_task_title(job, repos),
             "description": description,
             "type": "coding",
             "allowed_paths": ["*"],
@@ -4112,11 +4170,11 @@ Prefer these existing files when relevant:
         direct_task["skills"] = selected_skills
         repos["plan"].create(
             job_id=job.id,
-            summary=job.user_request,
-            raw_output={"summary": job.user_request, "tasks": [direct_task]},
+            summary=direct_task["title"],
+            raw_output={"summary": direct_task["title"], "tasks": [direct_task]},
         )
         repos["task"].create(
-            task_id="T001", job_id=job.id, title=job.user_request[:60],
+            task_id="T001", job_id=job.id, title=direct_task["title"],
             task_type="coding", description=description, allowed_paths=["*"],
             dependencies=[], acceptance_command="", order=0,
             skills=selected_skills,
@@ -4129,7 +4187,7 @@ Prefer these existing files when relevant:
 
         # Use config turn limit, with extra for continuation
         cfg = proj_config or ProjectAgentConfig()
-        if cont_context:
+        if has_continuation:
             worker.max_turns = cfg.get_worker_turns("simple") + cfg.worker.patch_recovery_turns
         else:
             worker.max_turns = cfg.get_worker_turns("simple")

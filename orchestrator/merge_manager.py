@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -268,6 +269,16 @@ class MergeManager:
             branch = base_branch + suffix
             path_name = task_id if run_number == 1 else f"{task_id}{suffix}"
             wt_path = str(self.worktrees_base / path_name)
+            if self._worktree_slot_conflicts(branch, wt_path):
+                last_result = {
+                    "status": "failed",
+                    "error": f"Branch or worktree slot already exists: {branch}",
+                }
+                logger.warning(
+                    "Worktree slot already occupied for %s; trying run suffix %s",
+                    task_id, run_number + 1,
+                )
+                continue
             try:
                 result = await self.git_tools.create_worktree(
                     branch, wt_path, start_point=start_point
@@ -303,7 +314,10 @@ class MergeManager:
                 logger.info("Worktree created: %s at %s", branch, wt_path)
                 return result
             error = str(result.get("error") or "")
-            if not self._is_worktree_collision(error):
+            if not (
+                self._worktree_slot_conflicts(branch, wt_path)
+                or self._is_worktree_collision(error)
+            ):
                 result.setdefault("phase", "worktree_create")
                 logger.error("Worktree creation failed for %s: %s", task_id, error)
                 return result
@@ -321,6 +335,45 @@ class MergeManager:
             ),
         }
 
+    def _worktree_slot_conflicts(self, branch: str, worktree_path: str) -> bool:
+        """Detect occupied branches/paths without depending on localized errors."""
+        branch_ref = f"refs/heads/{branch}"
+        try:
+            branch_result = run_process(
+                ["git", "show-ref", "--verify", "--quiet", branch_ref],
+                capture_output=True, cwd=self.project_root,
+            )
+            if branch_result.returncode == 0:
+                return True
+        except OSError:
+            pass
+        if os.path.lexists(worktree_path):
+            return True
+
+        try:
+            listed = run_process(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True, cwd=self.project_root,
+            )
+        except OSError:
+            return False
+        if listed.returncode != 0:
+            return False
+        expected_path = os.path.normcase(os.path.normpath(str(
+            Path(worktree_path).expanduser().resolve()
+        )))
+        for line in listed.stdout.splitlines():
+            if line == f"branch {branch_ref}":
+                return True
+            if not line.startswith("worktree "):
+                continue
+            registered = os.path.normcase(os.path.normpath(str(
+                Path(line[9:].strip()).expanduser().resolve()
+            )))
+            if registered == expected_path:
+                return True
+        return False
+
     @staticmethod
     def _is_worktree_collision(error: str) -> bool:
         normalized = str(error or "").lower()
@@ -330,6 +383,9 @@ class MergeManager:
             "already registered worktree",
             "is a missing but already registered worktree",
             "path already exists",
+            "已经存在",
+            "已存在",
+            "已被检出",
         ))
 
     def preserve_worktree(self, task_id: str) -> dict:

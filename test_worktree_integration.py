@@ -86,6 +86,44 @@ def test_stale_task_branch_gets_a_unique_worktree_run_suffix(tmp_path):
     asyncio.run(scenario())
 
 
+def test_localized_branch_collision_is_rechecked_without_parsing_error(
+    tmp_path, monkeypatch,
+):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+    real_create = manager.git_tools.create_worktree
+    calls = []
+
+    async def localized_collision(branch, path, start_point="HEAD"):
+        calls.append(branch)
+        if len(calls) == 1:
+            assert _git(project, "branch", branch).returncode == 0
+            return {
+                "status": "failed",
+                "error": f"致命错误：一个名为 '{branch}' 的分支已经存在",
+            }
+        return await real_create(branch, path, start_point=start_point)
+
+    monkeypatch.setattr(
+        manager.git_tools, "create_worktree", localized_collision
+    )
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-LOCALIZED")
+        assert created["status"] == "created"
+        assert created["branch"] == "ai/job-localized/t001-run2"
+        assert created["collision_recovered"] is True
+        await manager.abort_worktree("T001")
+
+    asyncio.run(scenario())
+    assert calls == [
+        "ai/job-localized/t001",
+        "ai/job-localized/t001-run2",
+    ]
+
+
 def test_preserved_continuation_releases_active_slot_without_deleting_files(
     tmp_path,
 ):
