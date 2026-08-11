@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 from app.ui import main_window as main_window_module
 from app.ui.main_window import MainWindow
 from app.ui.project_config_dialog import ProjectConfigDialog
-from app.ui.project_panel import ProjectPanel
+from app.ui.project_panel import ProjectDialog, ProjectPanel
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.task_panel import TaskPanel
 from app.ui.time_utils import (
@@ -403,6 +403,28 @@ def test_sidebar_primary_action_creates_a_project():
     assert not hasattr(panel, "new_request_btn")
     assert not hasattr(panel, "add_project_btn")
     panel.close()
+
+
+def test_project_folder_selection_fills_empty_name_without_overwriting(
+    monkeypatch, tmp_path,
+):
+    _app()
+    selected = tmp_path / "天气工具"
+    selected.mkdir()
+    monkeypatch.setattr(
+        "app.ui.project_panel.QFileDialog.getExistingDirectory",
+        lambda *_args, **_kwargs: str(selected),
+    )
+    dialog = ProjectDialog()
+
+    dialog._browse()
+    assert dialog.path_input.text() == str(selected)
+    assert dialog.name_input.text() == "天气工具"
+
+    dialog.name_input.setText("我的自定义名称")
+    dialog._browse()
+    assert dialog.name_input.text() == "我的自定义名称"
+    dialog.close()
 
 
 def test_api_key_fields_have_reveal_buttons():

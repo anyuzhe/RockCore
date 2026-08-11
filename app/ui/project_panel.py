@@ -87,6 +87,10 @@ class ProjectDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "选择项目目录")
         if path:
             self.path_input.setText(path)
+            if not self.name_input.text().strip():
+                folder_name = Path(path).name
+                if folder_name:
+                    self.name_input.setText(folder_name)
 
     def get_data(self) -> dict:
         return {
