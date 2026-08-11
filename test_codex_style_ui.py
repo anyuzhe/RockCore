@@ -67,8 +67,12 @@ def test_running_request_can_queue_a_followup():
 
 
 def test_running_other_project_does_not_block_new_project(monkeypatch, tmp_path):
+    class EngineStub:
+        async def stop(self):
+            pass
+
     _app()
-    window = MainWindow(object())
+    window = MainWindow(EngineStub())
     first = {"name": "First", "root_path": str(tmp_path / "first")}
     second = {"name": "Second", "root_path": str(tmp_path / "second")}
     first_key = window._project_key(first)

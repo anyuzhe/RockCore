@@ -35,7 +35,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: '1'
           PYTHONIOENCODING: utf-8
-        run: python -m pytest -q
+          PYTHONFAULTHANDLER: '1'
+        run: python -m pytest -vv --tb=long
 
       - name: Install Inno Setup
         shell: pwsh
