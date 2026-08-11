@@ -151,13 +151,19 @@ class ToolBroker:
                     "name": "write_file",
                     "description": (
                         "Write content to a file (creates dirs if needed). "
-                        "Existing files keep their detected encoding by default."
+                        "Existing files keep their detected encoding by default. "
+                        "Keep content under 12000 characters; for larger files "
+                        "write a valid skeleton and add sections with insert tools."
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "File path relative to project root"},
-                            "content": {"type": "string", "description": "File content"},
+                            "content": {
+                                "type": "string",
+                                "maxLength": 12000,
+                                "description": "Complete file content, at most 12000 characters",
+                            },
                             "encoding": {
                                 "type": "string",
                                 "enum": ["preserve", "utf-8", "utf-8-sig", "utf-16", "gb18030", "gbk", "cp936", "cp1252"],
@@ -175,13 +181,16 @@ class ToolBroker:
                 "type": "function",
                 "function": {
                     "name": "insert_before",
-                    "description": "Insert text before a unique anchor text. Safer than apply_patch for adding new sections.",
+                    "description": "Insert up to 12000 characters before a unique anchor text. Safer than apply_patch for adding new sections.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "File path"},
                             "anchor": {"type": "string", "description": "Text to insert before (must be unique). Use search_in_file first."},
-                            "content": {"type": "string", "description": "Text to insert before the anchor"},
+                            "content": {
+                                "type": "string", "maxLength": 12000,
+                                "description": "Text to insert before the anchor",
+                            },
                         },
                         "required": ["path", "anchor", "content"],
                     },
@@ -191,13 +200,16 @@ class ToolBroker:
                 "type": "function",
                 "function": {
                     "name": "insert_after",
-                    "description": "Insert text after a unique anchor text. Ideal for appending new entries.",
+                    "description": "Insert up to 12000 characters after a unique anchor text. Ideal for appending new entries.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "File path"},
                             "anchor": {"type": "string", "description": "Text to insert after (must be unique)"},
-                            "content": {"type": "string", "description": "Text to insert after the anchor"},
+                            "content": {
+                                "type": "string", "maxLength": 12000,
+                                "description": "Text to insert after the anchor",
+                            },
                         },
                         "required": ["path", "anchor", "content"],
                     },
@@ -213,7 +225,10 @@ class ToolBroker:
                         "properties": {
                             "path": {"type": "string", "description": "File path"},
                             "search": {"type": "string", "description": "Text to find"},
-                            "replace": {"type": "string", "description": "Replacement text"},
+                            "replace": {
+                                "type": "string", "maxLength": 12000,
+                                "description": "Replacement text, at most 12000 characters",
+                            },
                         },
                         "required": ["path", "search", "replace"],
                     },

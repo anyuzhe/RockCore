@@ -14,6 +14,7 @@ class DeepSeekProvider(BaseProvider):
 
     DEFAULT_MODEL = "deepseek-v4-flash"
     BASE_URL = "https://api.deepseek.com/v1"
+    MAX_OUTPUT_TOKENS = 16_384
 
     def __init__(self, config: dict | None = None):
         super().__init__(config)

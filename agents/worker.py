@@ -34,7 +34,11 @@ EXPLORATION_TOOLS = {
     "list_files", "read_file", "read_pdf", "read_docx", "read_pptx",
     "search_in_file", "search_code", "git_status", "git_diff", "read_log",
 }
-MAX_CONVERSATION_CHARS = 14_000
+MAX_CONVERSATION_CHARS = 24_000
+MAX_TOOL_CONTENT_CHARS = 12_000
+CODING_OUTPUT_TOKENS = 12_288
+FOLLOWUP_OUTPUT_TOKENS = 8_192
+REPORT_OUTPUT_TOKENS = 6_144
 
 WORKER_SYSTEM_PROMPT = """You are a code executor, not an investigator.
 
@@ -62,6 +66,13 @@ CRITICAL RULES:
     incrementally and write/update the requested artifact as you go.
 13. When the requested final artifact is a PDF, create it with write_pdf. Never
     implement a custom PDF/font/TTC parser or generator in project source files.
+14. Keep every write_file/insert/apply_patch content payload below 12000
+    characters. For a larger file, write a complete small skeleton first, then
+    add self-contained sections with multiple focused insert/patch calls. Never
+    put an entire large file into one tool call.
+15. If a tool payload is reported as truncated, do not resend the same full
+    payload. Immediately switch to smaller complete chunks and keep the file
+    syntactically valid after each chunk.
 
 Available tools:
 - list_files: List files in the project directory
@@ -220,6 +231,8 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         verified_existing_state = False
         pending_document_pages: dict[str, int] = {}
         repeated_errors: dict[str, int] = {}
+        truncated_tool_failures = 0
+        exploration_warning_sent = False
         no_progress_turns = 0
         stall_warning_sent = False
         allow_no_change = self._allows_no_change(task)
@@ -254,25 +267,25 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 )
                 token_ratio = effective_input / task_limit
                 if token_ratio >= 0.92 and not token_finalization_sent:
-                    budget_finalization_mode = True
-                    task._rockcore_finalization_mode = True
                     messages.append({
                         "role": "user",
                         "content": (
-                            "Token usage reached 92% of the current task soft "
-                            "allocation. Enter finalization now: do not read or "
-                            "search again, preserve existing work, run at most one "
-                            "focused verification, and return the result."
+                            "Token usage reached 92% of the current soft task "
+                            "allocation. The router may expand this soft limit. "
+                            "Keep work focused and preserve progress, but continue "
+                            "the necessary reads, edits, and verification needed to "
+                            "finish correctly."
                         ),
                     })
                     token_finalization_sent = True
                     if self.model_router.event_bus:
                         await self.model_router.event_bus.publish(
-                            "task_budget_finalizing",
+                            "task_budget_pressure",
                             job_id=job_id,
                             task_id=task.task_id,
                             used_tokens=effective_input,
                             task_input_budget=task_limit,
+                            hard_blocked=False,
                         )
                 elif token_ratio >= 0.85 and not token_checkpoint_sent:
                     messages.append({
@@ -338,16 +351,24 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     progress_warning_sent = True
 
                 compact_limit = (
-                    6_000 if token_ratio >= 0.92
-                    else 9_000 if token_ratio >= 0.85
-                    else 14_000 if token_ratio >= 0.70
-                    else 26_000 if is_document_task
+                    12_000 if token_ratio >= 0.92
+                    else 16_000 if token_ratio >= 0.85
+                    else 20_000 if token_ratio >= 0.70
+                    else 32_000 if is_document_task
                     else MAX_CONVERSATION_CHARS
                 )
                 messages = self._compact_messages(messages, max_chars=compact_limit)
                 model_kwargs = (
                     {"model": model_override} if model_override else {}
                 )
+                if task.task_type in {"coding", "action", "testing"}:
+                    max_output_tokens = (
+                        CODING_OUTPUT_TOKENS
+                        if not (has_written or external_action_completed)
+                        else FOLLOWUP_OUTPUT_TOKENS
+                    )
+                else:
+                    max_output_tokens = REPORT_OUTPUT_TOKENS
                 response = await self.model_router.chat_with_tools(
                     self.agent_type,
                     system_prompt,
@@ -359,7 +380,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         getattr(getattr(task, "job", None), "attachments", None)
                         or []
                     ),
-                    max_tokens=4096,
+                    max_tokens=max_output_tokens,
                     tool_choice=(
                         "required"
                         if (
@@ -396,6 +417,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     raw_tool_calls = [raw_tool_calls]
                 tool_calls = []
                 malformed_calls = []
+                finish_reason = str(response.get("finish_reason") or "").lower()
                 for index, raw_call in enumerate(raw_tool_calls):
                     call = raw_call if isinstance(raw_call, dict) else {}
                     function = call.get("function") or {}
@@ -405,12 +427,40 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     arguments = function.get("arguments", "{}")
                     if not isinstance(arguments, str):
                         arguments = json.dumps(arguments, ensure_ascii=False, default=str)
+                    argument_error = None
+                    parsed_arguments = {}
+                    try:
+                        parsed_arguments = json.loads(arguments)
+                        if not isinstance(parsed_arguments, dict):
+                            argument_error = "Tool arguments must be a JSON object"
+                            parsed_arguments = {}
+                    except (TypeError, json.JSONDecodeError) as error:
+                        argument_error = f"Invalid tool arguments: {error}"
+                    arguments_truncated = self._arguments_were_truncated(
+                        str(function["name"]), arguments, argument_error,
+                        finish_reason,
+                    )
+                    history_arguments = arguments
+                    if argument_error:
+                        # Keep provider history protocol-valid and compact. Feeding
+                        # a giant, malformed JSON fragment back to the next turn
+                        # encourages the model to repeat the same broken payload.
+                        history_arguments = json.dumps({
+                            "_rockcore_recovery": (
+                                "tool payload was truncated"
+                                if arguments_truncated
+                                else "tool arguments were invalid"
+                            )
+                        })
                     tool_calls.append({
                         "id": str(call.get("id") or f"worker-{turn}-{index}"),
                         "function": {
                             "name": str(function["name"]),
-                            "arguments": arguments,
+                            "arguments": history_arguments,
                         },
+                        "parsed_arguments": parsed_arguments,
+                        "argument_error": argument_error,
+                        "arguments_truncated": arguments_truncated,
                     })
 
                 if malformed_calls:
@@ -568,15 +618,8 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 meaningful_progress = False
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
-                    argument_error = None
-                    try:
-                        args = json.loads(tc["function"]["arguments"])
-                        if not isinstance(args, dict):
-                            argument_error = "Tool arguments must be a JSON object"
-                            args = {}
-                    except (TypeError, json.JSONDecodeError) as error:
-                        argument_error = f"Invalid tool arguments: {error}"
-                        args = {}
+                    argument_error = tc.get("argument_error")
+                    args = dict(tc.get("parsed_arguments") or {})
                     missing = sorted(
                         name for name in required_arguments.get(func_name, set())
                         if name not in args or args.get(name) is None
@@ -673,25 +716,6 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         }
                         exploration_blocked = True
                     elif (
-                        task.task_type in {"coding", "analysis", "review", "action"}
-                        and is_exploration
-                        and exploration_calls >= (
-                            self.max_exploration_turns + (2 if has_written else 0)
-                        )
-                    ):
-                        result = {
-                            "status": "rejected",
-                            "error": (
-                            "Exploration budget exhausted. Stop reading and return "
-                            "the concrete report now."
-                            if task.task_type in {"analysis", "review"}
-                            else
-                            "Exploration budget exhausted. Use write_file, "
-                            "apply_patch, insert_before, or insert_after now."
-                            ),
-                        }
-                        exploration_blocked = True
-                    elif (
                         is_mutating_mcp
                         and external_signature in external_action_signatures
                     ):
@@ -703,7 +727,15 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             ),
                         }
                     elif argument_error:
-                        result = {"status": "error", "error": argument_error}
+                        result = {
+                            "status": "error",
+                            "error": argument_error,
+                            "error_code": (
+                                "tool_arguments_truncated"
+                                if tc.get("arguments_truncated")
+                                else "invalid_tool_arguments"
+                            ),
+                        }
                     else:
                         try:
                             result = await self.tool_broker.execute(task, func_name, args)
@@ -782,6 +814,21 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
                             meaningful_progress = True
+                            if (
+                                exploration_calls >= self.max_exploration_turns
+                                and not exploration_warning_sent
+                            ):
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "The suggested exploration allowance has "
+                                        "been reached. It is a soft threshold, not "
+                                        "a ban: continue any new, necessary read, "
+                                        "but avoid repeating searches and move to "
+                                        "the concrete edit or report promptly."
+                                    ),
+                                })
+                                exploration_warning_sent = True
                         if (
                             is_mutating_mcp
                             and result.get("status") not in {"error", "rejected"}
@@ -824,7 +871,27 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
 
                     logger.info(f"Worker: {func_name} -> {result.get('status', 'ok')}")
 
-                    if result.get("status") in {"error", "rejected"} or result.get("error"):
+                    if result.get("error_code") == "tool_arguments_truncated":
+                        truncated_tool_failures += 1
+                        force_tool_call = True
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "The previous write-tool JSON was cut off before it "
+                                "could run. Do not resend the whole file. Send a "
+                                "complete payload under 12000 characters now: write "
+                                "a small valid skeleton first, then use separate "
+                                "insert_before/insert_after/apply_patch calls for "
+                                "the remaining sections."
+                            ),
+                        })
+                        if truncated_tool_failures >= 3:
+                            return self._failure(
+                                "TOOL_PAYLOAD_TRUNCATED: the provider repeatedly "
+                                "returned an oversized incomplete write payload",
+                                tool_calls_made, total_input, total_output,
+                            )
+                    elif result.get("status") in {"error", "rejected"} or result.get("error"):
                         signature = re.sub(
                             r"\d+", "#", str(result.get("error") or result.get("status"))
                         ).lower()[:300]
@@ -893,7 +960,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         for path, page in sorted(pending_document_pages.items())
                     )
                 return {
-                    "status": "failed",
+                    "status": "needs_continuation",
                     "error": (
                         f"Max turns ({self.max_turns}) reached{unread_detail}"
                     ),
@@ -1033,6 +1100,30 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             # Small test doubles and older third-party brokers may expose the
             # original zero-argument method.
             return self.tool_broker.get_tool_definitions()
+
+    @staticmethod
+    def _arguments_were_truncated(
+        function_name: str,
+        arguments: str,
+        argument_error: str | None,
+        finish_reason: str,
+    ) -> bool:
+        """Distinguish an output-limit cut-off from ordinary bad arguments."""
+        if function_name not in WRITE_TOOLS or not argument_error:
+            return False
+        if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+            return True
+        normalized = argument_error.lower()
+        truncation_markers = (
+            "unterminated string",
+            "expecting ',' delimiter",
+            "expecting property name enclosed in double quotes",
+            "expecting value",
+        )
+        return (
+            len(arguments) >= MAX_TOOL_CONTENT_CHARS // 2
+            and any(marker in normalized for marker in truncation_markers)
+        )
 
     @staticmethod
     def _failure(error: str, tool_calls: list[dict], input_tokens: int,

@@ -413,11 +413,13 @@ def test_engine_reports_git_stage_and_does_not_delete_failed_worktree(tmp_path):
             )
 
             repos["_session"].refresh(task)
-            failure = engine.event_bus.get_history("task_failed")[-1]["data"]
-            assert task.status == "failed"
-            assert failure["failure_stage"] == "git_integration"
-            assert "during commit" in failure["error"]
-            assert "worktree preserved" in failure["error"]
+            continuation = engine.event_bus.get_history(
+                "task_needs_continuation"
+            )[-1]["data"]
+            assert task.status == "interrupted"
+            assert continuation["failure_stage"] == "git_integration"
+            assert "during commit" in continuation["reason"]
+            assert "worktree preserved" in continuation["reason"]
             assert integration.abort_calls == 0
             assert (project / "result.txt").read_text(encoding="utf-8") == "valuable\n"
         finally:

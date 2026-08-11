@@ -197,12 +197,17 @@ def test_execution_summary_does_not_count_blocked_tasks_as_done(tmp_path):
 
             for task in (first, second, third):
                 repos["_session"].refresh(task)
-            assert first.status == "failed"
+            assert first.status == "interrupted"
             assert second.status == "blocked"
             assert third.status == "blocked"
 
             summary = engine.event_bus.get_history("phase_summary")[-1]["data"]
-            assert summary["details"] == {"done": 0, "failed": 1, "blocked": 2}
+            assert summary["details"] == {
+                "done": 0,
+                "failed": 1,
+                "blocked": 2,
+                "needs_continuation": ["T001"],
+            }
         finally:
             repos["_session"].close()
 

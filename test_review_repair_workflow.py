@@ -203,16 +203,18 @@ def test_planner_explains_when_rejected_review_cannot_be_repaired(tmp_path):
             )
 
             repos["_session"].refresh(job)
-            assert job.status == "failed"
-            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
+            assert job.status == "needs_attention"
+            assert engine.state_machine.get_state(job.job_id) == JobState.WAITING_USER
             assert reviewer.calls == 1
             assert planner.calls == 1
             assert repos["task"].list_by_job(job.id) == []
             repair_round = repos["plan"].get_by_job(job.id).raw_output["repair_rounds"][0]
             assert repair_round["status"] == "unrepairable"
             assert "生产签名密钥" in repair_round["reason"]
-            failure = engine.event_bus.get_history("job_failed")[-1]["data"]
-            assert "生产签名密钥" in failure["error"]
+            attention = engine.event_bus.get_history(
+                "job_needs_attention"
+            )[-1]["data"]
+            assert "生产签名密钥" in attention["reason"]
         finally:
             repos["_session"].close()
 
@@ -283,7 +285,7 @@ def test_two_repair_rounds_are_recorded_then_stop_with_clear_reason(tmp_path):
 
             repos["_session"].refresh(job)
             assert job.status == "needs_attention"
-            assert engine.state_machine.get_state(job.job_id) == JobState.FAILED
+            assert engine.state_machine.get_state(job.job_id) == JobState.WAITING_USER
             assert reviewer.calls == 3
             assert planner.calls == 2
             assert execution_calls == [{"R01T001"}, {"R02T001"}]

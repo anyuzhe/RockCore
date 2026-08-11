@@ -395,6 +395,54 @@ def test_missing_planner_creates_an_executable_fallback_plan(tmp_path):
     asyncio.run(scenario())
 
 
+def test_structurally_invalid_plan_falls_back_to_direct_execution(tmp_path):
+    class InvalidPlanner:
+        async def run(self, *_args, **_kwargs):
+            return {
+                "summary": "invalid dangling dependency",
+                "tasks": [{
+                    "id": "T002",
+                    "title": "Implement page",
+                    "type": "coding",
+                    "description": "依据 T001 报告完成页面",
+                    "dependencies": ["T001"],
+                    "allowed_paths": ["index.html"],
+                    "acceptance_command": "",
+                }],
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+            created = await engine.create_job(
+                project.id, "创建一个页面", str(tmp_path)
+            )
+            job = repos["job"].get_by_id(created["job_id"])
+            repos["constitution"].create(
+                job_id=job.id, goal=job.user_request,
+                constraints=[], acceptance_criteria=[],
+                protected_paths=[],
+            )
+            engine.register_agent("planner", InvalidPlanner())
+            engine.state_machine.transition(job.job_id, JobState.GOVERNING)
+            engine.state_machine.transition(job.job_id, JobState.GOVERNED)
+
+            await engine._run_planner(job, repos)
+
+            tasks = repos["task"].list_by_job(job.id)
+            assert len(tasks) == 1
+            assert tasks[0].task_id == "T001"
+            assert tasks[0].dependencies == []
+            assert engine.event_bus.get_history("plan_recovered")
+            assert not engine.event_bus.get_history("plan_rejected")
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_named_modes_cannot_persist_contradictory_phase_flags(tmp_path):
     standard = ProjectAgentConfig.standard_preset()
     standard.governor.enabled = False
@@ -478,7 +526,7 @@ def test_unavailable_reviewer_cannot_auto_pass_a_job(tmp_path):
             await engine._run_reviewer(job, repos)
 
             repos["_session"].refresh(job)
-            assert job.status == "failed"
+            assert job.status == "needs_attention"
             review = repos["review"].list_by_job(job.id)[0]
             assert review.result == "error"
             assert "credentials unavailable" in review.summary

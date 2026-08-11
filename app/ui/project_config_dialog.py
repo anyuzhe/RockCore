@@ -165,8 +165,8 @@ class ProjectConfigDialog(QDialog):
         form.addRow("推理强度：", self.worker_reasoning)
 
         self.worker_max_turns = QSpinBox()
-        self.worker_max_turns.setRange(4, 50)
-        self.worker_max_turns.setValue(24)
+        self.worker_max_turns.setRange(4, 100)
+        self.worker_max_turns.setValue(32)
         form.addRow("最大轮次：", self.worker_max_turns)
 
         self.worker_exploration = QSpinBox()
@@ -447,7 +447,7 @@ class ProjectConfigDialog(QDialog):
         ridx = self.worker_reasoning.findData(cfg.worker.reasoning_effort)
         if ridx >= 0:
             self.worker_reasoning.setCurrentIndex(ridx)
-        self.worker_max_turns.setValue(cfg.worker.max_turns or 24)
+        self.worker_max_turns.setValue(cfg.worker.max_turns or 32)
         self.worker_exploration.setValue(cfg.worker.max_exploration_turns or 4)
         self.worker_retry.setValue(cfg.worker.retry_count or 2)
         self.worker_emergency_after.setValue(

@@ -390,6 +390,84 @@ def test_worker_returns_tool_argument_errors_to_the_model():
     asyncio.run(scenario())
 
 
+def test_worker_recovers_from_truncated_large_write_with_smaller_payload():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+            self.max_tokens = []
+            self.second_messages = []
+
+        async def chat_with_tools(self, *_args, **kwargs):
+            self.calls += 1
+            self.max_tokens.append(kwargs.get("max_tokens"))
+            if self.calls == 1:
+                return {
+                    "content": "Writing the complete game implementation.",
+                    "tool_calls": [{
+                        "id": "oversized-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": (
+                                '{"path":"game.js","content":"'
+                                + ("x" * 20_000)
+                            ),
+                        },
+                    }],
+                    "finish_reason": "length",
+                    "usage": {"output_tokens": 4_096},
+                }
+            if self.calls == 2:
+                self.second_messages = list(_args[2])
+                return {
+                    "content": "Switching to a small complete skeleton.",
+                    "tool_calls": [{
+                        "id": "small-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": "game.js",
+                                "content": "(() => { 'use strict'; })();\n",
+                            }),
+                        },
+                    }],
+                    "finish_reason": "tool_calls",
+                    "usage": {},
+                }
+            return {
+                "content": "The implementation is complete.",
+                "tool_calls": [],
+                "finish_reason": "stop",
+                "usage": {},
+            }
+
+    async def scenario():
+        router = Router()
+        broker = _RecordingBroker()
+        result = await WorkerAgent(
+            router, broker, max_turns=5
+        ).run(_task(), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["write_file"]
+        assert router.max_tokens[0] == 12_288
+        assert any(
+            "under 12000 characters" in str(message.get("content", ""))
+            for message in router.second_messages
+        )
+        malformed_history = next(
+            message for message in router.second_messages
+            if message.get("tool_calls")
+        )
+        recorded_arguments = malformed_history["tool_calls"][0]["function"][
+            "arguments"
+        ]
+        assert json.loads(recorded_arguments)["_rockcore_recovery"] == (
+            "tool payload was truncated"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_pdf_worker_rejects_custom_generator_and_stops_repeated_strategy():
     class Router:
         calls = 0
@@ -470,7 +548,7 @@ def test_worker_surfaces_allowed_path_rejection_without_spending_all_turns():
     asyncio.run(scenario())
 
 
-def test_worker_enforces_edit_after_exploration_budget():
+def test_worker_treats_exploration_budget_as_a_soft_threshold():
     async def scenario():
         router = _ToolSequenceRouter()
         broker = _RecordingBroker()
@@ -481,7 +559,7 @@ def test_worker_enforces_edit_after_exploration_budget():
         result = await worker.run(_task(), project_root=".")
 
         assert result["status"] == "completed"
-        assert broker.executed.count("read_file") == 4
+        assert broker.executed.count("read_file") == 5
         assert broker.executed.count("apply_patch") == 1
         assert result["content"] == "Task fully implemented."
 
@@ -782,11 +860,11 @@ def test_default_worker_budgets_use_reliable_soft_limits():
     config = ProjectAgentConfig()
 
     assert config.complexity_turns == {
-        "simple": 16,
-        "normal": 24,
-        "complex": 36,
+        "simple": 20,
+        "normal": 32,
+        "complex": 48,
     }
-    assert config.complexity_exploration["simple"] == 4
+    assert config.complexity_exploration["simple"] == 6
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -810,7 +888,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 4
+    assert config.config_version == 5
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -971,7 +1049,7 @@ def test_existing_artifact_is_validated_before_provider_failure_is_terminal(
     asyncio.run(scenario())
 
 
-def test_worker_uses_real_token_ratio_to_enter_finalization():
+def test_worker_uses_real_token_ratio_as_soft_pressure_not_a_read_ban():
     class Cost:
         @staticmethod
         def get_task_usage(_job_id, _task_id):
@@ -1000,7 +1078,8 @@ def test_worker_uses_real_token_ratio_to_enter_finalization():
         result = await worker.run(task, project_root=".")
 
         assert result["status"] == "completed"
-        assert task._rockcore_finalization_mode is True
-        assert Router.event_bus.get_history("task_budget_finalizing")
+        assert not getattr(task, "_rockcore_finalization_mode", False)
+        event = Router.event_bus.get_history("task_budget_pressure")[-1]
+        assert event["data"]["hard_blocked"] is False
 
     asyncio.run(scenario())

@@ -14,6 +14,7 @@ class KimiProvider(BaseProvider):
 
     DEFAULT_MODEL = "kimi-k2.6"
     BASE_URL = "https://api.moonshot.cn/v1"
+    MAX_OUTPUT_TOKENS = 8_192
 
     # Per-model temperature constraints
     MODEL_TEMPERATURES = {
@@ -40,6 +41,11 @@ class KimiProvider(BaseProvider):
         return self.MODEL_TEMPERATURES.get(
             kwargs.get("model", self.model), 1.0
         )
+
+    def fallback_models(self, failed_model: str) -> list[str]:
+        """Return conservative same-provider alternatives for unavailable models."""
+        ordered = [self.DEFAULT_MODEL, "kimi-k2.5"]
+        return [model for model in ordered if model != failed_model]
 
     def _get_client(self):
         if self._client is None:
