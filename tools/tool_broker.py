@@ -16,6 +16,7 @@ from tools.shell_tools import ShellTools
 from tools.search_tools import SearchTools
 from tools.git_tools import GitTools
 from tools.test_tools import TestTools
+from tools.runtime_tools import TaskRuntimeTools
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class ToolBroker:
         self.search_tools = SearchTools(self.project_root)
         self.git_tools = GitTools(self.project_root)
         self.test_tools = TestTools(self.project_root)
+        self.runtime_tools: TaskRuntimeTools | None = None
 
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
@@ -170,6 +172,14 @@ class ToolBroker:
                                 "description": (
                                     "Text encoding. Use preserve (default) for existing files; "
                                     "select utf-8 only when an encoding conversion is intended."
+                                ),
+                            },
+                            "purpose": {
+                                "type": "string",
+                                "enum": ["final", "intermediate"],
+                                "description": (
+                                    "Use final only for a user-requested project artifact; "
+                                    "intermediate is redirected to the private task runtime."
                                 ),
                             },
                         },
@@ -317,6 +327,8 @@ class ToolBroker:
                 },
             },
         ]
+        if self.runtime_tools is not None:
+            definitions.extend(self._runtime_tool_definitions())
         selected_skills = set(skills or [])
         artifact_definitions = self._artifact_definitions()
         if "documents" in selected_skills:
@@ -347,6 +359,8 @@ class ToolBroker:
                 "list_files", "read_file", "read_pdf", "search_in_file", "search_code",
                 "read_docx", "read_pptx", "write_docx", "write_pptx", "write_pdf",
                 "write_file", "apply_patch", "insert_before", "insert_after",
+                "write_temp_file", "read_temp_file", "list_temp_files",
+                "promote_artifact",
                 "run_command", "run_tests", "git_status", "git_diff",
             }
         elif task_type == "action":
@@ -370,7 +384,56 @@ class ToolBroker:
         """Execute a tool call with policy enforcement."""
         start = time.time()
 
-        handler = self._tool_registry.get(tool_name)
+        requested_tool_name = tool_name
+        routed_to_runtime = False
+        explicit_final_requested = False
+        handler = None
+        if self.runtime_tools is not None:
+            path = str((args or {}).get("path") or "")
+            purpose = str((args or {}).get("purpose") or "")
+            if (
+                tool_name in {"write_file", "apply_patch", "insert_before", "insert_after"}
+                and self.runtime_tools.is_protected_input(path)
+            ):
+                return {
+                    "status": "rejected",
+                    "error": f"Refusing to modify a declared document input: {path}",
+                    "tool": tool_name,
+                    "duration_ms": int((time.time() - start) * 1000),
+                }
+            explicit_final_requested = (
+                tool_name == "write_file"
+                and purpose.strip().lower() == "final"
+            )
+            if (
+                tool_name == "write_file"
+                and self.runtime_tools.should_route_intermediate(
+                    task, path, purpose
+                )
+            ):
+                tool_name = "write_temp_file"
+                handler = self.runtime_tools.write_temp_file
+                routed_to_runtime = True
+            elif (
+                tool_name == "read_file"
+                and self.runtime_tools.has_temp_file(path)
+                and not (self.file_tools.project_root / path).is_file()
+            ):
+                tool_name = "read_temp_file"
+                handler = self.runtime_tools.read_temp_file
+                routed_to_runtime = True
+            elif (
+                tool_name in {"apply_patch", "insert_before", "insert_after"}
+                and self.runtime_tools.has_temp_file(path)
+            ):
+                handler = {
+                    "apply_patch": self.runtime_tools.apply_temp_patch,
+                    "insert_before": self.runtime_tools.insert_temp_before,
+                    "insert_after": self.runtime_tools.insert_temp_after,
+                }[tool_name]
+                tool_name = "write_temp_file"
+                routed_to_runtime = True
+        handler = handler or self._tool_registry.get(tool_name)
         is_mcp = bool(
             self.mcp_manager and self.mcp_manager.has_tool(tool_name)
         )
@@ -422,8 +485,19 @@ class ToolBroker:
             )
             duration = int((time.time() - start) * 1000)
             if isinstance(result, dict):
-                result["tool"] = tool_name
+                result["tool"] = requested_tool_name
                 result["duration_ms"] = duration
+                if routed_to_runtime:
+                    result["redirected_to_runtime"] = True
+                elif (
+                    explicit_final_requested
+                    and self.runtime_tools is not None
+                    and result.get("status") not in {"error", "rejected"}
+                    and not result.get("error")
+                ):
+                    self.runtime_tools.mark_explicit_final(
+                        str((args or {}).get("path") or "")
+                    )
                 if ignored_arguments:
                     result["ignored_arguments"] = ignored_arguments
             return result
@@ -468,6 +542,7 @@ class ToolBroker:
         self.search_tools = SearchTools(self.project_root)
         self.git_tools = GitTools(self.project_root)
         self.test_tools = TestTools(self.project_root)
+        self.runtime_tools = None
         # Rebuild registry so bound methods point to the new tool instances
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
@@ -491,6 +566,124 @@ class ToolBroker:
             "git_diff": self.git_tools.git_diff,
         }
         logger.info(f"ToolBroker project root updated: {project_root}")
+
+    def configure_task_runtime(
+        self,
+        state_root: str | os.PathLike[str],
+        job_id: str,
+        task_id: str,
+        final_outputs: list[str] | None = None,
+        input_paths: list[str] | None = None,
+        require_declared_outputs: bool = False,
+        source_job_id: str = "",
+    ) -> dict:
+        """Attach a private scratch directory to this task-scoped broker."""
+        self.runtime_tools = TaskRuntimeTools(
+            self.project_root,
+            state_root,
+            job_id,
+            task_id,
+            final_outputs=final_outputs,
+            input_paths=input_paths,
+            require_declared_outputs=require_declared_outputs,
+            source_job_id=source_job_id,
+        )
+        self._tool_registry.update({
+            "write_temp_file": self.runtime_tools.write_temp_file,
+            "read_temp_file": self.runtime_tools.read_temp_file,
+            "list_temp_files": self.runtime_tools.list_temp_files,
+            "promote_artifact": self.runtime_tools.promote_artifact,
+        })
+        self.shell_tools.set_temp_directory(self.runtime_tools.root)
+        return self.runtime_tools.checkpoint()
+
+    def relocate_task_intermediates(self, added_paths: list[str]) -> list[dict]:
+        if self.runtime_tools is None:
+            return []
+        return self.runtime_tools.relocate_project_intermediates(added_paths)
+
+    def task_runtime_checkpoint(self) -> dict:
+        return self.runtime_tools.checkpoint() if self.runtime_tools else {}
+
+    def cleanup_task_runtime(self) -> dict:
+        return (
+            self.runtime_tools.cleanup()
+            if self.runtime_tools else {"status": "not_configured"}
+        )
+
+    @staticmethod
+    def _runtime_tool_definitions() -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_temp_file",
+                    "description": (
+                        "Write an intermediate task file outside the project tree. "
+                        "Use for PDF page text, extracted chunks, OCR, notes, drafts, "
+                        "and other helper data that must not appear in Git or project root."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Task-local temporary path"},
+                            "content": {"type": "string", "maxLength": 12000},
+                            "encoding": {
+                                "type": "string",
+                                "enum": ["preserve", "utf-8", "utf-8-sig", "utf-16", "gb18030", "gbk", "cp936", "cp1252"],
+                            },
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_temp_file",
+                    "description": "Read a task-local intermediate file with line pagination.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "start": {"type": "integer"},
+                            "end": {"type": "integer"},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_temp_files",
+                    "description": "List files in this task's private intermediate workspace.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "promote_artifact",
+                    "description": (
+                        "Atomically copy a completed temporary file to a declared final "
+                        "project output path. The temporary source remains until success cleanup."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "temp_path": {"type": "string"},
+                            "target_path": {"type": "string"},
+                            "overwrite": {"type": "boolean"},
+                        },
+                        "required": ["temp_path", "target_path"],
+                    },
+                },
+            },
+        ]
 
     async def configure_mcp(self, project_root: str | os.PathLike[str],
                             config: MCPConfig | None = None,

@@ -45,6 +45,7 @@ def test_repository_bootstrap_creates_safe_initial_commit(tmp_path):
     assert "# >>> RockCore managed ignores >>>" in ignore_text
     assert "__pycache__/" in ignore_text
     assert "node_modules/" in ignore_text
+    assert ".ai/runtime/" in ignore_text
 
 
 def test_repository_bootstrap_ignores_generated_code_artifacts(tmp_path):

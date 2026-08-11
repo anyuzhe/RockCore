@@ -35,7 +35,10 @@ class TestManager:
     """Manages test execution for task acceptance criteria."""
 
     DEFAULT_TIMEOUT = 300
-    SNAPSHOT_IGNORES = {".git", ".ai/worktrees", "node_modules", ".venv", "venv", "__pycache__"}
+    SNAPSHOT_IGNORES = {
+        ".git", ".ai/worktrees", ".ai/runtime", "node_modules",
+        ".venv", "venv", "__pycache__",
+    }
 
     @staticmethod
     def is_git_repo(root: str | Path) -> bool:

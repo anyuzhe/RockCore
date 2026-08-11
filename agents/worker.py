@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 WRITE_TOOLS = {
     "write_file", "apply_patch", "insert_before", "insert_after",
-    "write_docx", "write_pptx", "write_pdf",
+    "write_docx", "write_pptx", "write_pdf", "promote_artifact",
 }
+TEMP_WRITE_TOOLS = {"write_temp_file"}
+PAYLOAD_WRITE_TOOLS = WRITE_TOOLS | TEMP_WRITE_TOOLS
 REPORT_TASK_TYPES = {"analysis", "review", "testing", "action"}
 ALREADY_SATISFIED_MARKER = "[ALREADY_SATISFIED]"
 STATE_VERIFICATION_TOOLS = {
@@ -74,6 +76,9 @@ CRITICAL RULES:
 15. If a tool payload is reported as truncated, do not resend the same full
     payload. Immediately switch to smaller complete chunks and keep the file
     syntactically valid after each chunk.
+16. Intermediate PDF page text, OCR, extracted chunks, notes, and drafts MUST use
+    write_temp_file. Only user-requested final artifacts belong in the project.
+    Use promote_artifact when a temporary file is ready to become a declared output.
 
 Available tools:
 - list_files: List files in the project directory
@@ -81,6 +86,8 @@ Available tools:
 - read_pdf: Extract PDF text with start_page/end_page pagination
 - read_docx / read_pptx: Read Word or PowerPoint content when enabled
 - write_file: Write content to a file — USE THIS, do not output code in chat
+- write_temp_file / read_temp_file: Store intermediate data outside the project
+- promote_artifact: Atomically publish a temporary file as a declared final output
 - write_docx / write_pptx / write_pdf: Create enabled binary artifacts
 - apply_patch: Search and replace text in a file
 - insert_before / insert_after: Insert text at a specific anchor point
@@ -207,6 +214,17 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "Keep existing useful changes, avoid repeating broad exploration, "
                 "and finish the task now.\nRecovery guidance:\n"
                 + recovery_context[:4000]
+            )
+        runtime_tools = getattr(self.tool_broker, "runtime_tools", None)
+        if runtime_tools is not None:
+            declared_outputs = sorted(runtime_tools.final_outputs)
+            task_context += (
+                "\nA private task runtime is available. Put every intermediate "
+                "PDF page extract, TXT chunk, OCR result, note, and draft there "
+                "with write_temp_file. Do not create helper files in the project "
+                "root. Final project outputs are: "
+                + (", ".join(declared_outputs) if declared_outputs else "those explicitly requested by this task")
+                + "."
             )
 
         messages = [{"role": "user", "content": task_context}]
@@ -857,11 +875,21 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             force_tool_call = False
                         if (
                             func_name in WRITE_TOOLS
+                            and not result.get("redirected_to_runtime")
                             and result.get("status") not in {"error", "rejected"}
                             and not result.get("error")
                         ):
                             has_written = True
                             force_tool_call = False
+                            meaningful_progress = True
+                        elif (
+                            (
+                                func_name in TEMP_WRITE_TOOLS
+                                or result.get("redirected_to_runtime")
+                            )
+                            and result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
                             meaningful_progress = True
                         if (
                             func_name in STATE_VERIFICATION_TOOLS
@@ -1235,7 +1263,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         finish_reason: str,
     ) -> bool:
         """Distinguish an output-limit cut-off from ordinary bad arguments."""
-        if function_name not in WRITE_TOOLS or not argument_error:
+        if function_name not in PAYLOAD_WRITE_TOOLS or not argument_error:
             return False
         if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
             return True

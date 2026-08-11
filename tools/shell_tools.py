@@ -28,6 +28,7 @@ class ShellTools:
             project_root = os.getcwd()
             logger.warning(f"ShellTools: empty project_root, falling back to cwd: {project_root}")
         self.project_root = project_root
+        self.temp_directory = ""
         self.allowed_commands = allowed_commands or {
             "pytest", "npm", "pnpm", "yarn", "python", "python3",
             "py",
@@ -37,6 +38,22 @@ class ShellTools:
             "node", "deno", "bun", "echo", "cat", "ls", "head", "tail",
             "ruff", "mypy", "black", "isort",
         }
+
+    def set_temp_directory(self, path: str | os.PathLike[str]) -> None:
+        """Route subprocess-managed temporary files into the task runtime."""
+        value = os.fspath(path)
+        os.makedirs(value, exist_ok=True)
+        self.temp_directory = value
+
+    def _command_environment(self) -> dict[str, str]:
+        environment = utf8_environment()
+        if self.temp_directory:
+            environment.update({
+                "TMPDIR": self.temp_directory,
+                "TEMP": self.temp_directory,
+                "TMP": self.temp_directory,
+            })
+        return environment
 
     async def run_command(self, command: str, timeout: int = 120,
                           max_output: int = 10000) -> dict:
@@ -81,7 +98,7 @@ class ShellTools:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     cwd=self.project_root,
-                    env=utf8_environment(),
+                    env=self._command_environment(),
                     creationflags=no_window_creation_flags(),
                 )
                 try:
@@ -114,7 +131,7 @@ class ShellTools:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.project_root,
-                env=utf8_environment(),
+                env=self._command_environment(),
             )
 
             try:

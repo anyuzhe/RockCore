@@ -74,6 +74,7 @@ def test_document_budget_scales_with_actual_page_count(tmp_path, monkeypatch):
     assert long["max_turns"] == 64
     assert long["api_call_budget"] == 100
     assert long["exploration_turns"] > medium["exploration_turns"]
+    assert short["final_outputs"] == ["summary.md"]
 
 
 def test_document_profile_does_not_count_existing_summary_as_source(
@@ -97,6 +98,7 @@ def test_document_profile_does_not_count_existing_summary_as_source(
     assert profile["pdf_pages"] == 151
     assert profile["source_pdfs"] == ["original-book.pdf"]
     assert profile["output_pdfs"] == ["summary.pdf"]
+    assert profile["final_outputs"] == ["summary.pdf"]
     assert profile["requires_pdf_output"] is True
 
 

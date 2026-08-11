@@ -301,8 +301,11 @@ class PolicyEngine:
         if tool_name in (
             "write_file", "apply_patch", "edit_file", "insert_before",
             "insert_after", "write_docx", "write_pptx", "write_pdf",
+            "promote_artifact",
         ):
-            path = args.get("path", args.get("file_path", ""))
+            path = args.get(
+                "target_path", args.get("path", args.get("file_path", ""))
+            )
             protected = getattr(task, "protected_paths", []) or []
             allowed = getattr(task, "allowed_paths", []) or []
             self.check_path(path, protected, allowed)

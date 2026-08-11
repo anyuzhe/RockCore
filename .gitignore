@@ -41,4 +41,5 @@ Thumbs.db
 
 # RockCore runtime isolation
 .ai/worktrees/
+.ai/runtime/
 # <<< RockCore managed ignores <<<

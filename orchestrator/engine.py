@@ -666,7 +666,7 @@ class Engine:
         api_call_budget = turns + finalization_turns + 24
         output_budget = max(200_000, estimated_pages * 1_500)
         concrete_non_pdf_outputs = [
-            str(path) for path in allowed_paths
+            str(path).replace("\\", "/").lstrip("./") for path in allowed_paths
             if path and "*" not in str(path)
             and Path(str(path)).suffix.lower() in {
                 ".md", ".txt", ".docx", ".pptx", ".html"
@@ -701,6 +701,10 @@ class Engine:
                 path.relative_to(root).as_posix()
                 for path in sorted(output_pdfs)
             ],
+            "final_outputs": sorted(set(concrete_non_pdf_outputs) | {
+                path.relative_to(root).as_posix()
+                for path in output_pdfs
+            }),
             "requires_pdf_output": requires_pdf_output,
             "estimated_pages": estimated_pages,
             "page_batches": page_batches,
@@ -2338,6 +2342,9 @@ class Engine:
                         document_profile.get("requires_pdf_output")
                     ),
                     "require_extractable_text": True,
+                    "final_outputs": list(
+                        document_profile.get("final_outputs") or []
+                    ),
                 }
                 document_job_budget = (
                     self.model_router.cost_engine.reserve_document_budget(
@@ -2366,6 +2373,30 @@ class Engine:
                 t._rockcore_document_profile = None
                 t._rockcore_artifact_manifest = None
                 t._rockcore_input_budget = int(budget["input_budget"])
+            concrete_task_outputs = [
+                str(path).replace("\\", "/").lstrip("./")
+                for path in (t.allowed_paths or [])
+                if path and "*" not in str(path)
+            ]
+            artifact_manifest = dict(
+                getattr(t, "_rockcore_artifact_manifest", None) or {}
+            )
+            final_outputs = (
+                list(artifact_manifest.get("final_outputs") or [])
+                if document_profile else concrete_task_outputs
+            )
+            runtime_broker = getattr(task_worker, "tool_broker", None)
+            if runtime_broker and hasattr(runtime_broker, "configure_task_runtime"):
+                runtime_checkpoint = runtime_broker.configure_task_runtime(
+                    job.project.root_path if job.project else task_worktree_root,
+                    job.job_id,
+                    task_id,
+                    final_outputs=final_outputs,
+                    input_paths=list(artifact_manifest.get("inputs") or []),
+                    require_declared_outputs=bool(document_profile),
+                    source_job_id=str(job.source_job_id or ""),
+                )
+                t._rockcore_runtime_checkpoint = runtime_checkpoint
             t._rockcore_max_auto_input_budget = int(
                 self.model_router.cost_engine.get_budget(
                     job.job_id
@@ -2418,6 +2449,26 @@ class Engine:
                 baseline_snapshot=task_baseline,
             )
             integration_result = None
+            runtime_relocation: list[dict] = []
+            if runtime_broker and hasattr(
+                runtime_broker, "relocate_task_intermediates"
+            ):
+                pre_relocation_changes = self.test_manager.snapshot_diff(
+                    task_worktree_root, task_baseline
+                )
+                runtime_relocation = runtime_broker.relocate_task_intermediates(
+                    pre_relocation_changes.get("added") or []
+                )
+                t._rockcore_runtime_checkpoint = (
+                    runtime_broker.task_runtime_checkpoint()
+                )
+                if runtime_relocation:
+                    await self.event_bus.publish(
+                        "task_intermediates_relocated",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        files=runtime_relocation,
+                    )
 
             if result and result.get("status") == "needs_continuation":
                 reason = str(result.get("error") or "任务已保存，等待继续")
@@ -2718,10 +2769,27 @@ class Engine:
                         # A successful read-only analysis has nothing to merge,
                         # but its temporary worktree still needs to be removed.
                         await self.merge_manager.abort_worktree(task_id)
+                    runtime_cleanup = {"status": "not_configured"}
+                    if runtime_broker and hasattr(
+                        runtime_broker, "cleanup_task_runtime"
+                    ):
+                        runtime_cleanup = runtime_broker.cleanup_task_runtime()
+                        if runtime_cleanup.get("status") not in {
+                            "cleaned", "already_clean", "not_configured",
+                        }:
+                            logger.warning(
+                                "Task %s runtime cleanup failed: %s",
+                                task_id, runtime_cleanup,
+                            )
+                    t._rockcore_runtime_checkpoint = {}
                     repos["task"].update_status_by_pk(t.id, "done")
                     result_payload = dict(result)
                     result_payload["status"] = "completed"
                     result_payload["changes"] = task_changes
+                    result_payload["runtime"] = {
+                        "cleanup": runtime_cleanup,
+                        "relocated_intermediates": runtime_relocation,
+                    }
                     if recovered_for_validation:
                         result_payload["recovered_from_budget"] = True
                         result_payload["completion_note"] = (
@@ -4397,6 +4465,18 @@ class Engine:
                 "skills": item.skills or [],
             } for item in tasks],
         })
+        runtime_checkpoint = dict(
+            getattr(task, "_rockcore_runtime_checkpoint", None) or {}
+        )
+        task_runtimes = dict(existing_checkpoint.get("task_runtimes") or {})
+        if runtime_checkpoint and status != "done":
+            task_runtimes[task.task_id] = runtime_checkpoint
+        else:
+            task_runtimes.pop(task.task_id, None)
+        if task_runtimes:
+            existing_checkpoint["task_runtimes"] = task_runtimes
+        else:
+            existing_checkpoint.pop("task_runtimes", None)
         existing_checkpoint["budget"] = (
             self.model_router.cost_engine.get_budget_snapshot(job.job_id)
         )
