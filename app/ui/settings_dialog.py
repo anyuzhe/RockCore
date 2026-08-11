@@ -70,6 +70,11 @@ def load_config() -> dict:
                 budget.setdefault("max_auto_api_calls", 5_000)
                 budget.setdefault("cached_input_weight", 0.15)
                 config["budget_policy_version"] = 2
+            if int(config.get("budget_policy_version", 0) or 0) < 3:
+                budget = config.setdefault("budget", {})
+                if float(budget.get("max_cost_cny", 3.60) or 0) == 3.60:
+                    budget["max_cost_cny"] = 10.00
+                config["budget_policy_version"] = 3
             kimi = config.setdefault("kimi", {})
             kimi["model"] = normalize_model_id(
                 "kimi", kimi.get("model", "kimi-k3")
@@ -549,7 +554,7 @@ class SettingsDialog(QDialog):
         }
         self._config["workflow_defaults_version"] = 3
         self._config["pricing_currency_version"] = 1
-        self._config["budget_policy_version"] = 2
+        self._config["budget_policy_version"] = 3
 
         try:
             save_config(self._config)

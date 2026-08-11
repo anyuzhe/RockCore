@@ -429,7 +429,7 @@ def test_review_and_repair_budget_reservations_are_idempotent():
     assert repair.max_input_tokens == 5_450_000
     assert repair.max_output_tokens == 5_150_000
     assert repair.max_api_calls == 555
-    assert repair.max_cost_cny == 3.6
+    assert repair.max_cost_cny == 10.0
 
 
 def test_cached_input_uses_weighted_soft_budget_accounting():
@@ -534,4 +534,4 @@ def test_workflow_budget_exposes_and_releases_protected_phase_capacity():
     assert reserved["protected_phase_calls"] == 80
     assert released["reserved_tokens"] == 0
     assert released["reserved_calls"] == 0
-    assert budget.max_cost_cny == 3.6
+    assert budget.max_cost_cny == 10.0

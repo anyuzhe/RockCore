@@ -298,7 +298,7 @@ def test_document_token_budget_auto_expands_before_retry(tmp_path):
         assert task._rockcore_input_budget == 1_200_000
         assert engine.model_router.cost_engine.get_budget(
             job.job_id
-        ).max_cost_cny == 3.60
+        ).max_cost_cny == 10.00
         assert engine.event_bus.get_history("document_budget_extended")
 
     asyncio.run(scenario())

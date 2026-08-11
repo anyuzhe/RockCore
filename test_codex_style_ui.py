@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 
 from app.ui import main_window as main_window_module
+from app.ui import settings_dialog as settings_dialog_module
 from app.ui.main_window import MainWindow
 from app.ui.project_config_dialog import ProjectConfigDialog
 from app.ui.project_panel import ProjectDialog, ProjectPanel
@@ -457,6 +458,29 @@ def test_settings_no_longer_exposes_model_scoring():
     assert "模型评分" not in tab_titles
     assert not hasattr(dialog, "scoring_text")
     dialog.close()
+
+
+def test_old_default_rmb_limit_migrates_to_ten_without_overwriting_custom(
+    monkeypatch, tmp_path,
+):
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr(settings_dialog_module, "CONFIG_PATH", config_file)
+    base = {
+        "workflow_defaults_version": 3,
+        "pricing_currency_version": 1,
+        "budget_policy_version": 2,
+        "budget": {"max_cost_cny": 3.60},
+    }
+    config_file.write_text(json.dumps(base), encoding="utf-8")
+
+    migrated = settings_dialog_module.load_config()
+    assert migrated["budget"]["max_cost_cny"] == 10.00
+    assert migrated["budget_policy_version"] == 3
+
+    base["budget"]["max_cost_cny"] = 8.00
+    config_file.write_text(json.dumps(base), encoding="utf-8")
+    custom = settings_dialog_module.load_config()
+    assert custom["budget"]["max_cost_cny"] == 8.00
 
 
 def test_project_settings_expose_plugins_skills_and_mcp_capability_tabs(tmp_path):

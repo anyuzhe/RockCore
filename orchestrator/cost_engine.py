@@ -23,7 +23,7 @@ class JobBudget:
     max_auto_output_tokens: int = 50_000_000
     max_auto_api_calls: int = 5_000
     cached_input_weight: float = 0.15
-    max_cost_cny: float = 3.60
+    max_cost_cny: float = 10.00
 
 
 class BudgetExceededError(RuntimeError):
@@ -62,7 +62,7 @@ class CostEngine:
 
     CURRENCY = "CNY"
     LEGACY_USD_TO_CNY = 7.20
-    DEFAULT_MAX_COST_CNY = 3.60
+    DEFAULT_MAX_COST_CNY = 10.00
     MODEL_PRICES_CNY_PER_MILLION = {
         "deepseek-v4-flash-0731": {
             "cached_input": 0.02, "input": 1.00, "output": 2.00,
