@@ -63,6 +63,139 @@ def test_image_file_is_copied_normalized_and_persisted_with_job(
         repos["_session"].close()
 
 
+def test_followup_inherits_images_and_structured_understanding_until_new_request(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(image_attachments, "app_data_dir", lambda: tmp_path / "data")
+    attachment = image_attachments.store_image_file(_png(tmp_path / "需求图.png"))
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        source = asyncio.run(engine.create_job(
+            project.id,
+            "请分析附加图片并完成图片中表达的需求。",
+            str(tmp_path),
+            attachments=[attachment],
+        ))
+        repos["constitution"].create(
+            job_id=source["pk"],
+            goal="把页面主按钮调整为橙色",
+            constraints=[],
+            acceptance_criteria=["主按钮为橙色"],
+            risk="low",
+            protected_paths=[],
+            requires_final_review=False,
+            raw_output={
+                "image_observations": [
+                    "截图中的主按钮位于页面右下角",
+                    "按钮目标颜色为橙色",
+                ]
+            },
+        )
+
+        followup = asyncio.run(engine.create_job(
+            project.id,
+            "按钮再加一点圆角",
+            str(tmp_path),
+            source_job_id=source["job_id"],
+        ))
+        followup_job = repos["job"].get_by_id(followup["job_id"])
+
+        assert len(followup_job.attachments) == 1
+        assert followup_job.attachments[0]["sha256"] == attachment["sha256"]
+        assert followup_job.attachments[0]["origin_job_id"] == source["job_id"]
+        assert followup_job.attachments[0]["inherited_from_job_id"] == source["job_id"]
+        assert os.path.isfile(followup_job.attachments[0]["path"])
+
+        context = engine._build_continuation_context(followup_job, repos)
+        assert "Inherited Image Understanding" in context
+        assert "把页面主按钮调整为橙色" in context
+        assert "截图中的主按钮位于页面右下角" in context
+
+        engine._create_precheck_constitution(followup_job, repos, "low")
+        inherited_constitution = repos["constitution"].get_by_job(followup_job.id)
+        assert inherited_constitution.raw_output["image_observations"] == [
+            "截图中的主按钮位于页面右下角",
+            "按钮目标颜色为橙色",
+        ]
+
+        independent = asyncio.run(engine.create_job(
+            project.id,
+            "这是点击新需求后提交的独立任务",
+            str(tmp_path),
+        ))
+        independent_job = repos["job"].get_by_id(independent["job_id"])
+        assert independent_job.source_job_id is None
+        assert independent_job.attachments == []
+        assert engine._build_continuation_context(independent_job, repos) == ""
+    finally:
+        repos["_session"].close()
+
+
+def test_followup_deduplicates_new_and_inherited_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(image_attachments, "app_data_dir", lambda: tmp_path / "data")
+    attachment = image_attachments.store_image_file(_png(tmp_path / "同一张图.png"))
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        source = asyncio.run(engine.create_job(
+            project.id, "带图需求", str(tmp_path), attachments=[attachment]
+        ))
+        followup = asyncio.run(engine.create_job(
+            project.id,
+            "继续修改并再次附上同一张图",
+            str(tmp_path),
+            source_job_id=source["job_id"],
+            attachments=[attachment],
+        ))
+        followup_job = repos["job"].get_by_id(followup["job_id"])
+        assert len(followup_job.attachments) == 1
+        assert followup_job.attachments[0]["sha256"] == attachment["sha256"]
+    finally:
+        repos["_session"].close()
+
+
+def test_followup_keeps_image_understanding_when_source_file_is_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(image_attachments, "app_data_dir", lambda: tmp_path / "data")
+    attachment = image_attachments.store_image_file(_png(tmp_path / "稍后丢失.png"))
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        source = asyncio.run(engine.create_job(
+            project.id, "读取图片", str(tmp_path), attachments=[attachment]
+        ))
+        repos["constitution"].create(
+            job_id=source["pk"],
+            goal="保留图片中的顶部导航",
+            constraints=[],
+            acceptance_criteria=[],
+            risk="low",
+            protected_paths=[],
+            requires_final_review=False,
+            raw_output={"image_observations": ["顶部导航包含三个入口"]},
+        )
+        os.unlink(attachment["path"])
+
+        followup = asyncio.run(engine.create_job(
+            project.id,
+            "继续调整间距",
+            str(tmp_path),
+            source_job_id=source["job_id"],
+        ))
+        followup_job = repos["job"].get_by_id(followup["job_id"])
+        assert followup_job.attachments == []
+        assert "顶部导航包含三个入口" in engine._build_continuation_context(
+            followup_job, repos
+        )
+    finally:
+        repos["_session"].close()
+
+
 def test_job_rejects_an_unmanaged_image_path(tmp_path, monkeypatch):
     monkeypatch.setattr(image_attachments, "app_data_dir", lambda: tmp_path / "data")
     outside = _png(tmp_path / "outside.png")

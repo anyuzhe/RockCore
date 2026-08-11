@@ -527,6 +527,7 @@ class Engine:
 
         repos = self._get_repos()
         try:
+            source_job = None
             if source_job_id:
                 source_job = repos["job"].get_by_id(source_job_id)
                 if not source_job or source_job.project_id != project_id:
@@ -542,6 +543,15 @@ class Engine:
                 job_id_str = f"JOB-{today}-{count:03d}"
 
             safe_attachments = normalize_attachments(attachments)
+            for attachment in safe_attachments:
+                attachment["origin_job_id"] = job_id_str
+            if source_job:
+                safe_attachments = self._inherit_continuation_attachments(
+                    safe_attachments,
+                    source_job.job_id,
+                    project_id,
+                    repos,
+                )
             job = repos["job"].create(
                 job_id_str, project_id, user_request, risk_level, source_job_id,
                 safe_attachments,
@@ -557,6 +567,66 @@ class Engine:
             return {"job_id": job_id_str, "branch": branch, "pk": job.id}
         finally:
             self._close_repos(repos)
+
+    @staticmethod
+    def _continuation_ancestors(source_job_id: str | None, project_id: int,
+                                repos, limit: int = 32) -> list:
+        """Return the explicit continuation chain, nearest source first."""
+        ancestors = []
+        seen = set()
+        current_id = str(source_job_id or "").strip()
+        while current_id and current_id not in seen and len(ancestors) < limit:
+            seen.add(current_id)
+            current = repos["job"].get_by_id(current_id)
+            if not current or current.project_id != project_id:
+                break
+            ancestors.append(current)
+            current_id = str(current.source_job_id or "").strip()
+        return ancestors
+
+    def _inherit_continuation_attachments(self, current: list[dict],
+                                          source_job_id: str, project_id: int,
+                                          repos) -> list[dict]:
+        """Merge valid source images into a follow-up without duplicating them."""
+        from app.image_attachments import (
+            MAX_IMAGE_ATTACHMENTS,
+            normalize_attachments,
+        )
+
+        merged = [dict(item) for item in current[:MAX_IMAGE_ATTACHMENTS]]
+        seen = {
+            str(item.get("sha256") or item.get("path") or item.get("id"))
+            for item in merged
+        }
+        for ancestor in self._continuation_ancestors(
+            source_job_id, project_id, repos
+        ):
+            for raw in list(ancestor.attachments or []):
+                if len(merged) >= MAX_IMAGE_ATTACHMENTS:
+                    return merged
+                try:
+                    inherited = normalize_attachments([raw])[0]
+                except (OSError, ValueError) as error:
+                    logger.warning(
+                        "Skipping unavailable inherited image from %s: %s",
+                        ancestor.job_id,
+                        error,
+                    )
+                    continue
+                identity = str(
+                    inherited.get("sha256")
+                    or inherited.get("path")
+                    or inherited.get("id")
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                inherited["origin_job_id"] = str(
+                    raw.get("origin_job_id") or ancestor.job_id
+                )
+                inherited["inherited_from_job_id"] = source_job_id
+                merged.append(inherited)
+        return merged
 
     async def run_job(self, job_id: str, project_root: str):
         """Run the full job lifecycle: Governor → Planner → Worker → Test → Reviewer."""
@@ -881,12 +951,12 @@ class Engine:
                     logger.warning("Could not finalize %s: %s", job_id, error)
             self._close_repos(repos)
 
-    @staticmethod
-    def _create_precheck_constitution(job, repos, risk_level: str):
+    def _create_precheck_constitution(self, job, repos, risk_level: str):
         """Persist deterministic conservative bounds when Governor is skipped."""
         if repos["constitution"].get_by_job(job.id):
             return
         normalized_risk = "high" if risk_level == "critical" else risk_level
+        inherited = self._inherited_image_understanding(job, repos)
         repos["constitution"].create(
             job_id=job.id,
             goal=job.user_request,
@@ -895,7 +965,11 @@ class Engine:
             risk=normalized_risk or "medium",
             protected_paths=[],
             requires_final_review=normalized_risk == "high",
-            raw_output={"source": "deterministic_precheck"},
+            raw_output={
+                "source": "deterministic_precheck",
+                "image_observations": inherited["observations"],
+                "inherited_image_goals": inherited["goals"],
+            },
         )
 
     @staticmethod
@@ -935,6 +1009,7 @@ class Engine:
             ]),
             "source": "rules_fallback",
         }
+        inherited = self._inherited_image_understanding(job, repos)
         governor = self.get_agent("governor")
         if governor:
             try:
@@ -959,6 +1034,13 @@ class Engine:
                     str(reason)[:300] for reason in risk_reasons
                     if str(reason).strip()
                 ][:6] or ["裁决者按需求影响范围完成风险评估"]
+                current_observations = constitution.get("image_observations") or []
+                if not isinstance(current_observations, list):
+                    current_observations = [current_observations]
+                image_observations = self._dedupe_text_values(
+                    inherited["observations"] + current_observations,
+                    limit=12,
+                )
                 repos["constitution"].create(
                     job_id=job.id,
                     goal=constitution.get("goal", job.user_request),
@@ -979,11 +1061,8 @@ class Engine:
                         "source": "governor",
                         "risk_score": risk_score,
                         "risk_reasons": risk_reasons,
-                        "image_observations": [
-                            str(value)[:500]
-                            for value in constitution.get("image_observations", [])
-                            if str(value).strip()
-                        ][:12],
+                        "image_observations": image_observations,
+                        "inherited_image_goals": inherited["goals"],
                     },
                 )
                 assessment = {
@@ -1017,6 +1096,8 @@ class Engine:
                         "source": "rules_fallback",
                         "risk_score": assessment["risk_score"],
                         "risk_reasons": assessment["risk_reasons"],
+                        "image_observations": inherited["observations"],
+                        "inherited_image_goals": inherited["goals"],
                     },
                 )
                 await self.event_bus.publish(
@@ -1043,6 +1124,8 @@ class Engine:
                     "source": "rules_fallback",
                     "risk_score": assessment["risk_score"],
                     "risk_reasons": assessment["risk_reasons"],
+                    "image_observations": inherited["observations"],
+                    "inherited_image_goals": inherited["goals"],
                 },
             )
             await self.event_bus.publish(
@@ -3973,6 +4056,45 @@ class Engine:
                 result.append(p)
         return result
 
+    @staticmethod
+    def _dedupe_text_values(values, limit: int = 12) -> list[str]:
+        """Normalize inherited model observations while preserving order."""
+        result = []
+        seen = set()
+        for value in values or []:
+            text = str(value).strip()[:500]
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _inherited_image_understanding(self, job, repos) -> dict[str, list[str]]:
+        """Collect structured image facts from the explicit continuation chain."""
+        goals = []
+        observations = []
+        for ancestor in self._continuation_ancestors(
+            getattr(job, "source_job_id", None), job.project_id, repos
+        ):
+            constitution = repos["constitution"].get_by_job(ancestor.id)
+            if not constitution:
+                continue
+            raw = dict(constitution.raw_output or {})
+            ancestor_observations = raw.get("image_observations") or []
+            if not isinstance(ancestor_observations, list):
+                ancestor_observations = [ancestor_observations]
+            if not ancestor_observations:
+                continue
+            goals.append(constitution.goal)
+            observations.extend(ancestor_observations)
+        return {
+            "goals": self._dedupe_text_values(goals, limit=8),
+            "observations": self._dedupe_text_values(observations, limit=12),
+        }
+
     def _build_continuation_context(self, job, repos) -> str:
         """Build continuation context only from an explicit source job."""
         prev_job = None
@@ -4026,6 +4148,15 @@ class Engine:
                 f"{(latest.summary or '')[:1000]}"
             )
 
+        image_understanding = self._inherited_image_understanding(job, repos)
+        image_lines = [
+            *(f"Goal: {goal}" for goal in image_understanding["goals"]),
+            *(
+                f"- {observation}"
+                for observation in image_understanding["observations"]
+            ),
+        ]
+
         context = f"""
 === CONTINUATION CONTEXT ===
 This follows an explicit earlier job. Preserve existing useful work.
@@ -4045,6 +4176,9 @@ Recovery hint: {(getattr(prev_job, 'recovery_hint', '') or 'none')[:800]}
 
 === Review Evidence ===
 {review_text or 'No saved review'}
+
+=== Inherited Image Understanding ===
+{chr(10).join(image_lines) or 'No inherited image observations'}
 
 === Target Files ===
 Prefer these existing files when relevant:
