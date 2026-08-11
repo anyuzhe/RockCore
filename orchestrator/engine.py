@@ -3514,7 +3514,9 @@ class Engine:
             escalation_count += 1
             await self.event_bus.publish("task_escalating", job_id=job.job_id,
                                           task_id=task.task_id)
-            emergency_result = await self._escalate_to_emergency(task, job, last_error)
+            emergency_result = await self._escalate_to_emergency(
+                task, job, last_error, worktree_root
+            )
             if emergency_result and emergency_result.get("fix_success"):
                 return {"status": "completed", "result": emergency_result}
 
@@ -3971,14 +3973,21 @@ class Engine:
         )
         return True
 
-    async def _escalate_to_emergency(self, task, job, error) -> dict | None:
-        """L3: Codex Emergency Coder with workspace_write access."""
+    async def _escalate_to_emergency(
+        self, task, job, error, worktree_root: str
+    ) -> dict | None:
+        """Run L3 repair inside the same isolated task worktree."""
         emergency = self.get_agent("emergency_coder")
         if not emergency:
             return None
 
         try:
-            result = await emergency.run(task, job.project, previous_error=error)
+            result = await emergency.run(
+                task,
+                job.project,
+                previous_error=error,
+                project_root=worktree_root,
+            )
             return result
         except Exception as e:
             logger.error(f"Emergency coder failed: {e}")

@@ -676,9 +676,11 @@ def test_emergency_runs_after_three_primary_worker_failures(tmp_path):
     class Emergency:
         def __init__(self):
             self.calls = 0
+            self.project_roots = []
 
-        async def run(self, *_args, **_kwargs):
+        async def run(self, *_args, **kwargs):
             self.calls += 1
+            self.project_roots.append(kwargs.get("project_root"))
             return {"status": "completed", "fix_success": True}
 
     async def scenario():
@@ -701,6 +703,7 @@ def test_emergency_runs_after_three_primary_worker_failures(tmp_path):
         assert result["status"] == "completed"
         assert worker.calls == 3
         assert emergency.calls == 1
+        assert emergency.project_roots == [str(tmp_path)]
         assert len(engine.event_bus.get_history("task_escalating")) == 1
 
     asyncio.run(scenario())

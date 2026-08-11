@@ -44,19 +44,30 @@ class EmergencyCoderAgent:
         self.tool_broker = tool_broker
         self.agent_type = "emergency_coder"
 
-    async def run(self, task, project=None, previous_error="") -> dict:
-        """Run the Emergency Coder to fix a failing task."""
+    async def run(
+        self,
+        task,
+        project=None,
+        previous_error="",
+        project_root: str | None = None,
+    ) -> dict:
+        """Run the Emergency Coder in the caller-selected task workspace."""
         logger.info(
             f"Emergency Coder: fixing task {task.task_id}: {task.title}"
         )
 
-        project_root = project.root_path if project else "."
+        # The engine passes the task worktree explicitly. Falling back to the
+        # project root is retained only for standalone callers and older
+        # integrations; task execution must never silently leave its worktree.
+        effective_root = project_root or (
+            project.root_path if project else "."
+        )
 
         context = f"""
 Task: {task.task_id} - {task.title}
 Description: {task.description}
 Previous Error: {previous_error}
-Project Root: {project_root}
+Project Root: {effective_root}
 
 The regular Worker failed on this task. Fix the issue.
 Read the relevant files, understand the error, and apply a fix.
@@ -70,7 +81,7 @@ Run the acceptance command to verify.
                 self.agent_type,
                 EMERGENCY_SYSTEM_PROMPT,
                 messages,
-                project_root=project_root,
+                project_root=effective_root,
                 attachments=(
                     getattr(getattr(task, "job", None), "attachments", None)
                     or []
