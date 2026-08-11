@@ -23,6 +23,7 @@ from app.image_attachments import (
     store_image_bytes,
     store_image_file,
 )
+from app.paths import ProjectStateCleanupError, remove_project_state
 from .project_panel import ProjectPanel
 from .task_panel import TaskPanel
 from .settings_dialog import SettingsDialog, load_config
@@ -428,6 +429,20 @@ class MainWindow(QMainWindow):
             try:
                 project = repos["project"].get_by_name(name)
                 if project:
+                    try:
+                        removed_state = remove_project_state(project.root_path)
+                    except ProjectStateCleanupError as error:
+                        self.task_panel.log(
+                            f"项目未删除，状态清理失败：{error}", "log"
+                        )
+                        QMessageBox.critical(
+                            self,
+                            "无法删除项目",
+                            "RockCore 无法安全清理该项目的 .ai 状态目录，"
+                            "因此保留了项目记录。\n\n"
+                            f"{error}",
+                        )
+                        return
                     repos["project"].delete(project.id)
                     self.project_panel.remove_project(name)
                     if self._current_project and self._current_project.get("name") == name:
@@ -439,7 +454,13 @@ class MainWindow(QMainWindow):
                         self.task_panel.begin_new_request()
                         self._update_send_state()
                         self.status_label.setText("项目已删除，请选择其他项目")
-                    self.task_panel.log(f"已删除项目：{name}", "log")
+                    state_note = (
+                        f"，已清理 {len(removed_state)} 个 .ai 状态目录"
+                        if removed_state else "，未发现遗留 .ai 状态"
+                    )
+                    self.task_panel.log(
+                        f"已删除项目：{name}{state_note}", "log"
+                    )
             finally:
                 self._close_repos(repos)
 

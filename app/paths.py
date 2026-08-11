@@ -185,9 +185,131 @@ def project_state_dir(project_root: str | os.PathLike[str]) -> Path:
     if is_writable_directory(preferred, create=True):
         return preferred
 
+    _, fallback = project_state_paths(root)
+    if not is_writable_directory(fallback, create=True):
+        raise OSError(
+            "Project metadata directory is not writable: "
+            f"{Path(project_root).expanduser()}"
+        )
+    return fallback
+
+
+class ProjectStateCleanupError(OSError):
+    """Raised when a project's generated state cannot be safely removed."""
+
+
+def project_state_paths(
+    project_root: str | os.PathLike[str],
+) -> tuple[Path, Path]:
+    """Return local and per-user state locations without creating either."""
+    root = Path(project_root).expanduser().resolve()
+    preferred = root / ".ai"
     normalized = os.path.normcase(str(root))
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
     fallback = app_data_dir() / "project-state" / digest / ".ai"
-    if not is_writable_directory(fallback, create=True):
-        raise OSError(f"Project metadata directory is not writable: {root}")
-    return fallback
+    return preferred, fallback
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Detect Windows junctions without requiring Python 3.12."""
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0) or 0)
+    except OSError:
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _remove_registered_project_worktrees(root: Path, state_dir: Path):
+    """Unregister linked worktrees before deleting their generated directory."""
+    worktrees_root = state_dir / "worktrees"
+    if (
+        not os.path.lexists(worktrees_root)
+        or worktrees_root.is_symlink()
+        or _is_reparse_point(worktrees_root)
+        or not os.path.lexists(root / ".git")
+    ):
+        return
+
+    from app.subprocess_utils import run_process
+
+    listed = run_process(
+        ["git", "worktree", "list", "--porcelain"],
+        capture_output=True,
+        cwd=root,
+    )
+    if listed.returncode != 0:
+        raise ProjectStateCleanupError(
+            "无法读取项目 Git worktree："
+            + (listed.stderr.strip() or f"exit {listed.returncode}")
+        )
+    registered = [
+        Path(line[9:].strip()).expanduser()
+        for line in listed.stdout.splitlines()
+        if line.startswith("worktree ") and line[9:].strip()
+    ]
+    for worktree in registered:
+        try:
+            resolved = worktree.resolve()
+        except OSError:
+            resolved = worktree.absolute()
+        if resolved == root or not _is_within(resolved, worktrees_root):
+            continue
+        removed = run_process(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            capture_output=True,
+            cwd=root,
+        )
+        if removed.returncode != 0:
+            raise ProjectStateCleanupError(
+                f"无法注销 Git worktree {worktree}："
+                + (removed.stderr.strip() or f"exit {removed.returncode}")
+            )
+
+
+def _remove_state_path(target: Path) -> bool:
+    """Remove one exact state target without traversing top-level links."""
+    if not os.path.lexists(target):
+        return False
+    if target.is_symlink():
+        target.unlink()
+    elif _is_reparse_point(target):
+        if target.is_dir():
+            os.rmdir(target)
+        else:
+            target.unlink()
+    elif target.is_dir():
+        if os.path.ismount(target):
+            raise ProjectStateCleanupError(
+                f"拒绝删除挂载点形式的项目状态目录：{target}"
+            )
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+    return True
+
+
+def remove_project_state(
+    project_root: str | os.PathLike[str],
+) -> list[Path]:
+    """Delete all RockCore state for a removed project, never project files."""
+    root = Path(project_root).expanduser().resolve()
+    local_state, fallback_state = project_state_paths(root)
+    removed: list[Path] = []
+    current_target = local_state
+    try:
+        _remove_registered_project_worktrees(root, local_state)
+        for target in (local_state, fallback_state):
+            current_target = target
+            if target.name != ".ai":
+                raise ProjectStateCleanupError(
+                    f"拒绝清理非 .ai 路径：{target}"
+                )
+            if _remove_state_path(target):
+                removed.append(target)
+    except ProjectStateCleanupError:
+        raise
+    except OSError as error:
+        raise ProjectStateCleanupError(
+            f"无法删除项目状态目录 {current_target}：{error}"
+        ) from error
+    return removed

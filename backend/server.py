@@ -10,6 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from app.paths import ProjectStateCleanupError, remove_project_state
 from .websocket import WebSocketManager
 from orchestrator.engine import Engine
 from storage.repositories import (
@@ -105,10 +106,23 @@ def create_app(engine: Engine | None = None) -> FastAPI:
     async def delete_project(project_id: int):
         repos = _get_repos(app)
         try:
+            project = repos["project"].get_by_id(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found")
+            try:
+                removed_state = remove_project_state(project.root_path)
+            except ProjectStateCleanupError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Project state cleanup failed: {error}",
+                ) from error
             success = repos["project"].delete(project_id)
             if not success:
                 raise HTTPException(status_code=404, detail="Project not found")
-            return {"status": "deleted"}
+            return {
+                "status": "deleted",
+                "removed_state_directories": len(removed_state),
+            }
         finally:
             _close_repos(repos)
 

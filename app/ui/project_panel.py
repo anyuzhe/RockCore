@@ -312,7 +312,9 @@ class ProjectPanel(QWidget):
         data = item.data(Qt.ItemDataRole.UserRole) or {}
         menu = QMenu(self)
         remove_action = menu.addAction("移除项目")
-        remove_action.setToolTip("仅移除 RockCore 记录，不删除本地文件")
+        remove_action.setToolTip(
+            "移除 RockCore 记录并清理 .ai 状态，不删除项目源码"
+        )
         selected = menu.exec(self.project_list.viewport().mapToGlobal(position))
         if selected is remove_action:
             self._delete_project(item)
@@ -326,7 +328,9 @@ class ProjectPanel(QWidget):
         reply = QMessageBox.question(
             self,
             "移除项目",
-            f"从 RockCore 中移除“{name}”？\n本地文件不会被删除。",
+            f"从 RockCore 中移除“{name}”？\n"
+            "项目源码不会被删除，但 RockCore 生成的 .ai 状态、记忆、配置和"
+            "临时 worktree 会被清理。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
