@@ -359,6 +359,11 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
     assert settings.kimi_model.findData("kimi-k2.7") >= 0
     assert settings.ds_model.findData("deepseek-v4-pro") >= 0
     assert settings.max_cost.prefix() == "¥"
+    assert settings.max_tokens.value() == 5_000_000
+    assert settings.max_auto_tokens.value() == 50_000_000
+    assert settings.max_api_calls.value() == 500
+    assert settings.max_auto_api_calls.value() == 5_000
+    assert settings.cached_input_weight.value() == 15
     assert project._agent_widgets["planner"]["model"].findData(
         "kimi-k2.7"
     ) >= 0
@@ -376,6 +381,30 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
     assert project.worker_fallback_model.currentData() == "kimi-k2.7"
     settings.close()
     project.close()
+
+
+def test_usage_header_shows_live_budget_breakdown():
+    text = TaskPanel._format_usage({
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "calls": 1,
+        "cost": 0.01,
+        "billable_cost": 0.005,
+        "budget": {
+            "used_tokens": 90,
+            "reserved_tokens": 30,
+            "remaining_tokens": 4_999_880,
+            "max_auto_tokens": 50_000_000,
+            "billable_cost": 0.005,
+            "hard_cost_limit_cny": 3.6,
+        },
+    })
+
+    assert "有效已用 90" in text
+    assert "已预留 30" in text
+    assert "剩余 4,999,880" in text
+    assert "最高自动扩容 50,000,000" in text
+    assert "人民币硬上限 ¥0.0050/¥3.60" in text
 
 
 def test_sidebar_uses_rock_innovation_branding():

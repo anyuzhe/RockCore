@@ -69,6 +69,9 @@ class Engine:
 
         self.event_bus = EventBus()
         self.event_bus.subscribe("model_chat", self._record_model_usage)
+        self.event_bus.subscribe(
+            "task_budget_checkpoint", self._record_budget_checkpoint
+        )
         self.state_machine = StateMachine()
         self.scheduler = Scheduler(
             max_concurrent=max(1, int(max_concurrent_workers or 1))
@@ -159,6 +162,11 @@ class Engine:
                 job_id, input_tokens, cached_input_tokens, output_tokens,
                 estimated_cost, billable_cost,
             )
+            budget_snapshot = data.get("budget")
+            if job and isinstance(budget_snapshot, dict):
+                checkpoint = dict(job.last_checkpoint or {})
+                checkpoint["budget"] = dict(budget_snapshot)
+                repos["job"].update_checkpoint(job_id, checkpoint)
             task_id = data.get("task_id")
             if not task_id or not job:
                 return
@@ -184,6 +192,35 @@ class Engine:
             )
         except Exception as error:
             logger.warning("Could not persist model usage for %s: %s", job_id, error)
+        finally:
+            self._close_repos(repos)
+
+    async def _record_budget_checkpoint(self, _event_type: str, **data):
+        """Persist the 85% progress checkpoint without touching project files."""
+        job_id = str(data.get("job_id") or "")
+        if not job_id:
+            return
+        repos = self._get_repos()
+        try:
+            job = repos["job"].get_by_id(job_id)
+            if not job:
+                return
+            checkpoint = dict(job.last_checkpoint or {})
+            progress = dict(checkpoint.get("budget_progress") or {})
+            task_id = str(data.get("task_id") or "")
+            if task_id:
+                progress[task_id] = {
+                    key: data.get(key)
+                    for key in (
+                        "used_tokens", "task_input_budget", "has_written",
+                        "document_progress", "tool_calls",
+                    )
+                }
+            checkpoint["budget_progress"] = progress
+            checkpoint["budget"] = (
+                self.model_router.cost_engine.get_budget_snapshot(job_id)
+            )
+            repos["job"].update_checkpoint(job_id, checkpoint)
         finally:
             self._close_repos(repos)
 
@@ -698,6 +735,18 @@ class Engine:
                 await self._finalize(job, repos)
                 finalized = True
 
+        except BudgetExceededError as e:
+            logger.warning("Job paused for budget continuation: %s: %s", job_id, e)
+            repos["job"].update_status(job_id, "needs_attention")
+            self._store_job_failure(repos, job_id, str(e))
+            self.state_machine.transition(job_id, JobState.WAITING_USER)
+            await self.event_bus.publish(
+                "job_needs_attention",
+                job_id=job_id,
+                reason=str(e),
+                failure_stage="budget_continuation",
+                budget=self.model_router.cost_engine.get_budget_snapshot(job_id),
+            )
         except Exception as e:
             logger.error(f"Job failed: {job_id}: {e}")
             repos["job"].update_status(job_id, "failed")
@@ -1433,9 +1482,32 @@ class Engine:
         cap = 20 if mode == "fast" else 50
         turns = max(6, min(cap, turns))
         exploration = max(2, min(12, exploration, max(2, turns // 2)))
+        estimated_input_per_turn = min(
+            40_000,
+            10_000
+            + min(20_000, total_lines * 8)
+            + min(5_000, len(files) * 1_000)
+            + min(5_000, len(description) * 8),
+        )
+        processing_input_budget = max(
+            300_000, turns * estimated_input_per_turn
+        )
+        finalization_reserve = max(
+            180_000, math.ceil(processing_input_budget * 0.20)
+        )
+        input_budget = min(
+            20_000_000, processing_input_budget + finalization_reserve
+        )
         return {
             "max_turns": turns,
             "exploration_turns": exploration,
+            "estimated_input_per_turn": estimated_input_per_turn,
+            "processing_input_budget": processing_input_budget,
+            "finalization_reserve": finalization_reserve,
+            "input_budget": input_budget,
+            "max_auto_input_budget": 50_000_000,
+            "output_budget": max(120_000, turns * 4_000),
+            "api_call_budget": turns + 16,
             "existing_files": len(files),
             "total_lines": total_lines,
             "reason": ", ".join(reasons),
@@ -1480,43 +1552,73 @@ class Engine:
         if not all_tasks:
             return {"status": "failed", "reason": "没有可执行的任务"}
 
-        # Reserve the combined token capacity before parallel tasks start.
-        # Reserving only one task at a time could let two legitimate document
-        # tasks collide with the job-level ceiling even though each is valid.
+        # Reserve the complete plan before parallel tasks start. Workers cannot
+        # consume the Reviewer and first repair round's finishing capacity.
         document_root = job.project.root_path if job.project else "."
-        document_profiles = [
-            profile for task in all_tasks
-            if (profile := self._document_task_profile(
-                task, document_root, getattr(job, "user_request", "")
-            ))
-        ]
-        if document_profiles:
-            combined_input_budget = sum(
-                profile["input_budget"] for profile in document_profiles
+        base_turns = (
+            proj_config.get_worker_turns(complexity)
+            if proj_config else getattr(worker, "max_turns", 24)
+        )
+        base_exploration = (
+            proj_config.get_exploration_turns(complexity)
+            if proj_config else getattr(worker, "max_exploration_turns", 4)
+        )
+        mode = proj_config.mode if proj_config else "auto"
+        planned_task_budgets: dict[str, dict] = {}
+        document_task_count = 0
+        for planned_task in all_tasks:
+            profile = self._document_task_profile(
+                planned_task, document_root,
+                getattr(job, "user_request", ""),
             )
-            combined_api_budget = sum(
-                profile["api_call_budget"] for profile in document_profiles
-            )
-            combined_output_budget = sum(
-                profile["output_budget"] for profile in document_profiles
-            )
-            document_job_budget = (
-                self.model_router.cost_engine.reserve_document_budget(
-                    job.job_id,
-                    combined_input_budget,
-                    required_api_calls=combined_api_budget,
-                    required_output_tokens=combined_output_budget,
+            if profile:
+                document_task_count += 1
+                planned_task_budgets[planned_task.task_id] = {
+                    **profile, "document_profile": profile,
+                    "max_auto_input_budget": (
+                        self.model_router.cost_engine.get_budget(
+                            job.job_id
+                        ).max_auto_input_tokens
+                    ),
+                }
+            else:
+                planned_task_budgets[planned_task.task_id] = (
+                    self._estimate_task_budget(
+                        planned_task, document_root, base_turns,
+                        base_exploration, mode,
+                    )
                 )
-            )
-            await self.event_bus.publish(
-                "document_job_budget_reserved",
-                job_id=job.job_id,
-                document_tasks=len(document_profiles),
-                task_input_budget=combined_input_budget,
-                job_input_budget=document_job_budget.max_input_tokens,
-                job_total_budget=document_job_budget.max_total_tokens,
-                job_api_call_budget=document_job_budget.max_api_calls,
-            )
+
+        combined_input_budget = sum(
+            int(profile.get("input_budget", 0) or 0)
+            for profile in planned_task_budgets.values()
+        )
+        combined_api_budget = sum(
+            int(profile.get("api_call_budget", 0) or 0)
+            for profile in planned_task_budgets.values()
+        )
+        combined_output_budget = sum(
+            int(profile.get("output_budget", 0) or 0)
+            for profile in planned_task_budgets.values()
+        )
+        workflow_budget = self.model_router.cost_engine.reserve_workflow_budget(
+            job.job_id,
+            combined_input_budget,
+            required_api_calls=combined_api_budget,
+            required_output_tokens=combined_output_budget,
+            reservation_name=f"execution:{repair_round}",
+        )
+        await self.event_bus.publish(
+            "workflow_budget_reserved",
+            job_id=job.job_id,
+            tasks=len(planned_task_budgets),
+            document_tasks=document_task_count,
+            task_input_budget=combined_input_budget,
+            job_input_budget=workflow_budget.max_input_tokens,
+            job_total_budget=workflow_budget.max_total_tokens,
+            job_api_call_budget=workflow_budget.max_api_calls,
+            budget=self.model_router.cost_engine.get_budget_snapshot(job.job_id),
+        )
 
         task_dicts = []
         for t in all_tasks:
@@ -1613,23 +1715,19 @@ class Engine:
                 proj_config.get_exploration_turns(complexity)
                 if proj_config else getattr(task_worker, "max_exploration_turns", 4)
             )
-            budget = self._estimate_task_budget(
-                t,
-                task_worktree_root,
-                getattr(task_worker, "max_turns", 24),
-                base_exploration,
-                proj_config.mode if proj_config else "auto",
+            budget = dict(
+                planned_task_budgets.get(task_id)
+                or self._estimate_task_budget(
+                    t,
+                    task_worktree_root,
+                    getattr(task_worker, "max_turns", 24),
+                    base_exploration,
+                    proj_config.mode if proj_config else "auto",
+                )
             )
             task_worker.max_turns = budget["max_turns"]
             task_worker.max_exploration_turns = budget["exploration_turns"]
-            task_input_limits = {
-                "simple": 120_000,
-                "normal": 220_000,
-                "complex": 320_000,
-            }
-            document_profile = self._document_task_profile(
-                t, task_worktree_root, getattr(job, "user_request", "")
-            )
+            document_profile = budget.get("document_profile")
             if document_profile:
                 task_worker.max_turns = max(
                     task_worker.max_turns, document_profile["max_turns"]
@@ -1640,7 +1738,6 @@ class Engine:
                 )
                 t._rockcore_input_budget = document_profile["input_budget"]
                 t._rockcore_document_profile = dict(document_profile)
-                budget["reason"] += ", " + document_profile["reason"]
                 document_job_budget = (
                     self.model_router.cost_engine.reserve_document_budget(
                         job.job_id,
@@ -1668,9 +1765,15 @@ class Engine:
                 t._rockcore_document_profile = None
                 if complexity == "simple":
                     task_worker.max_turns = min(task_worker.max_turns, 18)
-                t._rockcore_input_budget = task_input_limits.get(
-                    complexity, 220_000
-                )
+                t._rockcore_input_budget = int(budget["input_budget"])
+            t._rockcore_max_auto_input_budget = int(
+                self.model_router.cost_engine.get_budget(
+                    job.job_id
+                ).max_auto_input_tokens
+            )
+            t._rockcore_finalization_reserve = int(
+                budget.get("finalization_reserve", 180_000)
+            )
             t._rockcore_retry_count = (
                 proj_config.worker.retry_count if proj_config else MAX_FLASH_RETRY
             )
@@ -1714,6 +1817,32 @@ class Engine:
                 baseline_snapshot=task_baseline,
             )
             integration_result = None
+
+            if result and result.get("status") == "needs_continuation":
+                reason = str(result.get("error") or "任务已保存，等待继续")
+                repos["task"].update_status_by_pk(t.id, "interrupted")
+                self._checkpoint_task(
+                    repos, job, t, status="interrupted", result=result,
+                    error=reason,
+                )
+                await self.event_bus.publish(
+                    "task_needs_continuation",
+                    job_id=job.job_id,
+                    task_id=task_id,
+                    reason=reason,
+                    failure_stage=result.get(
+                        "failure_stage", "budget_continuation"
+                    ),
+                    checkpoint=result.get("checkpoint", {}),
+                    worktree_path=(
+                        task_worktree_root if has_worktree else ""
+                    ),
+                )
+                # Preserve the isolated worktree and its checkpoint. A follow-up
+                # job receives a unique worktree and the saved continuation data.
+                if has_worktree:
+                    self.merge_manager.preserve_worktree(task_id)
+                return result
 
             if result and result.get("status") in {
                 "completed", "pending_validation",
@@ -1876,23 +2005,55 @@ class Engine:
                     completed_task_results[task_id] = result_payload
                     return result_payload
                 else:
+                    if recovered_for_validation:
+                        continuation = {
+                            "status": "needs_continuation",
+                            "error": (
+                                "Generated artifact validation did not pass; "
+                                "the worktree and checkpoint were preserved"
+                            ),
+                            "failure_stage": "validation_continuation",
+                            "checkpoint": {
+                                "changes": task_changes,
+                                "validation": "failed",
+                            },
+                        }
+                        repos["task"].update_status_by_pk(t.id, "interrupted")
+                        self._checkpoint_task(
+                            repos, job, t, status="interrupted",
+                            result=continuation,
+                            error=continuation["error"],
+                        )
+                        await self.event_bus.publish(
+                            "task_needs_continuation",
+                            job_id=job.job_id,
+                            task_id=task_id,
+                            reason=continuation["error"],
+                            failure_stage="validation_continuation",
+                            checkpoint=continuation["checkpoint"],
+                            worktree_path=(
+                                task_worktree_root if has_worktree else ""
+                            ),
+                        )
+                        if has_worktree:
+                            self.merge_manager.preserve_worktree(task_id)
+                        return continuation
                     repos["task"].update_status_by_pk(t.id, "failed")
                     self._checkpoint_task(
                         repos, job, t, status="failed", result=result,
                         error="Acceptance test failed",
                     )
-                    await self.event_bus.publish("task_failed", job_id=job.job_id,
-                                                  task_id=task_id,
-                                                  error=(
-                                                      "Generated artifact validation failed; "
-                                                      "worktree preserved for repair"
-                                                      if recovered_for_validation
-                                                      else "Acceptance test failed"
-                                                  ),
-                                                  failure_stage="validation")
-                    if has_worktree and not recovered_for_validation:
+                    await self.event_bus.publish(
+                        "task_failed", job_id=job.job_id,
+                        task_id=task_id,
+                        error="Acceptance test failed",
+                        failure_stage="validation",
+                    )
+                    if has_worktree:
                         await self.merge_manager.abort_worktree(task_id)
-                    raise RuntimeError(f"Task {task_id} failed: acceptance test did not pass")
+                    raise RuntimeError(
+                        f"Task {task_id} failed: acceptance test did not pass"
+                    )
             else:
                 repos["task"].update_status_by_pk(t.id, "failed")
                 failure_stage = (
@@ -1956,20 +2117,30 @@ class Engine:
             ]
             if failed:
                 logger.error(f"Tasks failed: {failed}")
+                continuation_tasks = [
+                    tid for tid in failed
+                    if isinstance(results.get(tid), dict)
+                    and results[tid].get("status") == "needs_continuation"
+                ]
                 failure_messages = [
                     str(results[tid].get("error", "")) for tid in failed
                     if isinstance(results.get(tid), dict)
                 ]
                 terminal_status = (
                     "needs_attention"
-                    if self.scheduler._completed or any(
+                    if continuation_tasks or self.scheduler._completed or any(
                         self._is_user_input_required(message)
                         for message in failure_messages
                     )
                     else "failed"
                 )
                 repos["job"].update_status(job.job_id, terminal_status)
-                self.state_machine.transition(job.job_id, JobState.FAILED)
+                self.state_machine.transition(
+                    job.job_id,
+                    JobState.WAITING_USER
+                    if terminal_status == "needs_attention"
+                    else JobState.FAILED,
+                )
                 direct_failures = [tid for tid in failed if tid not in blocked]
                 if direct_failures:
                     failure_messages = [
@@ -1979,15 +2150,30 @@ class Engine:
                 reason = failure_messages[0][:160] if failure_messages else "未知错误"
                 self._store_job_failure(repos, job.job_id, reason)
                 await self.event_bus.publish("phase_summary",
-                    phase="execution", agent_type="worker", status="failed",
-                    summary=f"任务执行失败：{reason}",
+                    phase="execution", agent_type="worker",
+                    status=(
+                        "interrupted" if continuation_tasks else "failed"
+                    ),
+                    summary=(
+                        f"已保存执行进度，等待继续：{reason}"
+                        if continuation_tasks
+                        else f"任务执行失败：{reason}"
+                    ),
                     details={
                         "done": len(self.scheduler._completed),
                         "failed": len(direct_failures),
                         "blocked": len(blocked),
+                        **(
+                            {"needs_continuation": continuation_tasks}
+                            if continuation_tasks else {}
+                        ),
                     },
                 )
-                return {"status": "failed", "reason": reason}
+                return {
+                    "status": terminal_status,
+                    "reason": reason,
+                    "needs_continuation": continuation_tasks,
+                }
         except Exception as e:
             logger.error(f"Execution failed: {e}")
             repos["job"].update_status(job.job_id, "failed")
@@ -2189,7 +2375,7 @@ class Engine:
             return True
 
         async def pending_validation_or_failure(error: str) -> dict:
-            if document_profile and await self._check_file_changes(
+            if await self._check_file_changes(
                 worktree_root, baseline_snapshot
             ):
                 await self.event_bus.publish(
@@ -2209,9 +2395,15 @@ class Engine:
                     ),
                 }
             return {
-                "status": "failed",
+                "status": "needs_continuation",
                 "error": error,
-                "failure_stage": "budget",
+                "failure_stage": "budget_continuation",
+                "checkpoint": {
+                    "document_progress": getattr(
+                        task, "_rockcore_document_progress", {}
+                    ),
+                    "reason": error,
+                },
             }
 
         for attempt in range(1, primary_attempts + 2):
@@ -2356,8 +2548,7 @@ class Engine:
                     break
 
         if (
-            document_profile
-            and "max turns" in last_error.lower()
+            "max turns" in last_error.lower()
             and await self._check_file_changes(worktree_root, baseline_snapshot)
         ):
             await self.event_bus.publish(
@@ -2408,7 +2599,38 @@ class Engine:
             if emergency_result and emergency_result.get("fix_success"):
                 return {"status": "completed", "result": emergency_result}
 
-        # L4: Failed
+        # Any useful artifact gets deterministic validation before RockCore can
+        # decide that a model/provider failure is terminal.
+        if await self._check_file_changes(worktree_root, baseline_snapshot):
+            await self.event_bus.publish(
+                "task_pending_validation",
+                job_id=job.job_id,
+                task_id=getattr(task, "task_id", ""),
+                reason=last_error or "模型未正常结束，先验收现有产物",
+            )
+            return {
+                "status": "pending_validation",
+                "error": last_error,
+                "failure_stage": "artifact_recovery",
+                "pending_event_published": True,
+                "document_progress": getattr(
+                    task, "_rockcore_document_progress", {}
+                ),
+            }
+        if self._is_budget_error(last_error) or "max turns" in last_error.lower():
+            return {
+                "status": "needs_continuation",
+                "error": last_error,
+                "failure_stage": "budget_continuation",
+                "checkpoint": {
+                    "reason": last_error,
+                    "document_progress": getattr(
+                        task, "_rockcore_document_progress", {}
+                    ),
+                },
+            }
+
+        # Non-budget/model failures with no usable artifact remain failures.
         return {"status": "failed", "error": last_error}
 
     @staticmethod
@@ -2472,7 +2694,7 @@ class Engine:
         hard_limit = max(
             0, int(getattr(task, "_rockcore_input_budget", 0) or 0)
         )
-        used = int(usage.get("input_tokens", 0) or 0)
+        used = int(usage.get("effective_input_tokens", 0) or 0)
         remaining = max(0, hard_limit - used)
         average = max(
             8_000, int(usage.get("average_input_tokens", 0) or 0)
@@ -2524,7 +2746,12 @@ class Engine:
         if current <= 0:
             return False
         extension = max(600_000, current // 2)
-        enlarged = min(20_000_000, current + extension)
+        enlarged = min(
+            int(getattr(
+                task, "_rockcore_max_auto_input_budget", 50_000_000
+            ) or 50_000_000),
+            current + extension,
+        )
         if enlarged <= current:
             return False
 
@@ -2753,6 +2980,9 @@ class Engine:
                 return
             self.state_machine.transition(job.job_id, JobState.REVIEWING)
             repos["job"].update_status(job.job_id, "reviewing")
+            self.model_router.cost_engine.release_workflow_reservations(
+                job.job_id
+            )
             await self.event_bus.publish(
                 "job_reviewing", job_id=job.job_id,
                 repair_round=repair_round,
@@ -3342,7 +3572,10 @@ class Engine:
             failure_reason=error if status != "done" else "",
         )
         tasks = repos["task"].list_by_job(job.id)
-        repos["job"].update_checkpoint(job.job_id, {
+        existing_checkpoint = dict(
+            getattr(job, "last_checkpoint", None) or {}
+        )
+        existing_checkpoint.update({
             "updated_at": datetime.now().astimezone().isoformat(),
             "tasks": [{
                 "task_id": item.task_id,
@@ -3352,6 +3585,10 @@ class Engine:
                 "allowed_paths": item.allowed_paths or [],
             } for item in tasks],
         })
+        existing_checkpoint["budget"] = (
+            self.model_router.cost_engine.get_budget_snapshot(job.job_id)
+        )
+        repos["job"].update_checkpoint(job.job_id, existing_checkpoint)
 
     async def _check_file_changes(self, project_root: str,
                                   baseline_snapshot: dict | None = None) -> bool:

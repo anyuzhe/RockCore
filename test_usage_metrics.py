@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from providers.base import BaseProvider
-from orchestrator.cost_engine import CostEngine, JobBudget
+from orchestrator.cost_engine import BudgetExceededError, CostEngine, JobBudget
 from orchestrator.event_bus import EventBus
 from orchestrator.model_router import ModelRouter
 from storage.database import init_database
@@ -426,7 +426,112 @@ def test_review_and_repair_budget_reservations_are_idempotent():
     repeated_repair = engine.reserve_repair_budget("JOB-RESERVE", 1)
 
     assert review is repeated_review is repair is repeated_repair
-    assert repair.max_input_tokens == 950_000
-    assert repair.max_output_tokens == 250_000
-    assert repair.max_api_calls == 155
-    assert repair.max_cost_cny == 9.0
+    assert repair.max_input_tokens == 5_450_000
+    assert repair.max_output_tokens == 5_150_000
+    assert repair.max_api_calls == 555
+    assert repair.max_cost_cny == 3.6
+
+
+def test_cached_input_uses_weighted_soft_budget_accounting():
+    async def scenario():
+        engine = CostEngine(JobBudget(cached_input_weight=0.15))
+        await engine.record_usage(
+            "JOB-CACHE", "worker",
+            input_tokens=100_000,
+            cached_input_tokens=80_000,
+            output_tokens=1_000,
+        )
+
+        task = engine.get_task_usage("JOB-CACHE", "")
+        summary = engine.get_usage_summary("JOB-CACHE")
+
+        assert task["effective_input_tokens"] == 32_000
+        assert summary["effective_input"] == 32_000
+        assert summary["total_input"] == 100_000
+
+    asyncio.run(scenario())
+
+
+def test_atomic_request_reservation_protects_hard_cost_limit():
+    async def scenario():
+        engine = CostEngine(JobBudget(max_cost_cny=0.01))
+        first = await engine.admit_request(
+            "JOB-ATOMIC",
+            estimated_input_tokens=1_000,
+            max_output_tokens=1_000,
+            estimated_billable_cost=0.006,
+        )
+
+        try:
+            await engine.admit_request(
+                "JOB-ATOMIC",
+                estimated_input_tokens=1_000,
+                max_output_tokens=1_000,
+                estimated_billable_cost=0.006,
+            )
+        except Exception as error:
+            assert "hard cost limit" in str(error).lower()
+        else:
+            raise AssertionError("second reservation should exceed hard cost")
+        snapshot = engine.get_budget_snapshot("JOB-ATOMIC")
+        assert snapshot["reserved_tokens"] == 2_000
+        assert snapshot["hard_cost_limit_cny"] == 0.01
+        await engine.release_request(
+            "JOB-ATOMIC", first["reservation_id"]
+        )
+
+    asyncio.run(scenario())
+
+
+def test_router_enforces_hard_cost_before_calling_paid_provider():
+    class Provider:
+        model = "deepseek-v4-flash"
+        authentication_mode = "api"
+        calls = 0
+
+        async def chat(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"content": "should not run", "usage": {}}
+
+    async def scenario():
+        events = EventBus()
+        router = ModelRouter(
+            cost_engine=CostEngine(JobBudget(max_cost_cny=0.0001)),
+            provider_map={"worker": "deepseek"},
+            event_bus=events,
+        )
+        provider = Provider()
+        router.register_provider("deepseek", provider)
+        router.set_job_id("JOB-HARD-COST")
+
+        try:
+            await router.chat("worker", "system", [])
+        except BudgetExceededError as error:
+            assert "hard cost limit" in str(error).lower()
+        else:
+            raise AssertionError("hard cost limit should stop provider call")
+
+        assert provider.calls == 0
+        assert events.get_history("budget_continuation_required")
+
+    asyncio.run(scenario())
+
+
+def test_workflow_budget_exposes_and_releases_protected_phase_capacity():
+    engine = CostEngine()
+
+    budget = engine.reserve_workflow_budget(
+        "JOB-WORKFLOW",
+        task_input_tokens=1_000_000,
+        required_api_calls=100,
+        required_output_tokens=200_000,
+    )
+    reserved = engine.get_budget_snapshot("JOB-WORKFLOW")
+    engine.release_workflow_reservations("JOB-WORKFLOW")
+    released = engine.get_budget_snapshot("JOB-WORKFLOW")
+
+    assert reserved["protected_phase_tokens"] == 1_350_000
+    assert reserved["protected_phase_calls"] == 80
+    assert released["reserved_tokens"] == 0
+    assert released["reserved_calls"] == 0
+    assert budget.max_cost_cny == 3.6

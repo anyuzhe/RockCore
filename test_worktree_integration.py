@@ -86,6 +86,35 @@ def test_stale_task_branch_gets_a_unique_worktree_run_suffix(tmp_path):
     asyncio.run(scenario())
 
 
+def test_preserved_continuation_releases_active_slot_without_deleting_files(
+    tmp_path,
+):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        first = await manager.create_task_worktree("T001", "JOB-ONE")
+        first_path = Path(first["path"])
+        (first_path / "checkpoint.txt").write_text(
+            "partial", encoding="utf-8"
+        )
+
+        preserved = manager.preserve_worktree("T001")
+        second = await manager.create_task_worktree("T001", "JOB-TWO")
+
+        assert preserved["status"] == "preserved"
+        assert (first_path / "checkpoint.txt").read_text(
+            encoding="utf-8"
+        ) == "partial"
+        assert second["status"] == "created"
+        assert second["path"] != str(first_path)
+        await manager.abort_worktree("T001")
+
+    asyncio.run(scenario())
+
+
 def test_commit_failure_preserves_worktree_and_never_merges(
     tmp_path, monkeypatch,
 ):

@@ -185,6 +185,10 @@ Acceptance Command: {task.acceptance_command or 'none'}
         seen_exploration_calls: set[tuple[str, str, bool]] = set()
         progress_warning_sent = False
         finish_warning_sent = False
+        token_compaction_sent = False
+        token_checkpoint_sent = False
+        token_finalization_sent = False
+        budget_finalization_mode = finalization_mode
         premature_completion_count = 0
         empty_report_count = 0
         force_tool_call = False
@@ -196,6 +200,82 @@ Acceptance Command: {task.acceptance_command or 'none'}
 
         try:
             for turn in range(self.max_turns):
+                job_id = str(
+                    getattr(self.model_router, "_current_job_id", "") or "unknown"
+                )
+                cost_engine = getattr(self.model_router, "cost_engine", None)
+                task_usage = (
+                    cost_engine.get_task_usage(job_id, task.task_id)
+                    if cost_engine is not None
+                    else {}
+                )
+                task_limit = max(
+                    1, int(getattr(task, "_rockcore_input_budget", 0) or 1)
+                )
+                effective_input = int(
+                    task_usage.get("effective_input_tokens", 0) or 0
+                )
+                token_ratio = effective_input / task_limit
+                if token_ratio >= 0.92 and not token_finalization_sent:
+                    budget_finalization_mode = True
+                    task._rockcore_finalization_mode = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Token usage reached 92% of the current task soft "
+                            "allocation. Enter finalization now: do not read or "
+                            "search again, preserve existing work, run at most one "
+                            "focused verification, and return the result."
+                        ),
+                    })
+                    token_finalization_sent = True
+                    if self.model_router.event_bus:
+                        await self.model_router.event_bus.publish(
+                            "task_budget_finalizing",
+                            job_id=job_id,
+                            task_id=task.task_id,
+                            used_tokens=effective_input,
+                            task_input_budget=task_limit,
+                        )
+                elif token_ratio >= 0.85 and not token_checkpoint_sent:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Token usage reached 85%. Treat all files already "
+                            "written as the checkpoint. Do not restart any completed "
+                            "analysis; finish only the remaining concrete work."
+                        ),
+                    })
+                    token_checkpoint_sent = True
+                    if self.model_router.event_bus:
+                        await self.model_router.event_bus.publish(
+                            "task_budget_checkpoint",
+                            job_id=job_id,
+                            task_id=task.task_id,
+                            used_tokens=effective_input,
+                            task_input_budget=task_limit,
+                            has_written=has_written,
+                            document_progress=dict(pending_document_pages),
+                            tool_calls=len(tool_calls_made),
+                        )
+                elif token_ratio >= 0.70 and not token_compaction_sent:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Token usage reached 70%. Reuse the evidence already "
+                            "collected, avoid broad exploration, and keep the "
+                            "remaining context compact."
+                        ),
+                    })
+                    token_compaction_sent = True
+                    if self.model_router.event_bus:
+                        await self.model_router.event_bus.publish(
+                            "task_budget_compacting",
+                            job_id=job_id,
+                            task_id=task.task_id,
+                            used_tokens=effective_input,
+                            task_input_budget=task_limit,
+                        )
                 if turn >= finish_warning_turn and not finish_warning_sent:
                     messages.append({
                         "role": "user",
@@ -220,10 +300,14 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     })
                     progress_warning_sent = True
 
-                messages = self._compact_messages(
-                    messages,
-                    max_chars=26_000 if is_document_task else MAX_CONVERSATION_CHARS,
+                compact_limit = (
+                    6_000 if token_ratio >= 0.92
+                    else 9_000 if token_ratio >= 0.85
+                    else 14_000 if token_ratio >= 0.70
+                    else 26_000 if is_document_task
+                    else MAX_CONVERSATION_CHARS
                 )
+                messages = self._compact_messages(messages, max_chars=compact_limit)
                 model_kwargs = (
                     {"model": model_override} if model_override else {}
                 )
@@ -439,7 +523,19 @@ Acceptance Command: {task.acceptance_command or 'none'}
                         and func_name in EXPLORATION_TOOLS
                         and exploration_signature in seen_exploration_calls
                     )
-                    if repeated_exploration:
+                    if (
+                        budget_finalization_mode
+                        and func_name in EXPLORATION_TOOLS
+                    ):
+                        result = {
+                            "status": "rejected",
+                            "error": (
+                                "Token finalization mode is active. Use the "
+                                "existing findings and finish without more reading."
+                            ),
+                        }
+                        exploration_blocked = True
+                    elif repeated_exploration:
                         result = {
                             "status": "rejected",
                             "error": (

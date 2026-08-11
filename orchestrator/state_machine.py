@@ -38,19 +38,45 @@ class TaskState(Enum):
 
 VALID_TRANSITIONS: dict[JobState, set[JobState]] = {
     JobState.CREATED: {JobState.CREATED, JobState.GOVERNING, JobState.CANCELLED},
-    JobState.GOVERNING: {JobState.GOVERNED, JobState.FAILED, JobState.CANCELLED},
-    JobState.GOVERNED: {JobState.PLANNING, JobState.FAILED, JobState.CANCELLED},
-    JobState.PLANNING: {JobState.PLAN_CHECK, JobState.FAILED, JobState.CANCELLED},
-    JobState.PLAN_CHECK: {JobState.READY, JobState.PLANNING, JobState.FAILED, JobState.CANCELLED},
-    JobState.READY: {JobState.EXECUTING, JobState.CANCELLED},
-    JobState.EXECUTING: {JobState.TESTING, JobState.REPAIRING, JobState.FAILED, JobState.CANCELLED},
-    JobState.TESTING: {JobState.REVIEWING, JobState.REPAIRING, JobState.FAILED, JobState.CANCELLED},
+    JobState.GOVERNING: {
+        JobState.GOVERNED, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.GOVERNED: {
+        JobState.PLANNING, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.PLANNING: {
+        JobState.PLAN_CHECK, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.PLAN_CHECK: {
+        JobState.READY, JobState.PLANNING, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.READY: {
+        JobState.EXECUTING, JobState.WAITING_USER, JobState.CANCELLED,
+    },
+    JobState.EXECUTING: {
+        JobState.TESTING, JobState.REPAIRING, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.TESTING: {
+        JobState.REVIEWING, JobState.REPAIRING, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
     JobState.REPAIRING: {JobState.EXECUTING, JobState.REPLANNING, JobState.ESCALATING, JobState.FAILED, JobState.CANCELLED},
     JobState.REPLANNING: {JobState.PLANNING, JobState.ESCALATING, JobState.FAILED, JobState.CANCELLED},
     JobState.ESCALATING: {JobState.EXECUTING, JobState.WAITING_USER, JobState.FAILED, JobState.CANCELLED},
     JobState.WAITING_USER: {JobState.EXECUTING, JobState.REPLANNING, JobState.CANCELLED},
-    JobState.REVIEWING: {JobState.DONE, JobState.REWORK, JobState.FAILED, JobState.CANCELLED},
-    JobState.REWORK: {JobState.PLANNING, JobState.EXECUTING, JobState.FAILED, JobState.CANCELLED},
+    JobState.REVIEWING: {
+        JobState.DONE, JobState.REWORK, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
+    JobState.REWORK: {
+        JobState.PLANNING, JobState.EXECUTING, JobState.WAITING_USER,
+        JobState.FAILED, JobState.CANCELLED,
+    },
     JobState.DONE: set(),
     JobState.FAILED: set(),
     JobState.CANCELLED: set(),

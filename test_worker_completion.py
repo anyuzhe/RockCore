@@ -8,6 +8,7 @@ from agents.worker import WorkerAgent
 from orchestrator.agent_config import ProjectAgentConfig
 from orchestrator.cost_engine import BudgetExceededError, JobBudget
 from orchestrator.engine import Engine
+from orchestrator.event_bus import EventBus
 from orchestrator.model_router import ModelRouter
 
 
@@ -472,7 +473,7 @@ def test_partial_changes_at_turn_limit_do_not_auto_pass(tmp_path):
             str(tmp_path),
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "pending_validation"
         assert worker.calls == 3
         assert len(engine.event_bus.get_history("task_continuing")) == 3
 
@@ -515,7 +516,7 @@ class _ThrowingProviderWorker:
         raise RuntimeError("Missing credentials for DeepSeek")
 
 
-def test_functional_failures_stay_on_primary_worker_until_emergency(tmp_path):
+def test_max_turn_failures_preserve_progress_after_primary_retries(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         worker = _RecoveringWorker()
@@ -534,7 +535,8 @@ def test_functional_failures_stay_on_primary_worker_until_emergency(tmp_path):
             str(tmp_path),
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "needs_continuation"
+        assert result["failure_stage"] == "budget_continuation"
         assert len(worker.calls) == 3
         assert all(call.get("provider_override") is None for call in worker.calls)
         assert "attempt 1 failed" in worker.calls[1]["recovery_context"]
@@ -835,7 +837,7 @@ def test_worker_compacts_history_without_splitting_recent_tool_pair():
     assert serialized_size <= 5_000
 
 
-def test_model_router_raises_structured_budget_error_before_provider_call():
+def test_model_router_auto_expands_soft_token_budget_before_provider_call():
     class Provider:
         calls = 0
 
@@ -855,13 +857,13 @@ def test_model_router_raises_structured_budget_error_before_provider_call():
         )
         router.set_job_id("JOB-BUDGET")
 
-        try:
-            await router.chat("worker", "system", [])
-        except BudgetExceededError as error:
-            assert "Input tokens exceeded" in str(error)
-        else:
-            raise AssertionError("expected structured budget error")
-        assert provider.calls == 0
+        result = await router.chat("worker", "system", [])
+
+        assert result["content"] == "unexpected"
+        assert provider.calls == 1
+        assert router.cost_engine.get_budget(
+            "JOB-BUDGET"
+        ).max_input_tokens > 1
 
     asyncio.run(scenario())
 
@@ -889,10 +891,75 @@ def test_budget_error_stops_worker_escalation_immediately(tmp_path):
             {}, worker, str(tmp_path),
         )
 
-        assert result["status"] == "failed"
+        assert result["status"] == "needs_continuation"
+        assert result["failure_stage"] == "budget_continuation"
         assert "budget exceeded" in result["error"].lower()
         assert worker.calls == 1
         assert not engine.event_bus.get_history("task_replanning")
         assert not engine.event_bus.get_history("task_escalating")
+
+    asyncio.run(scenario())
+
+
+def test_existing_artifact_is_validated_before_provider_failure_is_terminal(
+    tmp_path,
+):
+    class Worker:
+        calls = 0
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            return {"status": "failed", "error": "Connection error"}
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        engine._check_file_changes = lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=True
+        )
+        worker = Worker()
+
+        result = await engine._execute_single_task_with_escalation(
+            _task(), SimpleNamespace(job_id="JOB-ARTIFACT", project=None),
+            {}, worker, str(tmp_path),
+        )
+
+        assert result["status"] == "pending_validation"
+        assert result["failure_stage"] == "artifact_recovery"
+        assert engine.event_bus.get_history("task_pending_validation")
+
+    asyncio.run(scenario())
+
+
+def test_worker_uses_real_token_ratio_to_enter_finalization():
+    class Cost:
+        @staticmethod
+        def get_task_usage(_job_id, _task_id):
+            return {"effective_input_tokens": 93}
+
+    class Router:
+        cost_engine = Cost()
+        event_bus = EventBus()
+        _current_job_id = "JOB-TOKEN-STAGES"
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            return {
+                "content": "Concrete review findings.",
+                "tool_calls": [],
+                "usage": {},
+            }
+
+    async def scenario():
+        task = _task("analysis")
+        task._rockcore_input_budget = 100
+        worker = WorkerAgent(
+            Router(), _RecordingBroker(), max_turns=4,
+            max_exploration_turns=3,
+        )
+
+        result = await worker.run(task, project_root=".")
+
+        assert result["status"] == "completed"
+        assert task._rockcore_finalization_mode is True
+        assert Router.event_bus.get_history("task_budget_finalizing")
 
     asyncio.run(scenario())

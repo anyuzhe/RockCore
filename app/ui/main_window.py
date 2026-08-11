@@ -817,6 +817,7 @@ class MainWindow(QMainWindow):
             "job_reviewing": "reviewing",
             "job_done": "done",
             "job_failed": "failed",
+            "job_needs_attention": "needs_attention",
             "job_cancelled": "cancelled",
         }.get(event_type)
         if event_job_id and live_status:
@@ -891,6 +892,46 @@ class MainWindow(QMainWindow):
             self.task_panel.update_stage(
                 "worker", "running",
                 f"{data.get('task_id', '')} 已进入收尾模式，停止重复读取",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_budget_compacting" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"{data.get('task_id', '')} Token 达到 70%，已压缩上下文",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_budget_checkpoint" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"{data.get('task_id', '')} Token 达到 85%，已保存执行进度",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_budget_finalizing" and is_selected:
+            self.task_panel.update_stage(
+                "worker", "running",
+                f"{data.get('task_id', '')} Token 达到 92%，正在停止探索并收尾",
+                repair_round=task_repair_round,
+            )
+        elif event_type in {
+            "budget_auto_expanded", "task_budget_extended",
+        } and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                f"{data.get('task_id', '流程')} 软预算已自动扩容，不增加人民币硬上限",
+                repair_round=task_repair_round,
+            )
+        elif event_type == "task_needs_continuation" and is_selected:
+            self.bridge.task_update.emit(
+                data.get("task_id", ""), "interrupted"
+            )
+            self.task_panel.update_stage(
+                "worker", "interrupted",
+                "已保存文件和进度，等待继续，不计为执行失败",
+                repair_round=task_repair_round,
+            )
+            self.task_panel.append_stage_output(
+                "worker",
+                f"待继续原因：{data.get('reason', '达到用户设置的硬上限')}",
                 repair_round=task_repair_round,
             )
         elif event_type == "task_failed" and is_selected:
@@ -1027,6 +1068,13 @@ class MainWindow(QMainWindow):
             self._capture_diff()
             if is_selected:
                 self._reload_selected_workflow()
+        elif event_type == "job_needs_attention":
+            self.status_label.setText("任务已保存，等待继续")
+            if is_selected:
+                self.task_panel.append_stage_output(
+                    "worker",
+                    f"已保存进度：{data.get('reason', '达到最高自动额度')}",
+                )
         elif event_type == "job_failed":
             self.status_label.setText("任务失败")
             self._capture_diff()
@@ -1047,6 +1095,7 @@ class MainWindow(QMainWindow):
                 estimated_cost=data.get("estimated_cost", 0.0),
                 billable_cost=data.get("billable_cost"),
                 billing_mode=data.get("billing_mode", "api"),
+                budget=data.get("budget"),
             )
         elif event_type == "test_result":
             self.task_panel.log_test_result(
@@ -1229,6 +1278,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _job_usage(job) -> dict:
+        checkpoint = getattr(job, "last_checkpoint", None) or {}
         return {
             "input_tokens": int(getattr(job, "usage_input_tokens", 0) or 0),
             "cached_input_tokens": int(
@@ -1238,6 +1288,7 @@ class MainWindow(QMainWindow):
             "calls": int(getattr(job, "usage_calls", 0) or 0),
             "cost": float(getattr(job, "usage_cost", 0.0) or 0.0),
             "billable_cost": getattr(job, "usage_billable_cost", None),
+            "budget": dict(checkpoint.get("budget") or {}),
         }
 
     def _close_repos(self, repos):

@@ -51,6 +51,18 @@ def load_config() -> dict:
                         2,
                     )
                 config["pricing_currency_version"] = 1
+            if int(config.get("budget_policy_version", 0) or 0) < 2:
+                budget = config.setdefault("budget", {})
+                # Raise only the former built-in defaults; preserve deliberate
+                # custom limits while adding the new completion-first ceiling.
+                if int(budget.get("max_total_tokens", 1_000_000) or 0) == 1_000_000:
+                    budget["max_total_tokens"] = 5_000_000
+                if int(budget.get("max_api_calls", 100) or 0) == 100:
+                    budget["max_api_calls"] = 500
+                budget.setdefault("max_auto_total_tokens", 50_000_000)
+                budget.setdefault("max_auto_api_calls", 5_000)
+                budget.setdefault("cached_input_weight", 0.15)
+                config["budget_policy_version"] = 2
             return config
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return {}
@@ -301,15 +313,42 @@ class SettingsDialog(QDialog):
         budget_layout = QFormLayout(budget_widget)
 
         self.max_tokens = QSpinBox()
-        self.max_tokens.setRange(10000, 10000000)
-        self.max_tokens.setSingleStep(100000)
-        self.max_tokens.setValue(self._config.get("budget", {}).get("max_total_tokens", 1000000))
-        budget_layout.addRow("最大 Token 数：", self.max_tokens)
+        self.max_tokens.setRange(100000, 100000000)
+        self.max_tokens.setSingleStep(500000)
+        self.max_tokens.setValue(self._config.get("budget", {}).get("max_total_tokens", 5000000))
+        budget_layout.addRow("初始软 Token 额度：", self.max_tokens)
+
+        self.max_auto_tokens = QSpinBox()
+        self.max_auto_tokens.setRange(100000, 100000000)
+        self.max_auto_tokens.setSingleStep(1000000)
+        self.max_auto_tokens.setValue(
+            self._config.get("budget", {}).get(
+                "max_auto_total_tokens", 50000000
+            )
+        )
+        budget_layout.addRow("最高自动扩容 Token：", self.max_auto_tokens)
 
         self.max_api_calls = QSpinBox()
-        self.max_api_calls.setRange(10, 1000)
-        self.max_api_calls.setValue(self._config.get("budget", {}).get("max_api_calls", 100))
-        budget_layout.addRow("最大 API 调用：", self.max_api_calls)
+        self.max_api_calls.setRange(10, 10000)
+        self.max_api_calls.setValue(self._config.get("budget", {}).get("max_api_calls", 500))
+        budget_layout.addRow("初始软调用额度：", self.max_api_calls)
+
+        self.max_auto_api_calls = QSpinBox()
+        self.max_auto_api_calls.setRange(10, 50000)
+        self.max_auto_api_calls.setValue(
+            self._config.get("budget", {}).get("max_auto_api_calls", 5000)
+        )
+        budget_layout.addRow("最高自动扩容调用：", self.max_auto_api_calls)
+
+        self.cached_input_weight = QSpinBox()
+        self.cached_input_weight.setRange(0, 100)
+        self.cached_input_weight.setSuffix("%")
+        self.cached_input_weight.setValue(round(
+            float(self._config.get("budget", {}).get(
+                "cached_input_weight", 0.15
+            )) * 100
+        ))
+        budget_layout.addRow("缓存输入计入额度：", self.cached_input_weight)
 
         self.max_cost = QDoubleSpinBox()
         self.max_cost.setRange(0.10, 10000.0)
@@ -321,15 +360,15 @@ class SettingsDialog(QDialog):
                 "max_cost_cny", CostEngine.DEFAULT_MAX_COST_CNY
             )
         )
-        budget_layout.addRow("可计费 API 成本上限：", self.max_cost)
+        budget_layout.addRow("人民币硬上限：", self.max_cost)
 
         budget_note = QLabel(
-            "仅限制通过 API Key 单独计费的调用。ChatGPT 登录下的 Codex "
-            "调用仍统计 Token 和人民币等价估算成本，但不会消耗此人民币预算。\n"
-            "PDF/长文档任务会读取实际页数，按每 8 页一个处理批次动态预留 "
-            "Token、执行轮次和调用次数；预算低估时最多自动扩容两次，避免在"
-            "收尾阶段浪费已经完成的工作。不会自动提高上面的可计费 API "
-            "成本上限。\n"
+            "Token 和调用次数是软额度：系统会在每次调用前预测并原子预留，"
+            "不足时自动扩容到上面的最高值。70% 压缩上下文，85% 保存进度，"
+            "92% 进入收尾；额度耗尽时保留为待继续，不直接判失败。\n"
+            "人民币额度是硬上限，只限制通过 API Key 单独计费的调用，审核和"
+            "修复也不会自动提高它。ChatGPT 登录的 Codex 只显示等价成本。\n"
+            "任务页实时显示已使用、已预留、剩余、最高自动扩容和人民币硬上限。\n"
             "价格单位：人民币/百万 Token。DeepSeek Flash 缓存/输入/输出 "
             "¥0.02/¥1/¥2，Pro ¥0.025/¥3/¥6；Kimi K2.6 "
             "¥1.10/¥6.50/¥27，K2.7 Code ¥1.30/¥6.50/¥27，"
@@ -394,11 +433,19 @@ class SettingsDialog(QDialog):
         }
         self._config["budget"] = {
             "max_total_tokens": self.max_tokens.value(),
+            "max_auto_total_tokens": max(
+                self.max_tokens.value(), self.max_auto_tokens.value()
+            ),
             "max_api_calls": self.max_api_calls.value(),
+            "max_auto_api_calls": max(
+                self.max_api_calls.value(), self.max_auto_api_calls.value()
+            ),
+            "cached_input_weight": self.cached_input_weight.value() / 100.0,
             "max_cost_cny": self.max_cost.value(),
         }
         self._config["workflow_defaults_version"] = 2
         self._config["pricing_currency_version"] = 1
+        self._config["budget_policy_version"] = 2
 
         try:
             save_config(self._config)

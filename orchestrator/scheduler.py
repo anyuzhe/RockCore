@@ -139,7 +139,15 @@ class Scheduler:
                         try:
                             r = await task_runner(tid, tdata, **shared_kwargs)
                             results[tid] = r
-                            self._completed.add(tid)
+                            if (
+                                isinstance(r, dict)
+                                and r.get("status") == "needs_continuation"
+                            ):
+                                # Stop dependent work without mislabelling the
+                                # checkpointed task as completed.
+                                self._failed.add(tid)
+                            else:
+                                self._completed.add(tid)
                         except Exception as e:
                             logger.error(f"Task {tid} failed: {e}")
                             self._failed.add(tid)

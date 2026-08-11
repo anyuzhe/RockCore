@@ -1,7 +1,9 @@
 """Cost Engine — budget control for V6 smart scheduling."""
 
+import asyncio
 import logging
 import math
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -11,11 +13,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class JobBudget:
-    """Budget limits for a single job."""
-    max_total_tokens: int = 1_000_000
-    max_input_tokens: int = 500_000
-    max_output_tokens: int = 100_000
-    max_api_calls: int = 100
+    """Adaptive safety limits plus one user-authorized hard cost ceiling."""
+    max_total_tokens: int = 5_000_000
+    max_input_tokens: int = 5_000_000
+    max_output_tokens: int = 5_000_000
+    max_api_calls: int = 500
+    max_auto_total_tokens: int = 50_000_000
+    max_auto_input_tokens: int = 50_000_000
+    max_auto_output_tokens: int = 50_000_000
+    max_auto_api_calls: int = 5_000
+    cached_input_weight: float = 0.15
     max_cost_cny: float = 3.60
 
 
@@ -106,6 +113,10 @@ class CostEngine:
         self._default_budget = replace(default_budget or JobBudget())
         self._repair_reservations: set[str] = set()
         self._review_reservations: set[str] = set()
+        self._workflow_reservations: set[str] = set()
+        self._protected_capacity: dict[str, dict[str, dict[str, int]]] = {}
+        self._request_reservations: dict[str, dict[str, dict[str, Any]]] = {}
+        self._budget_locks: dict[str, asyncio.Lock] = {}
 
     def set_default_budget(self, budget: JobBudget):
         """Apply the user-visible default to future jobs."""
@@ -115,18 +126,41 @@ class CostEngine:
     def budget_from_config(cls, config: dict | None) -> JobBudget:
         """Build one coherent budget without hidden input/output ceilings."""
         values = config or {}
-        total = max(10_000, int(values.get("max_total_tokens", 1_000_000)))
+        total = max(100_000, int(values.get("max_total_tokens", 5_000_000)))
+        auto_total = max(
+            total,
+            int(values.get("max_auto_total_tokens", 50_000_000)),
+        )
+        input_limit = max(
+            100_000, int(values.get("max_input_tokens", total))
+        )
+        output_limit = max(
+            100_000, int(values.get("max_output_tokens", total))
+        )
         return JobBudget(
             max_total_tokens=total,
             # The UI exposes one token limit. Derive component limits from it
             # so a hidden 500k input ceiling cannot contradict a 1m setting.
-            max_input_tokens=max(
-                10_000, int(values.get("max_input_tokens", total))
+            max_input_tokens=input_limit,
+            max_output_tokens=output_limit,
+            max_api_calls=max(10, int(values.get("max_api_calls", 500))),
+            max_auto_total_tokens=auto_total,
+            max_auto_input_tokens=max(
+                input_limit,
+                int(values.get("max_auto_input_tokens", auto_total)),
             ),
-            max_output_tokens=max(
-                10_000, int(values.get("max_output_tokens", total))
+            max_auto_output_tokens=max(
+                output_limit,
+                int(values.get("max_auto_output_tokens", auto_total)),
             ),
-            max_api_calls=max(1, int(values.get("max_api_calls", 100))),
+            max_auto_api_calls=max(
+                max(10, int(values.get("max_api_calls", 500))),
+                int(values.get("max_auto_api_calls", 5_000)),
+            ),
+            cached_input_weight=min(
+                1.0,
+                max(0.0, float(values.get("cached_input_weight", 0.15))),
+            ),
             max_cost_cny=max(0.10, cls._configured_cost_limit(values)),
         )
 
@@ -153,17 +187,33 @@ class CostEngine:
             key for key in self._review_reservations
             if not key.startswith(f"{job_id}:review:")
         }
+        self._workflow_reservations = {
+            key for key in self._workflow_reservations
+            if not key.startswith(f"{job_id}:workflow:")
+        }
+        self._request_reservations.pop(job_id, None)
+        self._protected_capacity.pop(job_id, None)
 
     def reserve_repair_budget(self, job_id: str, repair_round: int) -> JobBudget:
         """Reserve bounded capacity for one review-repair round."""
         budget = self._ensure_job_budget(job_id)
         reservation_key = f"{job_id}:repair:{repair_round}"
         if reservation_key not in self._repair_reservations:
-            budget.max_total_tokens += 400_000
-            budget.max_input_tokens += 300_000
-            budget.max_output_tokens += 100_000
-            budget.max_api_calls += 40
-            budget.max_cost_cny += 3.60
+            budget.max_total_tokens = min(
+                budget.max_auto_total_tokens,
+                budget.max_total_tokens + 400_000,
+            )
+            budget.max_input_tokens = min(
+                budget.max_auto_input_tokens,
+                budget.max_input_tokens + 300_000,
+            )
+            budget.max_output_tokens = min(
+                budget.max_auto_output_tokens,
+                budget.max_output_tokens + 100_000,
+            )
+            budget.max_api_calls = min(
+                budget.max_auto_api_calls, budget.max_api_calls + 40
+            )
             self._repair_reservations.add(reservation_key)
         return budget
 
@@ -172,13 +222,62 @@ class CostEngine:
         budget = self._ensure_job_budget(job_id)
         reservation_key = f"{job_id}:review:{review_round}"
         if reservation_key not in self._review_reservations:
-            budget.max_total_tokens += 200_000
-            budget.max_input_tokens += 150_000
-            budget.max_output_tokens += 50_000
-            budget.max_api_calls += 15
-            budget.max_cost_cny += 1.80
+            budget.max_total_tokens = min(
+                budget.max_auto_total_tokens,
+                budget.max_total_tokens + 200_000,
+            )
+            budget.max_input_tokens = min(
+                budget.max_auto_input_tokens,
+                budget.max_input_tokens + 150_000,
+            )
+            budget.max_output_tokens = min(
+                budget.max_auto_output_tokens,
+                budget.max_output_tokens + 50_000,
+            )
+            budget.max_api_calls = min(
+                budget.max_auto_api_calls, budget.max_api_calls + 15
+            )
             self._review_reservations.add(reservation_key)
         return budget
+
+    def reserve_workflow_budget(
+        self, job_id: str, task_input_tokens: int,
+        required_api_calls: int = 0, required_output_tokens: int = 0,
+        reservation_name: str = "execution",
+    ) -> JobBudget:
+        """Reserve execution, review, and one repair round before work starts."""
+        budget = self._ensure_job_budget(job_id)
+        key = f"{job_id}:workflow:{reservation_name}"
+        if key in self._workflow_reservations:
+            return budget
+        task_input_tokens = max(0, int(task_input_tokens or 0))
+        required_output_tokens = max(0, int(required_output_tokens or 0))
+        # Governor/Planner plus Reviewer and one repair cycle cannot be starved
+        # by Workers. These are soft safety allocations and never raise RMB.
+        phase_input_reserve = 900_000
+        phase_output_reserve = 250_000
+        phase_call_reserve = 80
+        required_input = task_input_tokens + phase_input_reserve
+        required_output = required_output_tokens + phase_output_reserve
+        required_calls = max(0, int(required_api_calls or 0)) + phase_call_reserve
+        required_total = required_input + required_output + 200_000
+        self._grow_soft_limits(
+            budget,
+            required_input=required_input,
+            required_output=required_output,
+            required_total=required_total,
+            required_calls=required_calls,
+        )
+        self._protected_capacity.setdefault(job_id, {})[key] = {
+            "tokens": phase_input_reserve + phase_output_reserve + 200_000,
+            "calls": phase_call_reserve,
+        }
+        self._workflow_reservations.add(key)
+        return budget
+
+    def release_workflow_reservations(self, job_id: str) -> None:
+        """Release protected review/repair capacity when review begins."""
+        self._protected_capacity.pop(job_id, None)
 
     def reserve_document_budget(self, job_id: str,
                                 task_input_tokens: int,
@@ -195,27 +294,59 @@ class CostEngine:
         # ``task_input_tokens`` is an absolute per-task allowance. Add job
         # headroom for Governor/Planner/Reviewer rather than relying on the
         # generic one-million-token ceiling.
-        budget.max_input_tokens = max(
-            budget.max_input_tokens, task_input_tokens + 350_000
-        )
+        required_input = task_input_tokens + 350_000
         output_headroom = max(
             200_000,
             int(required_output_tokens or 0),
             task_input_tokens // 6,
         )
-        budget.max_output_tokens = max(
-            budget.max_output_tokens, output_headroom
-        )
-        budget.max_total_tokens = max(
-            budget.max_total_tokens,
-            budget.max_input_tokens + budget.max_output_tokens + 100_000,
-        )
         # Leave enough calls for the document batches plus the surrounding
         # workflow. This is a safety ceiling, not a billable-cost allowance.
-        budget.max_api_calls = max(
-            budget.max_api_calls, int(required_api_calls or 0) + 30, 180
+        self._grow_soft_limits(
+            budget,
+            required_input=required_input,
+            required_output=output_headroom,
+            required_total=required_input + output_headroom + 100_000,
+            required_calls=max(int(required_api_calls or 0) + 30, 180),
         )
         return budget
+
+    @staticmethod
+    def _grow_value(current: int, required: int, maximum: int) -> int:
+        if required <= current:
+            return current
+        target = max(required, math.ceil(current * 1.5))
+        return min(maximum, target)
+
+    def _grow_soft_limits(
+        self, budget: JobBudget, *, required_input: int = 0,
+        required_output: int = 0, required_total: int = 0,
+        required_calls: int = 0,
+    ) -> bool:
+        before = (
+            budget.max_input_tokens, budget.max_output_tokens,
+            budget.max_total_tokens, budget.max_api_calls,
+        )
+        budget.max_input_tokens = self._grow_value(
+            budget.max_input_tokens, required_input,
+            budget.max_auto_input_tokens,
+        )
+        budget.max_output_tokens = self._grow_value(
+            budget.max_output_tokens, required_output,
+            budget.max_auto_output_tokens,
+        )
+        budget.max_total_tokens = self._grow_value(
+            budget.max_total_tokens, required_total,
+            budget.max_auto_total_tokens,
+        )
+        budget.max_api_calls = self._grow_value(
+            budget.max_api_calls, required_calls,
+            budget.max_auto_api_calls,
+        )
+        return before != (
+            budget.max_input_tokens, budget.max_output_tokens,
+            budget.max_total_tokens, budget.max_api_calls,
+        )
 
     def _ensure_job_budget(self, job_id: str) -> JobBudget:
         budget = self._budgets.get(job_id)
@@ -233,34 +364,166 @@ class CostEngine:
                            output_tokens: int = 0,
                            provider: str = "", model_name: str = "",
                            task_id: str = "",
-                           billing_mode: str = "api"):
+                           billing_mode: str = "api",
+                           reservation_id: str = ""):
         """Record token usage for a job."""
-        if job_id not in self._usage:
-            self._usage[job_id] = []
-        self._usage[job_id].append(UsageRecord(
-            agent_type=agent_type,
-            input_tokens=input_tokens,
-            cached_input_tokens=min(
-                max(0, int(cached_input_tokens or 0)),
-                max(0, int(input_tokens or 0)),
-            ),
-            output_tokens=output_tokens,
-            provider=provider or "",
-            model_name=model_name or "",
-            billing_mode=billing_mode or "api",
-            task_id=task_id or "",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-        ))
+        lock = self._budget_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            if reservation_id:
+                self._request_reservations.get(job_id, {}).pop(
+                    reservation_id, None
+                )
+            if job_id not in self._usage:
+                self._usage[job_id] = []
+            self._usage[job_id].append(UsageRecord(
+                agent_type=agent_type,
+                input_tokens=input_tokens,
+                cached_input_tokens=min(
+                    max(0, int(cached_input_tokens or 0)),
+                    max(0, int(input_tokens or 0)),
+                ),
+                output_tokens=output_tokens,
+                provider=provider or "",
+                model_name=model_name or "",
+                billing_mode=billing_mode or "api",
+                task_id=task_id or "",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            ))
+            # Actual usage may be larger than the estimate. Grow soft limits
+            # after settlement so the next request is never rejected merely
+            # because the provider reported a larger context than expected.
+            snapshot = self._usage_totals(job_id)
+            self._grow_soft_limits(
+                self._ensure_job_budget(job_id),
+                required_input=snapshot["effective_input"],
+                required_output=snapshot["output"],
+                required_total=snapshot["effective_total"],
+                required_calls=snapshot["calls"],
+            )
         logger.debug(f"Usage: {job_id} {agent_type} +{input_tokens}i/{output_tokens}o")
+
+    async def admit_request(
+        self, job_id: str, *, task_id: str = "",
+        agent_type: str = "",
+        estimated_input_tokens: int = 0, max_output_tokens: int = 0,
+        estimated_billable_cost: float = 0.0,
+    ) -> dict[str, Any]:
+        """Atomically reserve one model request before it reaches a provider."""
+        lock = self._budget_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            budget = self._ensure_job_budget(job_id)
+            totals = self._usage_totals(job_id)
+            pending = list(self._request_reservations.get(job_id, {}).values())
+            reserved_input = sum(int(item["input_tokens"]) for item in pending)
+            reserved_output = sum(int(item["output_tokens"]) for item in pending)
+            reserved_cost = sum(float(item["billable_cost"]) for item in pending)
+            reserved_calls = len(pending)
+            protected = list(
+                self._protected_capacity.get(job_id, {}).values()
+            )
+            protected_tokens = (
+                sum(int(item["tokens"]) for item in protected)
+                if agent_type in {"worker", "emergency_coder"}
+                else 0
+            )
+            protected_calls = (
+                sum(int(item["calls"]) for item in protected)
+                if agent_type in {"worker", "emergency_coder"}
+                else 0
+            )
+            request_input = max(1, int(estimated_input_tokens or 0))
+            request_output = max(1, int(max_output_tokens or 0))
+            request_cost = max(0.0, float(estimated_billable_cost or 0.0))
+            if totals["billable_cost"] + reserved_cost + request_cost > budget.max_cost_cny:
+                raise BudgetExceededError(
+                    "Billable API hard cost limit would be exceeded: "
+                    f"¥{totals['billable_cost'] + reserved_cost + request_cost:.4f}/"
+                    f"¥{budget.max_cost_cny:.4f}"
+                )
+            projected_input = totals["effective_input"] + reserved_input + request_input
+            projected_output = totals["output"] + reserved_output + request_output
+            projected_total = (
+                projected_input + projected_output + protected_tokens
+            )
+            projected_calls = (
+                totals["calls"] + reserved_calls + 1 + protected_calls
+            )
+            expanded = self._grow_soft_limits(
+                budget,
+                required_input=math.ceil(projected_input * 1.10),
+                required_output=math.ceil(projected_output * 1.10),
+                required_total=math.ceil(projected_total * 1.10),
+                required_calls=projected_calls + 10,
+            )
+            if (
+                projected_input > budget.max_input_tokens
+                or projected_output > budget.max_output_tokens
+                or projected_total > budget.max_total_tokens
+                or projected_calls > budget.max_api_calls
+            ):
+                raise BudgetExceededError(
+                    "Soft Token auto-expansion ceiling reached; progress was "
+                    "preserved for continuation"
+                )
+            reservation_id = uuid.uuid4().hex
+            self._request_reservations.setdefault(job_id, {})[reservation_id] = {
+                "task_id": task_id or "",
+                "input_tokens": request_input,
+                "output_tokens": request_output,
+                "billable_cost": request_cost,
+            }
+            return {
+                "reservation_id": reservation_id,
+                "expanded": expanded,
+                "budget": self.get_budget_snapshot(job_id),
+            }
+
+    async def release_request(self, job_id: str, reservation_id: str) -> None:
+        if not reservation_id:
+            return
+        lock = self._budget_locks.setdefault(job_id, asyncio.Lock())
+        async with lock:
+            self._request_reservations.get(job_id, {}).pop(
+                reservation_id, None
+            )
+
+    def _effective_input(self, budget: JobBudget, records: list[UsageRecord]) -> int:
+        ordinary = sum(
+            max(0, record.input_tokens - record.cached_input_tokens)
+            for record in records
+        )
+        cached = sum(record.cached_input_tokens for record in records)
+        return ordinary + math.ceil(cached * budget.cached_input_weight)
+
+    def _usage_totals(self, job_id: str) -> dict[str, Any]:
+        budget = self.get_budget(job_id)
+        usage = self._usage.get(job_id, [])
+        effective_input = self._effective_input(budget, usage)
+        output = sum(record.output_tokens for record in usage)
+        billable_cost = sum(
+            self.estimate_billable_cost(
+                record.agent_type, record.input_tokens, record.output_tokens,
+                record.provider, record.billing_mode,
+                record.cached_input_tokens, record.model_name,
+            )
+            for record in usage
+        )
+        return {
+            "effective_input": effective_input,
+            "output": output,
+            "effective_total": effective_input + output,
+            "calls": len(usage),
+            "billable_cost": billable_cost,
+        }
 
     async def check_budget(self, job_id: str) -> tuple[bool, str]:
         """Check if job is within budget. Returns (ok, reason)."""
         budget = self.get_budget(job_id)
         usage = self._usage.get(job_id, [])
-
-        total_input = sum(r.input_tokens for r in usage)
-        total_output = sum(r.output_tokens for r in usage)
-        total_api = len(usage)
+        totals = self._usage_totals(job_id)
+        total_input = totals["effective_input"]
+        total_output = totals["output"]
+        total_api = totals["calls"]
 
         # RMB limits apply only to calls that can be billed through a
         # provider API. ChatGPT-authenticated ``codex exec`` calls still count
@@ -280,16 +543,13 @@ class CostEngine:
         )
 
         total_tokens = total_input + total_output
-        if total_tokens > budget.max_total_tokens:
-            return False, (
-                f"Total tokens exceeded: {total_tokens}/{budget.max_total_tokens}"
-            )
-        if total_input > budget.max_input_tokens:
-            return False, f"Input tokens exceeded: {total_input}/{budget.max_input_tokens}"
-        if total_output > budget.max_output_tokens:
-            return False, f"Output tokens exceeded: {total_output}/{budget.max_output_tokens}"
-        if total_api > budget.max_api_calls:
-            return False, f"API calls exceeded: {total_api}/{budget.max_api_calls}"
+        self._grow_soft_limits(
+            budget,
+            required_input=total_input,
+            required_output=total_output,
+            required_total=total_tokens,
+            required_calls=total_api,
+        )
         if billable_cost > budget.max_cost_cny:
             return False, (
                 "Billable API cost exceeded: "
@@ -306,14 +566,9 @@ class CostEngine:
         """Bound one task so it cannot consume the entire job budget."""
         if not task_id or max_input_tokens <= 0:
             return True, "No task budget"
-        used = sum(
-            record.input_tokens
-            for record in self._usage.get(job_id, [])
-            if record.task_id == task_id
-        )
-        if used > max_input_tokens:
-            return False, f"Task input tokens exceeded: {used}/{max_input_tokens}"
-        return True, f"Task OK: {used}/{max_input_tokens}"
+        used = self.get_task_usage(job_id, task_id)["effective_input_tokens"]
+        # Per-task Token limits are progress thresholds, not terminal gates.
+        return True, f"Task soft budget: {used}/{max_input_tokens}"
 
     def get_task_usage(self, job_id: str, task_id: str) -> dict[str, int]:
         """Return task-local usage for continuation and finalization forecasts."""
@@ -321,16 +576,59 @@ class CostEngine:
             record for record in self._usage.get(job_id, [])
             if record.task_id == task_id
         ]
+        budget = self.get_budget(job_id)
         input_tokens = sum(record.input_tokens for record in records)
+        cached_input_tokens = sum(record.cached_input_tokens for record in records)
+        effective_input_tokens = self._effective_input(budget, records)
         output_tokens = sum(record.output_tokens for record in records)
         calls = len(records)
         return {
             "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "effective_input_tokens": effective_input_tokens,
             "output_tokens": output_tokens,
             "calls": calls,
             "average_input_tokens": (
-                math.ceil(input_tokens / calls) if calls else 0
+                math.ceil(effective_input_tokens / calls) if calls else 0
             ),
+        }
+
+    def get_budget_snapshot(self, job_id: str) -> dict[str, Any]:
+        """Return live used/reserved/remaining values for UI and checkpoints."""
+        budget = self.get_budget(job_id)
+        totals = self._usage_totals(job_id)
+        pending = list(self._request_reservations.get(job_id, {}).values())
+        inflight_tokens = sum(
+            int(item["input_tokens"]) + int(item["output_tokens"])
+            for item in pending
+        )
+        protected = list(self._protected_capacity.get(job_id, {}).values())
+        protected_tokens = sum(int(item["tokens"]) for item in protected)
+        protected_calls = sum(int(item["calls"]) for item in protected)
+        reserved_tokens = inflight_tokens + protected_tokens
+        reserved_calls = len(pending) + protected_calls
+        used = totals["effective_total"]
+        return {
+            "used_tokens": used,
+            "used_effective_input_tokens": totals["effective_input"],
+            "used_output_tokens": totals["output"],
+            "reserved_tokens": reserved_tokens,
+            "inflight_tokens": inflight_tokens,
+            "protected_phase_tokens": protected_tokens,
+            "remaining_tokens": max(0, budget.max_total_tokens - used - reserved_tokens),
+            "soft_token_limit": budget.max_total_tokens,
+            "max_auto_tokens": budget.max_auto_total_tokens,
+            "used_calls": totals["calls"],
+            "reserved_calls": reserved_calls,
+            "protected_phase_calls": protected_calls,
+            "remaining_calls": max(
+                0, budget.max_api_calls - totals["calls"] - reserved_calls
+            ),
+            "soft_call_limit": budget.max_api_calls,
+            "max_auto_calls": budget.max_auto_api_calls,
+            "billable_cost": round(totals["billable_cost"], 6),
+            "hard_cost_limit_cny": budget.max_cost_cny,
+            "cached_input_weight": budget.cached_input_weight,
         }
 
     def get_usage_summary(self, job_id: str) -> dict:
@@ -377,6 +675,9 @@ class CostEngine:
             "by_agent": by_agent,
             "total_input": sum(r.input_tokens for r in usage),
             "total_cached_input": sum(r.cached_input_tokens for r in usage),
+            "effective_input": self._effective_input(
+                self.get_budget(job_id), usage
+            ),
             "total_output": sum(r.output_tokens for r in usage),
             "total_calls": len(usage),
             # Keep total_cost as a backwards-compatible alias for the
@@ -385,6 +686,7 @@ class CostEngine:
             "equivalent_cost": round(equivalent_cost, 4),
             "billable_cost": round(billable_cost, 4),
             "currency": self.CURRENCY,
+            "budget": self.get_budget_snapshot(job_id),
         }
 
     @classmethod

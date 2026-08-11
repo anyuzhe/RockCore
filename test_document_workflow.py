@@ -394,6 +394,60 @@ def test_execution_marks_budget_exhausted_artifact_done_after_validation(tmp_pat
     asyncio.run(scenario())
 
 
+def test_budget_ceiling_without_artifact_is_saved_for_continuation(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    class Worker:
+        max_turns = 24
+        max_exploration_turns = 8
+
+        def scoped_to(self, root):
+            self.root = Path(root)
+            return self
+
+        async def run(self, *_args, **_kwargs):
+            return {
+                "status": "failed",
+                "error": (
+                    "RockCore job budget exceeded: Billable API hard cost "
+                    "limit would be exceeded"
+                ),
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Continue", str(project_root))
+            job = repos["job"].create(
+                "JOB-SOFT-CONTINUE", project.id, "实现复杂代码功能"
+            )
+            task = repos["task"].create(
+                "T001", job.id, "实现功能", task_type="coding",
+                allowed_paths=["output.py"],
+            )
+            engine.register_agent("worker", Worker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            result = await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(job)
+            repos["_session"].refresh(task)
+            assert result["status"] == "needs_attention"
+            assert job.status == "needs_attention"
+            assert task.status == "interrupted"
+            assert engine.event_bus.get_history("task_needs_continuation")
+            assert not engine.event_bus.get_history("task_failed")
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_untracked_pdf_input_is_not_committed_or_merged_as_output(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

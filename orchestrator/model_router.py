@@ -4,6 +4,8 @@ import asyncio
 import inspect
 import json
 import logging
+import math
+import re
 import time
 from typing import Any
 
@@ -50,6 +52,115 @@ class ModelRouter:
 
     def set_job_id(self, job_id: str):
         self._current_job_id = job_id
+
+    @staticmethod
+    def _estimate_text_tokens(value: Any) -> int:
+        """Conservatively estimate mixed Chinese/ASCII prompt tokens."""
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        cjk = len(re.findall(r"[\u3400-\u9fff]", value))
+        return cjk + math.ceil(max(0, len(value) - cjk) / 3.5)
+
+    @classmethod
+    def _estimate_request_tokens(
+        cls, system_prompt: str, messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> int:
+        payload = [system_prompt, messages]
+        if tools:
+            payload.append(tools)
+        return max(256, cls._estimate_text_tokens(payload) + 64)
+
+    async def _reserve_model_request(
+        self, *, job_id: str, task, task_id: str, agent_type: str,
+        provider: str, model_name: str, billing_mode: str,
+        system_prompt: str, messages: list[dict],
+        tools: list[dict] | None, kwargs: dict,
+    ) -> dict:
+        """Forecast, auto-expand, and atomically reserve a provider call."""
+        estimated_input = self._estimate_request_tokens(
+            system_prompt, messages, tools
+        )
+        task_usage = self.cost_engine.get_task_usage(job_id, task_id)
+        if task_id:
+            estimated_input = max(
+                estimated_input,
+                int(task_usage.get("average_input_tokens", 0) or 0),
+            )
+        max_output = max(
+            256,
+            int(
+                kwargs.get("max_tokens")
+                or kwargs.get("max_output_tokens")
+                or 4_096
+            ),
+        )
+        if task is not None:
+            current = max(
+                0, int(getattr(task, "_rockcore_input_budget", 0) or 0)
+            )
+            projected = int(
+                task_usage.get("effective_input_tokens", 0) or 0
+            ) + estimated_input
+            if current and projected >= math.floor(current * 0.85):
+                maximum = max(
+                    current,
+                    int(getattr(
+                        task, "_rockcore_max_auto_input_budget", 20_000_000
+                    ) or 20_000_000),
+                )
+                enlarged = min(
+                    maximum,
+                    max(math.ceil(current * 1.5), math.ceil(projected * 1.25)),
+                )
+                if enlarged > current:
+                    task._rockcore_input_budget = enlarged
+                    if self.event_bus:
+                        await self.event_bus.publish(
+                            "task_budget_extended",
+                            job_id=job_id,
+                            task_id=task_id,
+                            previous_task_input_budget=current,
+                            task_input_budget=enlarged,
+                            reason="下一次模型调用预测将超过任务软额度的 85%",
+                        )
+        estimated_cost = self.cost_engine.estimate_billable_cost(
+            agent_type,
+            estimated_input,
+            max_output,
+            provider=provider,
+            billing_mode=billing_mode,
+            cached_input_tokens=0,
+            model_name=model_name,
+        )
+        try:
+            admission = await self.cost_engine.admit_request(
+                job_id,
+                task_id=task_id,
+                agent_type=agent_type,
+                estimated_input_tokens=estimated_input,
+                max_output_tokens=max_output,
+                estimated_billable_cost=estimated_cost,
+            )
+        except BudgetExceededError as error:
+            if self.event_bus:
+                await self.event_bus.publish(
+                    "budget_continuation_required",
+                    job_id=job_id,
+                    task_id=task_id,
+                    error=str(error),
+                    budget=self.cost_engine.get_budget_snapshot(job_id),
+                )
+            raise
+        if admission.get("expanded") and self.event_bus:
+            await self.event_bus.publish(
+                "budget_auto_expanded",
+                job_id=job_id,
+                task_id=task_id,
+                reason="下一次调用的预测用量超过当前软额度",
+                budget=admission.get("budget", {}),
+            )
+        return admission
 
     def set_provider_map(self, provider_map: dict[str, str] | None):
         """Replace the global role-to-provider mapping at runtime."""
@@ -240,19 +351,6 @@ class ModelRouter:
             kwargs.pop("allow_provider_fallback", True)
         )
 
-        # Check budget
-        ok, msg = await self.cost_engine.check_budget(job_id)
-        if not ok:
-            logger.warning(f"Budget exceeded for {job_id}: {msg}")
-            raise BudgetExceededError(msg)
-        ok, msg = await self.cost_engine.check_task_budget(
-            job_id,
-            task_id,
-            int(getattr(task, "_rockcore_input_budget", 0) or 0),
-        )
-        if not ok:
-            raise BudgetExceededError(msg)
-
         # Route to best provider
         route = kwargs.pop("provider_override", None) or self.get_route(agent_type, task)
         if allow_provider_fallback and self._circuit_is_open(route):
@@ -291,6 +389,21 @@ class ModelRouter:
             )
         )
 
+        admission = await self._reserve_model_request(
+            job_id=job_id,
+            task=task,
+            task_id=task_id,
+            agent_type=agent_type,
+            provider=route,
+            model_name=model_name,
+            billing_mode=billing_mode,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=None,
+            kwargs=kwargs,
+        )
+        reservation_id = str(admission.get("reservation_id") or "")
+
         # Snapshot messages for chat log before the call
         chat_prompt = system_prompt
         chat_messages = list(messages) if messages else []
@@ -318,6 +431,7 @@ class ModelRouter:
                 output_tokens=output_tokens,
                 provider=route, model_name=model_name,
                 task_id=task_id, billing_mode=billing_mode,
+                reservation_id=reservation_id,
             )
             estimated_cost = self.cost_engine.estimate_cost(
                 agent_type, input_tokens, output_tokens, provider=route,
@@ -352,6 +466,7 @@ class ModelRouter:
                     estimated_cost=estimated_cost,
                     billable_cost=billable_cost,
                     billing_mode=billing_mode,
+                    budget=self.cost_engine.get_budget_snapshot(job_id),
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=None,
@@ -359,6 +474,7 @@ class ModelRouter:
 
             return response
         except Exception as e:
+            await self.cost_engine.release_request(job_id, reservation_id)
             normalized_error = e
             if isinstance(e, asyncio.TimeoutError):
                 normalized_error = TimeoutError(
@@ -385,6 +501,7 @@ class ModelRouter:
                     estimated_cost=0.0,
                     billable_cost=0.0,
                     billing_mode=billing_mode,
+                    budget=self.cost_engine.get_budget_snapshot(job_id),
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),
@@ -429,18 +546,6 @@ class ModelRouter:
             kwargs.pop("allow_provider_fallback", True)
         )
 
-        ok, msg = await self.cost_engine.check_budget(job_id)
-        if not ok:
-            logger.warning(f"Budget exceeded for {job_id}: {msg}")
-            raise BudgetExceededError(msg)
-        ok, msg = await self.cost_engine.check_task_budget(
-            job_id,
-            task_id,
-            int(getattr(task, "_rockcore_input_budget", 0) or 0),
-        )
-        if not ok:
-            raise BudgetExceededError(msg)
-
         route = kwargs.pop("provider_override", None) or self.get_route(agent_type, task)
         if allow_provider_fallback and self._circuit_is_open(route):
             fallback = self._fallback_provider(route, needs_tools=True)
@@ -478,6 +583,21 @@ class ModelRouter:
             )
         )
 
+        admission = await self._reserve_model_request(
+            job_id=job_id,
+            task=task,
+            task_id=task_id,
+            agent_type=agent_type,
+            provider=route,
+            model_name=model_name,
+            billing_mode=billing_mode,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            kwargs=kwargs,
+        )
+        reservation_id = str(admission.get("reservation_id") or "")
+
         chat_prompt = system_prompt
         chat_messages = list(messages) if messages else []
 
@@ -503,6 +623,7 @@ class ModelRouter:
                 output_tokens=output_tokens,
                 provider=route, model_name=model_name,
                 task_id=task_id, billing_mode=billing_mode,
+                reservation_id=reservation_id,
             )
             estimated_cost = self.cost_engine.estimate_cost(
                 agent_type, input_tokens, output_tokens, provider=route,
@@ -536,6 +657,7 @@ class ModelRouter:
                     estimated_cost=estimated_cost,
                     billable_cost=billable_cost,
                     billing_mode=billing_mode,
+                    budget=self.cost_engine.get_budget_snapshot(job_id),
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=None,
@@ -543,6 +665,7 @@ class ModelRouter:
 
             return response
         except Exception as e:
+            await self.cost_engine.release_request(job_id, reservation_id)
             normalized_error = e
             if isinstance(e, asyncio.TimeoutError):
                 normalized_error = TimeoutError(
@@ -569,6 +692,7 @@ class ModelRouter:
                     estimated_cost=0.0,
                     billable_cost=0.0,
                     billing_mode=billing_mode,
+                    budget=self.cost_engine.get_budget_snapshot(job_id),
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),

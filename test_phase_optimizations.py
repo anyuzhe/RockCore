@@ -23,6 +23,9 @@ def test_visible_total_token_budget_has_no_hidden_component_cap():
     assert budget.max_input_tokens == 1_000_000
     assert budget.max_output_tokens == 1_000_000
     assert budget.max_api_calls == 250
+    assert budget.max_auto_total_tokens == 50_000_000
+    assert budget.max_auto_api_calls == 5_000
+    assert budget.cached_input_weight == 0.15
 
 
 def test_runtime_settings_update_scheduler_and_default_budget(tmp_path):
@@ -43,6 +46,25 @@ def test_runtime_settings_update_scheduler_and_default_budget(tmp_path):
     assert budget.max_input_tokens == 800_000
     assert budget.max_api_calls == 77
     assert engine.model_router._provider_map["worker"] == "kimi"
+
+
+def test_code_task_budget_scales_with_turns_and_keeps_finish_reserve(tmp_path):
+    task = SimpleNamespace(
+        task_type="coding", allowed_paths=[], dependencies=[],
+        description="实现多个行为并完成测试；更新界面；处理错误；验证结果。",
+    )
+
+    budget = Engine._estimate_task_budget(
+        task, str(tmp_path), base_turns=36,
+        base_exploration=8, mode="auto",
+    )
+
+    assert budget["input_budget"] > 320_000
+    assert budget["finalization_reserve"] >= 180_000
+    assert budget["input_budget"] == (
+        budget["processing_input_budget"] + budget["finalization_reserve"]
+    )
+    assert budget["max_auto_input_budget"] == 50_000_000
 
 
 def test_simple_plan_collapses_analysis_and_overlapping_coding():

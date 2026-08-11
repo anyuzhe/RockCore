@@ -165,6 +165,19 @@ class MergeManager:
             "path already exists",
         ))
 
+    def preserve_worktree(self, task_id: str) -> dict:
+        """Keep files on disk but release the active slot for a continuation."""
+        info = self._active_worktrees.pop(task_id, None)
+        if not info:
+            return {"status": "not_found", "task_id": task_id}
+        info = dict(info)
+        info["status"] = "preserved"
+        logger.info(
+            "Worktree preserved for continuation: %s at %s",
+            task_id, info.get("path", ""),
+        )
+        return info
+
     async def commit_and_merge(self, task_id: str, commit_message: str) -> dict:
         """Commit changes in worktree and merge back to main."""
         async with self._merge_lock:

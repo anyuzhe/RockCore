@@ -419,6 +419,7 @@ class TaskPanel(QWidget):
             "calls": 0,
             "cost": 0.0,
             "billable_cost": 0.0,
+            "budget": {},
         }
 
     @staticmethod
@@ -432,7 +433,8 @@ class TaskPanel(QWidget):
         calls = int(usage.get("calls", 0) or 0)
         cost = float(usage.get("cost", 0.0) or 0.0)
         raw_billable_cost = usage.get("billable_cost")
-        if not calls and not input_tokens and not output_tokens:
+        budget = usage.get("budget") or {}
+        if not calls and not input_tokens and not output_tokens and not budget:
             return ""
         if raw_billable_cost is None:
             cost_text = (
@@ -447,11 +449,25 @@ class TaskPanel(QWidget):
             f"（其中缓存 {cached_input_tokens:,}）"
             if cached_input_tokens else ""
         )
-        return (
+        usage_text = (
             f"{prefix}：输入 {input_tokens:,}{cache_text} · "
             f"输出 {output_tokens:,} tokens"
             f" · {cost_text} · {calls} 次调用"
         )
+        if not budget:
+            return usage_text
+        used = int(budget.get("used_tokens", 0) or 0)
+        reserved = int(budget.get("reserved_tokens", 0) or 0)
+        remaining = int(budget.get("remaining_tokens", 0) or 0)
+        auto_limit = int(budget.get("max_auto_tokens", 0) or 0)
+        hard_cost = float(budget.get("hard_cost_limit_cny", 0.0) or 0.0)
+        live_billable = float(budget.get("billable_cost", 0.0) or 0.0)
+        budget_text = (
+            f"预算：有效已用 {used:,} · 已预留 {reserved:,} · "
+            f"剩余 {remaining:,} · 最高自动扩容 {auto_limit:,} tokens · "
+            f"人民币硬上限 ¥{live_billable:.4f}/¥{hard_cost:.2f}"
+        )
+        return usage_text + "\n" + budget_text
 
     def _set_usage(self, usage: dict | None):
         self._usage = {**self._empty_usage(), **(usage or {})}
@@ -853,7 +869,8 @@ class TaskPanel(QWidget):
                          cached_input_tokens: int = 0,
                          task_id: str = "", estimated_cost: float = 0.0,
                          billable_cost: float | None = None,
-                         billing_mode: str = "api"):
+                         billing_mode: str = "api",
+                         budget: dict | None = None):
         equivalent_cost = max(0.0, float(estimated_cost or 0.0))
         api_cost = (
             0.0
@@ -873,6 +890,8 @@ class TaskPanel(QWidget):
         self._usage["cost"] += equivalent_cost
         if self._usage.get("billable_cost") is not None:
             self._usage["billable_cost"] += api_cost
+        if isinstance(budget, dict):
+            self._usage["budget"] = dict(budget)
         self.usage_label.setText(self._format_usage(self._usage, "总用量"))
         if task_id:
             task = next((item for item in self._tasks if item.get("task_id") == task_id), None)
