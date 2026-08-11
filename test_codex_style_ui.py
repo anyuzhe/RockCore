@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
 
+from app.ui import main_window as main_window_module
 from app.ui.main_window import MainWindow
 from app.ui.project_config_dialog import ProjectConfigDialog
 from app.ui.project_panel import ProjectPanel
@@ -62,6 +63,53 @@ def test_running_request_can_queue_a_followup():
     assert window._queued_source_job_id == "JOB-1"
     assert not window.queue_bar.isHidden()
     assert window.input_text.toPlainText() == ""
+    window.close()
+
+
+def test_running_other_project_does_not_block_new_project(monkeypatch, tmp_path):
+    _app()
+    window = MainWindow(object())
+    first = {"name": "First", "root_path": str(tmp_path / "first")}
+    second = {"name": "Second", "root_path": str(tmp_path / "second")}
+    first_key = window._project_key(first)
+    second_key = window._project_key(second)
+    window._running_jobs[first_key] = "JOB-FIRST"
+    window._current_project = second
+    window._sync_project_runtime_state()
+    scheduled = []
+
+    def capture(coroutine):
+        scheduled.append(coroutine)
+        coroutine.close()
+
+    monkeypatch.setattr(main_window_module.asyncio, "ensure_future", capture)
+    window.input_text.setPlainText("第二个项目的独立需求")
+    window._on_submit_request()
+
+    assert scheduled
+    assert second_key in window._starting_projects
+    assert second_key not in window._queued_by_project
+    assert window._running_jobs[first_key] == "JOB-FIRST"
+    window.close()
+
+
+def test_background_job_events_are_buffered_until_job_is_selected():
+    _app()
+    window = MainWindow(None)
+    window._selected_job_id = "JOB-FIRST"
+
+    window._on_event("phase_summary", {
+        "job_id": "JOB-SECOND",
+        "phase": "worker",
+        "agent_type": "worker",
+        "status": "running",
+        "summary": "第二个项目正在执行",
+    })
+
+    assert len(window._job_event_buffers["JOB-SECOND"]) == 1
+    window._selected_job_id = "JOB-SECOND"
+    window._replay_buffered_job_events("JOB-SECOND")
+    assert "JOB-SECOND" not in window._job_event_buffers
     window.close()
 
 

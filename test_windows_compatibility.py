@@ -287,7 +287,8 @@ def test_inaccessible_store_path_is_not_assumed_to_be_executable(tmp_path):
     )
 
     binary = _find_codex_binary(
-        {"PATH": ""}, configured_binary=str(executable)
+        {"PATH": "", "USERPROFILE": str(tmp_path / "User")},
+        configured_binary=str(executable),
     )
 
     assert binary == ""

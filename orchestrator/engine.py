@@ -7,6 +7,8 @@ import json
 import logging
 import math
 import re
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +39,6 @@ LONG_DOCUMENT_KEYWORDS = (
     "整本", "全书", "书籍", "长文档", "电子书", "整份文档",
     "entire book", "full book", "long document", "ebook",
 )
-
 from .event_bus import EventBus
 from .state_machine import StateMachine, JobState
 from .scheduler import Scheduler
@@ -58,6 +59,22 @@ from git.repository import Repository
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class JobRuntime:
+    """Mutable execution services owned by exactly one running Job."""
+
+    job_id: str
+    project_root: str
+    scheduler: Scheduler
+    merge_manager: MergeManager
+    test_manager: TestManager
+    tool_broker: Any = None
+    skill_manager: Any = None
+    context_manager: Any = None
+    agents: dict[str, Any] = field(default_factory=dict)
+    closed: bool = False
+
+
 class Engine:
     """Central orchestrator that coordinates all agents and tools."""
 
@@ -73,7 +90,7 @@ class Engine:
             "task_budget_checkpoint", self._record_budget_checkpoint
         )
         self.state_machine = StateMachine()
-        self.scheduler = Scheduler(
+        self._default_scheduler = Scheduler(
             max_concurrent=max(1, int(max_concurrent_workers or 1))
         )
         self.policy_engine = PolicyEngine()
@@ -83,13 +100,85 @@ class Engine:
         self._current_job_id: str | None = None
         self._agents: dict[str, Any] = {}
         self._cancelled_job_ids: set[str] = set()
-        self.tool_broker: Any = None
-        self.skill_manager: Any = None
-        self.test_manager = TestManager()
-        self.merge_manager: MergeManager | None = None
-
-        # Wire state machine to event bus
+        self._default_tool_broker: Any = None
+        self._default_skill_manager: Any = None
+        self._default_test_manager = TestManager()
+        self._default_merge_manager: MergeManager | None = None
+        self._runtime_context: ContextVar[JobRuntime | None] = ContextVar(
+            "rockcore_job_runtime", default=None
+        )
+        self._job_runtimes: dict[str, JobRuntime] = {}
+        self._project_job_locks: dict[str, asyncio.Lock] = {}
+        # Wire state machine to event bus.
         self.state_machine.add_listener(self._on_state_change_sync)
+
+    def _active_runtime(self) -> JobRuntime | None:
+        return self._runtime_context.get()
+
+    @property
+    def scheduler(self) -> Scheduler:
+        runtime = self._active_runtime()
+        return runtime.scheduler if runtime else self._default_scheduler
+
+    @scheduler.setter
+    def scheduler(self, value: Scheduler):
+        runtime = self._active_runtime()
+        if runtime:
+            runtime.scheduler = value
+        else:
+            self._default_scheduler = value
+
+    @property
+    def merge_manager(self) -> MergeManager | None:
+        runtime = self._active_runtime()
+        return runtime.merge_manager if runtime else self._default_merge_manager
+
+    @merge_manager.setter
+    def merge_manager(self, value: MergeManager | None):
+        runtime = self._active_runtime()
+        if runtime:
+            runtime.merge_manager = value
+        else:
+            self._default_merge_manager = value
+
+    @property
+    def test_manager(self) -> TestManager:
+        runtime = self._active_runtime()
+        return runtime.test_manager if runtime else self._default_test_manager
+
+    @test_manager.setter
+    def test_manager(self, value: TestManager):
+        runtime = self._active_runtime()
+        if runtime:
+            runtime.test_manager = value
+        else:
+            self._default_test_manager = value
+
+    @property
+    def tool_broker(self):
+        runtime = self._active_runtime()
+        return runtime.tool_broker if runtime else self._default_tool_broker
+
+    @tool_broker.setter
+    def tool_broker(self, value):
+        runtime = self._active_runtime()
+        if runtime:
+            runtime.tool_broker = value
+        else:
+            self._default_tool_broker = value
+
+    @property
+    def skill_manager(self):
+        runtime = self._active_runtime()
+        return runtime.skill_manager if runtime else self._default_skill_manager
+
+    @skill_manager.setter
+    def skill_manager(self, value):
+        runtime = self._active_runtime()
+        if runtime:
+            runtime.skill_manager = value
+        else:
+            self._default_skill_manager = value
 
     def apply_runtime_config(self, config: dict | None):
         """Apply settings that are safe to change without rebuilding agents."""
@@ -226,7 +315,106 @@ class Engine:
             self._close_repos(repos)
 
     def get_agent(self, agent_type: str):
+        runtime = self._active_runtime()
+        if runtime:
+            return runtime.agents.get(agent_type)
         return self._agents.get(agent_type)
+
+    async def _create_job_runtime(self, job_id: str,
+                                  project_root: str) -> JobRuntime:
+        """Build isolated mutable services for one concurrently running Job."""
+        root = str(Path(project_root).resolve())
+        context_manager = None
+        base_context = next((
+            getattr(agent, "context_manager", None)
+            for agent in self._agents.values()
+            if getattr(agent, "context_manager", None) is not None
+        ), None)
+        if base_context is not None:
+            try:
+                from memory.context_manager import ContextManager
+                if isinstance(base_context, ContextManager):
+                    context_manager = ContextManager(root)
+                    await context_manager.initialize()
+                else:
+                    context_manager = copy.copy(base_context)
+            except Exception as error:
+                logger.warning(
+                    "Could not isolate context manager for %s: %s",
+                    job_id, error,
+                )
+
+        skill_manager = None
+        base_skills = self._default_skill_manager
+        if base_skills is not None:
+            try:
+                from skills.manager import SkillManager
+                if isinstance(base_skills, SkillManager):
+                    skill_manager = SkillManager(
+                        root,
+                        config=copy.deepcopy(base_skills.config),
+                        builtin_root=base_skills.builtin_root,
+                        plugin_config=copy.deepcopy(base_skills.plugin_config),
+                    )
+                else:
+                    skill_manager = copy.copy(base_skills)
+            except Exception as error:
+                logger.warning(
+                    "Could not isolate skill manager for %s: %s", job_id, error
+                )
+
+        tool_broker = None
+        base_broker = self._default_tool_broker
+        if base_broker is not None:
+            try:
+                from tools.tool_broker import ToolBroker
+                if isinstance(base_broker, ToolBroker):
+                    tool_broker = ToolBroker(root, base_broker.policy)
+                else:
+                    tool_broker = copy.copy(base_broker)
+                    if hasattr(tool_broker, "set_project_root"):
+                        tool_broker.set_project_root(root)
+            except Exception as error:
+                logger.warning(
+                    "Could not isolate tool broker for %s: %s", job_id, error
+                )
+
+        runtime = JobRuntime(
+            job_id=job_id,
+            project_root=root,
+            scheduler=Scheduler(self._default_scheduler.max_concurrent),
+            merge_manager=MergeManager(root),
+            test_manager=TestManager(),
+            tool_broker=tool_broker,
+            skill_manager=skill_manager,
+            context_manager=context_manager,
+        )
+        for agent_type, template in self._agents.items():
+            agent = copy.copy(template)
+            if hasattr(agent, "model_router"):
+                agent.model_router = self.model_router
+            if hasattr(agent, "context_manager"):
+                agent.context_manager = context_manager
+            if hasattr(agent, "skill_manager"):
+                agent.skill_manager = skill_manager
+            if hasattr(agent, "tool_broker") and tool_broker is not None:
+                agent.tool_broker = tool_broker
+            runtime.agents[agent_type] = agent
+        return runtime
+
+    async def _close_job_runtime(self, runtime: JobRuntime):
+        if runtime.closed:
+            return
+        runtime.closed = True
+        broker = runtime.tool_broker
+        if broker and hasattr(broker, "close"):
+            try:
+                await broker.close()
+            except Exception as error:
+                logger.warning(
+                    "Could not close runtime tools for %s: %s",
+                    runtime.job_id, error,
+                )
 
     async def _on_state_change(self, job_id: str, old_state: JobState, new_state: JobState):
         await self.event_bus.publish(
@@ -269,9 +457,16 @@ class Engine:
 
     async def stop(self):
         self._running = False
-        self.scheduler.stop()
-        if self.tool_broker and hasattr(self.tool_broker, "close"):
-            await self.tool_broker.close()
+        self._default_scheduler.stop()
+        for runtime in list(self._job_runtimes.values()):
+            runtime.scheduler.stop()
+        for runtime in list(self._job_runtimes.values()):
+            await self._close_job_runtime(runtime)
+        if (
+            self._default_tool_broker
+            and hasattr(self._default_tool_broker, "close")
+        ):
+            await self._default_tool_broker.close()
         logger.info("Engine stopped")
 
     async def _skip_phase(self, job, repos, phase: str,
@@ -629,6 +824,27 @@ class Engine:
         return merged
 
     async def run_job(self, job_id: str, project_root: str):
+        """Run one Job with isolated services; serialize only the same project."""
+        project_key = str(Path(project_root).resolve())
+        lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
+        async with lock:
+            runtime = await self._create_job_runtime(job_id, project_key)
+            token = self._runtime_context.set(runtime)
+            event_token = (
+                self.event_bus.bind_job(job_id)
+                if hasattr(self.event_bus, "bind_job") else None
+            )
+            self._job_runtimes[job_id] = runtime
+            try:
+                return await self._run_job_pipeline(job_id, project_key)
+            finally:
+                self._job_runtimes.pop(job_id, None)
+                if event_token is not None:
+                    self.event_bus.reset_job(event_token)
+                self._runtime_context.reset(token)
+                await self._close_job_runtime(runtime)
+
+    async def _run_job_pipeline(self, job_id: str, project_root: str):
         """Run the full job lifecycle: Governor → Planner → Worker → Test → Reviewer."""
         logger.info(f"Running job: {job_id}")
 
@@ -4402,11 +4618,15 @@ Prefer these existing files when relevant:
         )
 
     async def pause_job(self, job_id: str):
-        self.scheduler.pause()
+        runtime = self._job_runtimes.get(job_id)
+        scheduler = runtime.scheduler if runtime else self._default_scheduler
+        scheduler.pause()
         await self.event_bus.publish("job_paused", job_id=job_id)
 
     async def resume_job(self, job_id: str):
-        pending = self.scheduler.resume()
+        runtime = self._job_runtimes.get(job_id)
+        scheduler = runtime.scheduler if runtime else self._default_scheduler
+        pending = scheduler.resume()
         await self.event_bus.publish("job_resumed", job_id=job_id,
                                       pending_count=len(pending))
 
@@ -4414,7 +4634,9 @@ Prefer these existing files when relevant:
         repos = self._get_repos()
         try:
             self._cancelled_job_ids.add(job_id)
-            self.scheduler.stop()
+            runtime = self._job_runtimes.get(job_id)
+            scheduler = runtime.scheduler if runtime else self._default_scheduler
+            scheduler.stop()
             self.state_machine.transition(job_id, JobState.CANCELLED)
             repos["job"].update_status(job_id, "cancelled")
             await self.event_bus.publish("job_cancelled", job_id=job_id)

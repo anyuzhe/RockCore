@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from contextvars import ContextVar, Token
 from typing import Callable, Coroutine, Any
 from collections import defaultdict
 
@@ -15,6 +16,16 @@ class EventBus:
         self._subscribers: dict[str, list[Callable[..., Coroutine]]] = defaultdict(list)
         self._history: list[dict] = []
         self._max_history = 1000
+        self._job_context: ContextVar[str] = ContextVar(
+            "rockcore_event_job_id", default=""
+        )
+
+    def bind_job(self, job_id: str) -> Token:
+        """Bind events in the current async task tree to one Job."""
+        return self._job_context.set(str(job_id or ""))
+
+    def reset_job(self, token: Token):
+        self._job_context.reset(token)
 
     def subscribe(self, event_type: str, handler: Callable[..., Coroutine] | None = None):
         """Register a handler for an event type. Can be used as decorator."""
@@ -32,6 +43,10 @@ class EventBus:
             self._subscribers[event_type].remove(handler)
 
     async def publish(self, event_type: str, **data):
+        if "job_id" not in data:
+            job_id = self._job_context.get()
+            if job_id:
+                data["job_id"] = job_id
         event = {"type": event_type, "data": data}
         self._history.append(event)
         if len(self._history) > self._max_history:

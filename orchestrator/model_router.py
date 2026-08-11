@@ -7,6 +7,7 @@ import logging
 import math
 import re
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from .risk_engine import RiskEngine
@@ -47,11 +48,22 @@ class ModelRouter:
         self._job_reasoning_maps: dict[str, dict[str, str]] = {}
         self._provider_health: dict[str, dict[str, Any]] = {}
         self.event_bus = event_bus
-        self._current_job_id: str = ""
+        self._job_context: ContextVar[str] = ContextVar(
+            "rockcore_model_job_id", default=""
+        )
         self.request_timeout = DEFAULT_REQUEST_TIMEOUT
 
     def set_job_id(self, job_id: str):
-        self._current_job_id = job_id
+        self._job_context.set(str(job_id or ""))
+
+    @property
+    def _current_job_id(self) -> str:
+        """Backward-compatible view of the coroutine-local Job identifier."""
+        return self._job_context.get()
+
+    @_current_job_id.setter
+    def _current_job_id(self, job_id: str):
+        self._job_context.set(str(job_id or ""))
 
     @staticmethod
     def _estimate_text_tokens(value: Any) -> int:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,11 @@ class MainWindow(QMainWindow):
         self._selected_job_id = None
         self._running_job_id = None
         self._job_starting = False
+        self._running_jobs: dict[str, str] = {}
+        self._starting_projects: set[str] = set()
+        self._job_projects: dict[str, str] = {}
+        self._queued_by_project: dict[str, dict] = {}
+        self._job_event_buffers: dict[str, list[tuple[str, dict]]] = {}
         self._followup_source_job_id = None
         self._queued_request = None
         self._queued_source_job_id = None
@@ -95,6 +101,58 @@ class MainWindow(QMainWindow):
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_events)
         self._poll_timer.start(200)
+
+    @staticmethod
+    def _project_key(project: dict | None) -> str:
+        root = str((project or {}).get("root_path") or "").strip()
+        return os.path.normcase(os.path.abspath(root)) if root else ""
+
+    def _current_project_key(self) -> str:
+        return self._project_key(self._current_project)
+
+    def _current_running_job(self) -> str | None:
+        key = self._current_project_key()
+        return self._running_jobs.get(key) or self._running_job_id
+
+    def _selected_running_job(self) -> str | None:
+        if self._selected_job_id:
+            return (
+                self._selected_job_id
+                if self._selected_job_id in self._running_jobs.values()
+                else None
+            )
+        return self._current_running_job()
+
+    def _sync_project_runtime_state(self):
+        key = self._current_project_key()
+        self._running_job_id = self._running_jobs.get(key)
+        self._job_starting = key in self._starting_projects
+        running = self._selected_running_job()
+        self.pause_btn.setVisible(bool(running))
+        self.stop_btn.setVisible(bool(running))
+        if not running:
+            self.run_btn.hide()
+
+    def _sync_current_queue_state(self):
+        queued = self._queued_by_project.get(self._current_project_key())
+        self._queued_request = queued.get("request") if queued else None
+        self._queued_source_job_id = (
+            queued.get("source_job_id") if queued else None
+        )
+        self._queued_attachments = list(
+            queued.get("attachments") or []
+        ) if queued else []
+        if queued:
+            preview = str(queued["request"]).replace("\n", " ")[:80]
+            self.queue_label.setText(f"下一轮已排队：{preview}")
+            self.queue_bar.show()
+        else:
+            self.queue_bar.hide()
+
+    def _replay_buffered_job_events(self, job_id: str):
+        events = self._job_event_buffers.pop(job_id, [])
+        for event_type, data in events:
+            self._on_event(event_type, data)
 
     def _setup_ui(self):
         self.setWindowTitle(FULL_PRODUCT_NAME)
@@ -300,15 +358,24 @@ class MainWindow(QMainWindow):
         self._current_project = data
         self._selected_job_id = None
         self._followup_source_job_id = None
+        self._sync_project_runtime_state()
+        self._sync_current_queue_state()
         self.followup_source_label.setText("新需求")
         self.clear_followup_btn.setVisible(False)
         self._update_send_state()
-        self.status_label.setText(f"项目：{data.get('name', '')} · 可以提交需求")
+        running = self._current_running_job()
+        self.status_label.setText(
+            f"项目：{data.get('name', '')} · "
+            + (f"{running} 正在执行，可继续提交其他项目" if running
+               else "可以提交需求")
+        )
         self.task_panel.begin_new_request(data.get("name", ""), data.get("root_path", ""))
         self.task_panel.log(f"已选择项目：{data.get('name', '')}", "log")
 
         # Load job history for the selected project
         self._refresh_job_list()
+        if running:
+            self.project_panel.select_job(running)
 
     def _on_job_selected(self, data: dict):
         """Load the full persisted execution workflow for one requirement."""
@@ -390,6 +457,8 @@ class MainWindow(QMainWindow):
                     self.followup_source_label.setText(f"继续 {job.job_id}")
                     self.clear_followup_btn.setVisible(True)
                     self.input_text.setPlaceholderText("继续描述要补充、修改或修复的内容")
+                    self._sync_project_runtime_state()
+                    self._replay_buffered_job_events(job.job_id)
                     self._capture_diff()
             finally:
                 self._close_repos(repos)
@@ -429,6 +498,20 @@ class MainWindow(QMainWindow):
             try:
                 project = repos["project"].get_by_name(name)
                 if project:
+                    project_key = self._project_key({
+                        "name": project.name,
+                        "root_path": project.root_path,
+                    })
+                    if (
+                        project_key in self._running_jobs
+                        or project_key in self._starting_projects
+                    ):
+                        QMessageBox.warning(
+                            self,
+                            "项目正在执行",
+                            "请先停止该项目正在运行的任务，再删除项目。",
+                        )
+                        return
                     try:
                         removed_state = remove_project_state(project.root_path)
                     except ProjectStateCleanupError as error:
@@ -654,18 +737,31 @@ class MainWindow(QMainWindow):
         if not request:
             request = "请分析附加图片并完成图片中表达的需求。"
 
-        if self._running_job_id or self._job_starting:
+        project_data = dict(self._current_project)
+        project_key = self._project_key(project_data)
+        running_job_id = self._running_jobs.get(project_key) or self._running_job_id
+        project_starting = (
+            project_key in self._starting_projects or self._job_starting
+        )
+        if running_job_id or project_starting:
+            queued = {
+                "request": request,
+                "attachments": attachments,
+                # Only an explicitly selected follow-up inherits the running
+                # Job. Clicking "新需求" leaves this empty.
+                "source_job_id": self._followup_source_job_id,
+                "project": project_data,
+            }
+            self._queued_by_project[project_key] = queued
             self._queued_request = request
             self._queued_attachments = attachments
-            self._queued_source_job_id = (
-                self._followup_source_job_id or self._running_job_id
-            )
+            self._queued_source_job_id = queued["source_job_id"]
             self.input_text.clear()
             self._clear_attachments()
             preview = request.replace("\n", " ")[:80]
             self.queue_label.setText(f"下一轮已排队：{preview}")
             self.queue_bar.show()
-            source_label = self._running_job_id or "当前任务"
+            source_label = running_job_id or "当前任务"
             self.followup_source_label.setText(f"继续 {source_label}")
             self.clear_followup_btn.setVisible(False)
             self.status_label.setText("下一轮需求已排队，将在当前任务结束后自动开始")
@@ -683,22 +779,31 @@ class MainWindow(QMainWindow):
             self._followup_source_job_id = None
             self.followup_source_label.setText("正在创建任务")
             self.clear_followup_btn.setVisible(False)
+            self._starting_projects.add(project_key)
             self._job_starting = True
             asyncio.ensure_future(
-                self._run_job_async(request, source_job_id, attachments)
+                self._run_job_async(
+                    request, source_job_id, attachments, project_data
+                )
             )
         else:
             self.status_label.setText("执行引擎尚未连接")
         self._update_send_state()
 
     async def _run_job_async(self, request: str, source_job_id: str | None,
-                             attachments: list[dict] | None = None):
+                             attachments: list[dict] | None = None,
+                             project_data: dict | None = None):
+        project_data = dict(project_data or self._current_project or {})
+        project_key = self._project_key(project_data)
+        project_name = str(project_data.get("name") or "")
+        finished_job_id = None
         try:
             repos = self._get_repos()
             try:
-                project = repos["project"].get_by_name(self._current_project["name"])
+                project = repos["project"].get_by_name(project_name)
                 if not project:
-                    self.bridge.log_message.emit("数据库中未找到项目", "log")
+                    if project_key == self._current_project_key():
+                        self.bridge.log_message.emit("数据库中未找到项目", "log")
                     return
 
                 # Create job
@@ -709,78 +814,98 @@ class MainWindow(QMainWindow):
                     source_job_id=source_job_id,
                     attachments=attachments or [],
                 )
-                self._running_job_id = result["job_id"]
-                self._job_starting = False
-                self._selected_job_id = result["job_id"]
-                self.pause_btn.show()
-                self.stop_btn.show()
-                self._followup_source_job_id = result["job_id"]
-                self.followup_source_label.setText(f"继续 {result['job_id']}")
-                self.clear_followup_btn.setVisible(True)
-                self.bridge.log_message.emit(
-                    f"任务已创建：{result['job_id']}（分支：{result['branch']}）", "log"
-                )
-                self.bridge.job_status.emit(result["job_id"], "created")
-                self._refresh_job_list()
-                self.project_panel.select_job(result["job_id"])
+                finished_job_id = result["job_id"]
+                self._running_jobs[project_key] = finished_job_id
+                self._job_projects[finished_job_id] = project_key
+                self._starting_projects.discard(project_key)
+                if project_key == self._current_project_key():
+                    self._running_job_id = finished_job_id
+                    self._job_starting = False
+                    self._selected_job_id = finished_job_id
+                    self.pause_btn.show()
+                    self.stop_btn.show()
+                    self._followup_source_job_id = finished_job_id
+                    self.followup_source_label.setText(
+                        f"继续 {finished_job_id}"
+                    )
+                    self.clear_followup_btn.setVisible(True)
+                    self.bridge.log_message.emit(
+                        f"任务已创建：{finished_job_id}"
+                        f"（分支：{result['branch']}）",
+                        "log",
+                    )
+                    self.bridge.job_status.emit(finished_job_id, "created")
+                    self._refresh_job_list()
+                    self.project_panel.select_job(finished_job_id)
 
                 # Run the full pipeline
-                await self.engine.run_job(result["job_id"], project.root_path)
+                await self.engine.run_job(finished_job_id, project.root_path)
 
             finally:
                 self._close_repos(repos)
         except Exception as e:
-            self.bridge.log_message.emit(f"错误：{str(e)}", "log")
-            logger.exception("任务执行失败")
+            if project_key == self._current_project_key():
+                self.bridge.log_message.emit(f"错误：{str(e)}", "log")
+            logger.exception("任务执行失败：%s", finished_job_id or project_name)
         finally:
-            self.bridge.log_message.emit("任务结束", "log")
-            finished_job_id = self._running_job_id
-            self._refresh_job_list()
+            self._starting_projects.discard(project_key)
             if finished_job_id:
-                self.project_panel.select_job(finished_job_id)
-            self.run_btn.hide()
-            self.pause_btn.hide()
-            self.stop_btn.hide()
-            self._running_job_id = None
-            self._job_starting = False
-            if finished_job_id:
-                self._followup_source_job_id = finished_job_id
-                self.followup_source_label.setText(f"继续 {finished_job_id}")
-                self.clear_followup_btn.setVisible(True)
-            else:
-                self._followup_source_job_id = None
-                self.followup_source_label.setText("新需求")
-                self.clear_followup_btn.setVisible(False)
-            self.input_text.setPlaceholderText("继续描述要补充、修改或修复的内容")
-            self._update_send_state()
-            if self._queued_request and finished_job_id:
-                QTimer.singleShot(0, self._submit_queued_followup)
-            elif self._queued_request:
-                request = self._queued_request
-                self._queued_request = None
-                self.queue_bar.hide()
-                self.input_text.setPlainText(request)
-                self._set_attachments(self._queued_attachments)
-                self._queued_attachments = []
+                if self._running_jobs.get(project_key) == finished_job_id:
+                    self._running_jobs.pop(project_key, None)
+                self._job_projects.pop(finished_job_id, None)
+            if project_key == self._current_project_key():
+                self.bridge.log_message.emit("任务结束", "log")
+                self._running_job_id = self._running_jobs.get(project_key)
+                self._job_starting = project_key in self._starting_projects
+                self._refresh_job_list()
+                if finished_job_id:
+                    self.project_panel.select_job(finished_job_id)
+                    self._followup_source_job_id = finished_job_id
+                    self.followup_source_label.setText(
+                        f"继续 {finished_job_id}"
+                    )
+                    self.clear_followup_btn.setVisible(True)
+                else:
+                    self._followup_source_job_id = None
+                    self.followup_source_label.setText("新需求")
+                    self.clear_followup_btn.setVisible(False)
+                self.input_text.setPlaceholderText(
+                    "继续描述要补充、修改或修复的内容"
+                )
+                self._sync_project_runtime_state()
+                self._update_send_state()
+            if project_key in self._queued_by_project:
+                QTimer.singleShot(
+                    0, lambda key=project_key: self._submit_queued_followup(key)
+                )
 
-    def _submit_queued_followup(self):
-        request = self._queued_request
-        if not request or self._running_job_id or self._job_starting:
+    def _submit_queued_followup(self, project_key: str | None = None):
+        project_key = project_key or self._current_project_key()
+        queued = self._queued_by_project.get(project_key)
+        if (
+            not queued
+            or project_key in self._running_jobs
+            or project_key in self._starting_projects
+        ):
             return
-        self._queued_request = None
-        attachments = list(self._queued_attachments)
-        self._queued_attachments = []
-        source_job_id = self._queued_source_job_id
-        self._queued_source_job_id = None
-        self.queue_bar.hide()
-        self._followup_source_job_id = source_job_id
-        if source_job_id:
-            self.followup_source_label.setText(f"继续 {source_job_id}")
-        self.input_text.setPlainText(request)
-        self._set_attachments(attachments)
-        self._on_submit_request()
+        self._queued_by_project.pop(project_key, None)
+        self._starting_projects.add(project_key)
+        if project_key == self._current_project_key():
+            self._queued_request = None
+            self._queued_source_job_id = None
+            self._queued_attachments = []
+            self.queue_bar.hide()
+            self._job_starting = True
+            self.followup_source_label.setText("正在创建任务")
+        asyncio.ensure_future(self._run_job_async(
+            str(queued["request"]),
+            queued.get("source_job_id"),
+            list(queued.get("attachments") or []),
+            dict(queued["project"]),
+        ))
 
     def _cancel_queued_request(self):
+        self._queued_by_project.pop(self._current_project_key(), None)
         self._queued_request = None
         self._queued_source_job_id = None
         self._queued_attachments = []
@@ -790,29 +915,38 @@ class MainWindow(QMainWindow):
     def _update_send_state(self):
         has_request = bool(self.input_text.toPlainText().strip() or self._attachments)
         self.start_task_btn.setEnabled(bool(self._current_project) and has_request)
+        project_busy = bool(
+            self._current_project_key() in self._running_jobs
+            or self._current_project_key() in self._starting_projects
+            or self._running_job_id
+            or self._job_starting
+        )
         self.start_task_btn.setToolTip(
             "排队为下一轮需求（⌘/Ctrl + Enter）"
-            if self._running_job_id or self._job_starting
+            if project_busy
             else "提交需求（⌘/Ctrl + Enter）"
         )
 
     def _on_run(self):
-        if self._running_job_id and self.engine:
-            asyncio.ensure_future(self.engine.resume_job(self._running_job_id))
+        running_job_id = self._selected_running_job()
+        if running_job_id and self.engine:
+            asyncio.ensure_future(self.engine.resume_job(running_job_id))
             self.task_panel.log("任务已恢复", "log")
             self.run_btn.hide()
             self.pause_btn.show()
 
     def _on_pause(self):
-        if self._running_job_id and self.engine:
-            asyncio.ensure_future(self.engine.pause_job(self._running_job_id))
+        running_job_id = self._selected_running_job()
+        if running_job_id and self.engine:
+            asyncio.ensure_future(self.engine.pause_job(running_job_id))
             self.task_panel.log("任务已暂停", "log")
             self.pause_btn.hide()
             self.run_btn.show()
 
     def _on_stop(self):
-        if self._running_job_id and self.engine:
-            asyncio.ensure_future(self.engine.cancel_job(self._running_job_id))
+        running_job_id = self._selected_running_job()
+        if running_job_id and self.engine:
+            asyncio.ensure_future(self.engine.cancel_job(running_job_id))
             self.task_panel.log("任务已停止", "log")
             self.run_btn.hide()
             self.pause_btn.hide()
@@ -825,10 +959,15 @@ class MainWindow(QMainWindow):
             event_job_id == self._selected_job_id
             if event_job_id
             else (
-                not self._running_job_id
-                or self._selected_job_id == self._running_job_id
+                not self._current_running_job()
+                or self._selected_job_id == self._current_running_job()
             )
         )
+        if event_job_id and not is_selected:
+            buffered = self._job_event_buffers.setdefault(event_job_id, [])
+            buffered.append((event_type, dict(data)))
+            if len(buffered) > 150:
+                del buffered[:-150]
         if is_selected:
             self.task_panel.log_event(event_type, **data)
         repair_round = int(data.get("repair_round", 0) or 0)
@@ -846,7 +985,8 @@ class MainWindow(QMainWindow):
             "job_cancelled": "cancelled",
         }.get(event_type)
         if event_job_id and live_status:
-            self.task_panel.update_job_status(event_job_id, live_status)
+            if is_selected:
+                self.task_panel.update_job_status(event_job_id, live_status)
             self.project_panel.update_job_status(event_job_id, live_status)
 
         if event_type == "job_governing" and is_selected:
