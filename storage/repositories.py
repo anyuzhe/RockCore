@@ -229,11 +229,13 @@ class TaskRepository:
     def create(self, task_id: str, job_id: int, title: str,
                task_type: str = "coding", description: str = "",
                allowed_paths: list = None, dependencies: list = None,
-               acceptance_command: str = "", order: int = 0) -> Task:
+               acceptance_command: str = "", order: int = 0,
+               skills: list[str] | None = None) -> Task:
         task = Task(
             task_id=task_id, job_id=job_id, title=title,
             description=description, task_type=task_type,
             allowed_paths=allowed_paths or [],
+            skills=skills or [],
             dependencies=dependencies or [],
             acceptance_command=acceptance_command,
             order=order
@@ -279,7 +281,8 @@ class TaskRepository:
 
     def update_definition(self, task_pk: int, *, description: str | None = None,
                           allowed_paths: list[str] | None = None,
-                          acceptance_command: str | None = None) -> Optional[Task]:
+                          acceptance_command: str | None = None,
+                          skills: list[str] | None = None) -> Optional[Task]:
         """Refine an unstarted task from verified prerequisite findings."""
         task = self.get_by_pk(task_pk)
         if task:
@@ -289,6 +292,8 @@ class TaskRepository:
                 task.allowed_paths = allowed_paths
             if acceptance_command is not None:
                 task.acceptance_command = acceptance_command
+            if skills is not None:
+                task.skills = skills
             task.updated_at = datetime.now(timezone.utc)
             self.session.commit()
         return task

@@ -769,7 +769,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 2
+    assert config.config_version == 3
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"

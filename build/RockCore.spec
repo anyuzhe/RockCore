@@ -9,6 +9,7 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = Path(SPECPATH).resolve().parent
 APP = ROOT / "app" / "main.py"
 ASSETS = ROOT / "assets"
+BUILTIN_SKILLS = ROOT / "skills" / "builtin"
 VERSION_FILE = ROOT / "build" / "version_info.generated.txt"
 
 hiddenimports = ["qasync", "PyQt6.QtSvg", "PyQt6.QtSvgWidgets"]
@@ -19,7 +20,10 @@ a = Analysis(
     [str(APP)],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[(str(ASSETS), "assets")],
+    datas=[
+        (str(ASSETS), "assets"),
+        (str(BUILTIN_SKILLS), "skills/builtin"),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -107,9 +107,10 @@ class Task(Base):
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
     title = Column(String(512), nullable=False)
     description = Column(Text, default="")
-    task_type = Column(String(32), default="coding")  # analysis, coding, testing, review
+    task_type = Column(String(32), default="coding")  # analysis, coding, testing, review, action
     status = Column(String(32), default="pending", index=True)
     allowed_paths = Column(JSON, default=list)
+    skills = Column(JSON, default=list)
     dependencies = Column(JSON, default=list)
     acceptance_command = Column(String(1024), default="")
     order = Column(Integer, default=0)

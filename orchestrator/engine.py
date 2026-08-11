@@ -84,6 +84,7 @@ class Engine:
         self._agents: dict[str, Any] = {}
         self._cancelled_job_ids: set[str] = set()
         self.tool_broker: Any = None
+        self.skill_manager: Any = None
         self.test_manager = TestManager()
         self.merge_manager: MergeManager | None = None
 
@@ -269,6 +270,8 @@ class Engine:
     async def stop(self):
         self._running = False
         self.scheduler.stop()
+        if self.tool_broker and hasattr(self.tool_broker, "close"):
+            await self.tool_broker.close()
         logger.info("Engine stopped")
 
     async def _skip_phase(self, job, repos, phase: str,
@@ -561,6 +564,27 @@ class Engine:
             proj_root = job.project.root_path if job.project else project_root
             proj_config = load_project_config(proj_root)
             logger.info(f"Job {job_id}: mode={proj_config.mode}")
+
+            if self.skill_manager:
+                self.skill_manager.configure(proj_root, proj_config.skills)
+            mcp_status = {}
+            if self.tool_broker and hasattr(self.tool_broker, "configure_mcp"):
+                mcp_status = await self.tool_broker.configure_mcp(
+                    proj_root, proj_config.mcp
+                )
+            await self.event_bus.publish(
+                "extensions_ready",
+                job_id=job_id,
+                skills=(
+                    [item.name for item in self.skill_manager.list_skills()]
+                    if self.skill_manager else []
+                ),
+                project_skills_approved=(
+                    self.skill_manager.project_skills_approved
+                    if self.skill_manager else False
+                ),
+                mcp=mcp_status,
+            )
 
             # Classify request complexity
             complexity = self._classify_request(job.user_request)
@@ -979,6 +1003,7 @@ class Engine:
         self._optimize_plan(plan_data, effective_complexity)
         self._serialize_overlapping_tasks(plan_data)
         self._prune_transitive_dependencies(plan_data)
+        self._assign_plan_skills(plan_data)
 
         plan = repos["plan"].create(
             job_id=job.id,
@@ -1043,6 +1068,11 @@ class Engine:
     def _create_tasks_from_plan(self, job, repos, plan_data: dict,
                                 order_offset: int = 0):
         for i, task_data in enumerate(plan_data.get("tasks", [])):
+            selected_skills = (
+                self.skill_manager.select_for_task(task_data)
+                if self.skill_manager else []
+            )
+            task_data["skills"] = selected_skills
             repos["task"].create(
                 task_id=task_data.get("id", f"T{i+1:03d}"),
                 job_id=job.id,
@@ -1056,6 +1086,15 @@ class Engine:
                 dependencies=task_data.get("dependencies", []),
                 acceptance_command=task_data.get("acceptance_command", ""),
                 order=order_offset + i,
+                skills=selected_skills,
+            )
+
+    def _assign_plan_skills(self, plan_data: dict):
+        """Normalize model suggestions against the discovered Skill catalog."""
+        for task_data in plan_data.get("tasks", []):
+            task_data["skills"] = (
+                self.skill_manager.select_for_task(task_data)
+                if self.skill_manager else []
             )
 
     @classmethod
@@ -1516,6 +1555,7 @@ class Engine:
     def _create_direct_plan(self, job, repos, proj_config=None):
         """Persist a direct task for a deliberately disabled Planner phase."""
         plan_data = self._direct_plan_data(job, repos, proj_config)
+        self._assign_plan_skills(plan_data)
         repos["plan"].create(
             job_id=job.id,
             summary=plan_data["summary"],
@@ -1629,6 +1669,7 @@ class Engine:
                 "type": t.task_type,
                 "dependencies": t.dependencies or [],
                 "allowed_paths": t.allowed_paths or [],
+                "skills": t.skills or [],
                 "acceptance_command": t.acceptance_command or "",
                 "_db_task": t,
             })
@@ -1809,6 +1850,7 @@ class Engine:
                 exploration_limit=task_worker.max_exploration_turns,
                 input_token_budget=t._rockcore_input_budget,
                 budget_reason=budget["reason"],
+                skills=t.skills or [],
             )
 
             # L0-L3: Attempt with escalation
@@ -1873,12 +1915,19 @@ class Engine:
                     t.task_type in {"analysis", "review"}
                     and not has_file_changes
                     and not task_output
+                ) or (
+                    t.task_type == "action"
+                    and not bool(worker_result.get("external_action"))
                 )
                 if missing_required_output:
                     error = (
                         "Coding task produced no file changes"
                         if t.task_type == "coding"
-                        else "Analysis task produced no report"
+                        else (
+                            "External action task produced no external change"
+                            if t.task_type == "action"
+                            else "Analysis task produced no report"
+                        )
                     )
                     logger.error(
                         f"Task {task_id}: {t.task_type} task completed without "
@@ -3288,6 +3337,7 @@ class Engine:
         )
         self._serialize_overlapping_tasks(plan_data)
         self._prune_transitive_dependencies(plan_data)
+        self._assign_plan_skills(plan_data)
         repair_record["plan"] = plan_data
 
         self.state_machine.transition(job.job_id, JobState.PLANNING)
@@ -3446,6 +3496,7 @@ class Engine:
             task.setdefault("type", "coding")
             task.setdefault("description", task["title"])
             task.setdefault("allowed_paths", [])
+            task.setdefault("skills", [])
             task.setdefault("acceptance_command", "")
 
         reference_map = {
@@ -3583,6 +3634,7 @@ class Engine:
                 "summary": (item.result_summary or "")[:1000],
                 "failure_reason": (item.failure_reason or "")[:1000],
                 "allowed_paths": item.allowed_paths or [],
+                "skills": item.skills or [],
             } for item in tasks],
         })
         existing_checkpoint["budget"] = (
@@ -3798,11 +3850,28 @@ Prefer these existing files when relevant:
                 requires_final_review=False,
                 raw_output={"source": "fast_mode_rules"},
             )
-        repos["plan"].create(job_id=job.id, summary=job.user_request, raw_output={})
+        direct_task = {
+            "title": job.user_request[:60],
+            "description": description,
+            "type": "coding",
+            "allowed_paths": ["*"],
+            "skills": [],
+        }
+        selected_skills = (
+            self.skill_manager.select_for_task(direct_task)
+            if self.skill_manager else []
+        )
+        direct_task["skills"] = selected_skills
+        repos["plan"].create(
+            job_id=job.id,
+            summary=job.user_request,
+            raw_output={"summary": job.user_request, "tasks": [direct_task]},
+        )
         repos["task"].create(
             task_id="T001", job_id=job.id, title=job.user_request[:60],
             task_type="coding", description=description, allowed_paths=["*"],
             dependencies=[], acceptance_command="", order=0,
+            skills=selected_skills,
         )
 
         worker = self.get_agent("worker")

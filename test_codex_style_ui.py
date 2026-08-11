@@ -1,5 +1,6 @@
 """Regression coverage for the conversation-first desktop workflow."""
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -323,6 +324,24 @@ def test_settings_no_longer_exposes_model_scoring():
     ]
     assert "模型评分" not in tab_titles
     assert not hasattr(dialog, "scoring_text")
+    dialog.close()
+
+
+def test_project_settings_expose_skills_and_mcp_capability_tabs(tmp_path):
+    _app()
+    dialog = ProjectConfigDialog(str(tmp_path))
+    tab_titles = [
+        dialog.tabs.tabText(index) for index in range(dialog.tabs.count())
+    ]
+
+    assert "Skills" in tab_titles
+    assert "MCP" in tab_titles
+    assert dialog.skills_enabled_cb.isChecked()
+    assert dialog.project_skills_cb.isChecked()
+    assert dialog.max_skills_spin.value() == 3
+    assert dialog.skill_list.count() == 7
+    assert not dialog.mcp_enabled_cb.isChecked()
+    assert json.loads(dialog.mcp_servers_text.toPlainText()) == []
     dialog.close()
 
 

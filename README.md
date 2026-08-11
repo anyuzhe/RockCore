@@ -2,6 +2,47 @@
 
 RockCore 是面向本地项目的多 AI 智能工程工作台，由浙江岩创科技有限公司维护。
 
+## Agent 能力层
+
+RockCore 将运行时概念分为：Agent 决定谁来处理，Skill 提供任务 SOP，
+Tool/MCP 提供本地或外部操作，Policy 负责权限边界。项目设置中的
+“Skills”和“MCP”页用于配置这两层能力。
+
+内置 Skills 位于 `skills/builtin/<skill-name>/SKILL.md`。运行时先读取
+`name` 和 `description` 建立轻量目录，仅把当前任务选中的正文加入模型
+上下文。项目可以在 `.ai/skills/` 放置同结构 Skill；同名项目 Skill 会
+覆盖内置版本。项目 Skill 也需要在项目设置中保存本机批准指纹，内容
+变化会自动撤销旧批准，避免仓库通过提示注入自行取得信任。任务计划和
+运行检查点会保存实际选择的 Skill 名称。
+
+MCP 使用项目 `.ai/agents.json` 中的 stdio 服务配置。外部工具会以
+`mcp__服务名__工具名` 进入 ToolBroker，与本地工具共用任务权限检查；
+只读任务看不到写入型 MCP 工具，单个 MCP 服务不可用也不会影响本地
+文件、Git、Shell 和测试能力。密钥应通过环境变量引用，不要写入项目：
+
+```json
+{
+  "mcp": {
+    "enabled": true,
+    "servers": [
+      {
+        "name": "example",
+        "command": "npx",
+        "args": ["-y", "your-mcp-server"],
+        "env": {"ACCESS_TOKEN": "${EXAMPLE_ACCESS_TOKEN}"},
+        "read_only": true,
+        "allow_tools": ["*"]
+      }
+    ]
+  }
+}
+```
+
+MCP 进程不经过 shell，支持 UTF-8 JSON-RPC、Windows `.cmd/.bat` 启动器
+和 GUI 事件循环。项目默认不启用任何外部 MCP 服务，必须在项目设置中
+显式启用并保存；RockCore 会把配置指纹批准记录保存在用户数据目录，
+因此仓库中的 `.ai/agents.json` 不能自行获得启动本地进程的权限。
+
 ## Windows 发布
 
 GitHub Actions 工作流位于 `.github/workflows/windows-release.yml`。

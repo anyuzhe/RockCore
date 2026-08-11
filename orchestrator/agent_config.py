@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -49,12 +50,123 @@ class WorkerProfile(AgentProfile):
     fallback_model: str = "kimi-k2.7"
 
 
+BUILTIN_SKILLS = [
+    "simple-create",
+    "simple-edit",
+    "bug-fix",
+    "refactor",
+    "code-review",
+    "pyqt",
+    "web",
+]
+
+
+@dataclass
+class SkillConfig:
+    """Project skill discovery and prompt-loading policy."""
+
+    enabled: bool = True
+    enabled_builtin: list[str] = field(
+        default_factory=lambda: list(BUILTIN_SKILLS)
+    )
+    allow_project_skills: bool = True
+    max_selected: int = 3
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "SkillConfig":
+        values = data if isinstance(data, dict) else {}
+        enabled_builtin = values.get("enabled_builtin", BUILTIN_SKILLS)
+        if not isinstance(enabled_builtin, list):
+            enabled_builtin = list(BUILTIN_SKILLS)
+        return cls(
+            enabled=bool(values.get("enabled", True)),
+            enabled_builtin=[
+                str(name).strip() for name in enabled_builtin
+                if str(name).strip()
+            ],
+            allow_project_skills=bool(
+                values.get("allow_project_skills", True)
+            ),
+            max_selected=max(1, min(8, int(values.get("max_selected", 3)))),
+        )
+
+
+@dataclass
+class MCPServerConfig:
+    """One explicitly configured MCP stdio server."""
+
+    name: str = ""
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
+    timeout_seconds: int = 20
+    allow_tools: list[str] = field(default_factory=lambda: ["*"])
+    read_only: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "MCPServerConfig":
+        values = data if isinstance(data, dict) else {}
+        name = str(values.get("name") or "").strip().lower()
+        if name and not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", name):
+            raise ValueError(
+                f"MCP 服务名不合法：{name}；仅允许小写字母、数字、_ 和 -"
+            )
+        command = str(values.get("command") or "").strip()
+        args = values.get("args") or []
+        env = values.get("env") or {}
+        allow_tools = values.get("allow_tools") or ["*"]
+        if not isinstance(args, list):
+            raise ValueError(f"MCP 服务 {name or '<unnamed>'} 的 args 必须是数组")
+        if not isinstance(env, dict):
+            raise ValueError(f"MCP 服务 {name or '<unnamed>'} 的 env 必须是对象")
+        if not isinstance(allow_tools, list):
+            raise ValueError(
+                f"MCP 服务 {name or '<unnamed>'} 的 allow_tools 必须是数组"
+            )
+        return cls(
+            name=name,
+            command=command,
+            args=[str(value) for value in args],
+            env={str(key): str(value) for key, value in env.items()},
+            enabled=bool(values.get("enabled", True)),
+            timeout_seconds=max(
+                2, min(300, int(values.get("timeout_seconds", 20)))
+            ),
+            allow_tools=[str(value) for value in allow_tools],
+            read_only=bool(values.get("read_only", True)),
+        )
+
+
+@dataclass
+class MCPConfig:
+    """Project MCP feature flag and server list."""
+
+    enabled: bool = False
+    servers: list[MCPServerConfig] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "MCPConfig":
+        values = data if isinstance(data, dict) else {}
+        raw_servers = values.get("servers") or []
+        if not isinstance(raw_servers, list):
+            raise ValueError("MCP servers 必须是数组")
+        servers = [MCPServerConfig.from_dict(item) for item in raw_servers]
+        names = [server.name for server in servers if server.name]
+        if len(names) != len(set(names)):
+            raise ValueError("MCP 服务名不能重复")
+        for server in servers:
+            if server.enabled and (not server.name or not server.command):
+                raise ValueError("启用的 MCP 服务必须同时配置 name 和 command")
+        return cls(enabled=bool(values.get("enabled", False)), servers=servers)
+
+
 @dataclass
 class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 2
+    config_version: int = 3
     # Auto uses Governor risk routing; rules are only a failure fallback.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -100,6 +212,10 @@ class ProjectAgentConfig:
     auto_validation: bool = True
     auto_repair: bool = True
 
+    # ── Reusable capabilities and external tools ──
+    skills: SkillConfig = field(default_factory=SkillConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
+
     @classmethod
     def from_dict(cls, data: dict) -> "ProjectAgentConfig":
         cfg = cls()
@@ -123,9 +239,11 @@ class ProjectAgentConfig:
         for k in ("continuation_context", "auto_validation", "auto_repair"):
             if k in data:
                 setattr(cfg, k, data[k])
+        cfg.skills = SkillConfig.from_dict(data.get("skills"))
+        cfg.mcp = MCPConfig.from_dict(data.get("mcp"))
         if source_version < 2:
             cfg._upgrade_legacy_recommendations()
-        cfg.config_version = 2
+        cfg.config_version = 3
         return cfg
 
     def _upgrade_legacy_recommendations(self):
@@ -156,6 +274,8 @@ class ProjectAgentConfig:
             "continuation_context": self.continuation_context,
             "auto_validation": self.auto_validation,
             "auto_repair": self.auto_repair,
+            "skills": asdict(self.skills),
+            "mcp": asdict(self.mcp),
         }
 
     def get_worker_turns(self, complexity: str) -> int:
@@ -243,7 +363,9 @@ def load_project_config(project_root: str) -> ProjectAgentConfig:
                 config.reviewer.enabled = True
                 config.emergency_coder.enabled = True
             return config
-        except (json.JSONDecodeError, OSError, UnicodeError, TypeError) as e:
+        except (
+            json.JSONDecodeError, OSError, UnicodeError, TypeError, ValueError
+        ) as e:
             logger.warning(f"Failed to load {config_path}: {e}")
     return ProjectAgentConfig()  # default: auto mode
 

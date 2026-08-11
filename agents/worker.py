@@ -12,7 +12,7 @@ from tools.tool_broker import ToolBroker
 logger = logging.getLogger(__name__)
 
 WRITE_TOOLS = {"write_file", "apply_patch", "insert_before", "insert_after"}
-REPORT_TASK_TYPES = {"analysis", "review", "testing"}
+REPORT_TASK_TYPES = {"analysis", "review", "testing", "action"}
 ALREADY_SATISFIED_MARKER = "[ALREADY_SATISFIED]"
 STATE_VERIFICATION_TOOLS = {
     "read_file", "read_pdf", "search_in_file", "search_code", "git_diff",
@@ -83,23 +83,28 @@ class WorkerAgent:
 
     def __init__(self, model_router: ModelRouter, tool_broker: ToolBroker,
                  max_turns: int = 25, max_exploration_turns: int = 4,
-                 context_manager=None):
+                 context_manager=None, skill_manager=None):
         self.model_router = model_router
         self.tool_broker = tool_broker
         self.agent_type = "worker"
         self.max_turns = max_turns
         self.max_exploration_turns = max_exploration_turns
         self.context_manager = context_manager
+        self.skill_manager = skill_manager
 
     def scoped_to(self, project_root: str) -> "WorkerAgent":
         """Create an isolated worker whose tools all target one task workspace."""
-        broker = ToolBroker(project_root, self.tool_broker.policy)
+        broker = ToolBroker(
+            project_root, self.tool_broker.policy,
+            mcp_manager=self.tool_broker.mcp_manager,
+        )
         return WorkerAgent(
             self.model_router,
             broker,
             max_turns=self.max_turns,
             max_exploration_turns=self.max_exploration_turns,
             context_manager=self.context_manager,
+            skill_manager=self.skill_manager,
         )
 
     async def run(self, task, project=None, project_root: str | None = None,
@@ -121,7 +126,12 @@ class WorkerAgent:
             except Exception as e:
                 logger.warning(f"Context manager failed: {e}")
 
-        system_prompt = WORKER_SYSTEM_PROMPT
+        selected_skills: list[str] = []
+        skill_prompt = ""
+        if self.skill_manager:
+            selected_skills, skill_prompt = self.skill_manager.render_for_task(task)
+            task.skills = selected_skills
+        system_prompt = WORKER_SYSTEM_PROMPT + skill_prompt
 
         task_context = f"""
 Task: {task.task_id} - {task.title}
@@ -129,6 +139,7 @@ Description: {task.description}
 Type: {task.task_type}
 Allowed Paths: {task.allowed_paths or 'all'}
 Acceptance Command: {task.acceptance_command or 'none'}
+Selected Skills: {', '.join(selected_skills) or 'none'}
 {task_memory_context[:4000]}
 """
 
@@ -192,6 +203,8 @@ Acceptance Command: {task.acceptance_command or 'none'}
         premature_completion_count = 0
         empty_report_count = 0
         force_tool_call = False
+        external_action_completed = False
+        external_action_signatures: set[tuple[str, str]] = set()
         verified_existing_state = False
         pending_document_pages: dict[str, int] = {}
         allow_no_change = self._allows_no_change(task)
@@ -325,7 +338,13 @@ Acceptance Command: {task.acceptance_command or 'none'}
                     max_tokens=4096,
                     tool_choice=(
                         "required"
-                        if task.task_type == "coding" and force_tool_call and not has_written
+                        if (
+                            task.task_type in {"coding", "action"}
+                            and force_tool_call
+                            and not (
+                                has_written or external_action_completed
+                            )
+                        )
                         else "auto"
                     ),
                     **model_kwargs,
@@ -460,6 +479,27 @@ Acceptance Command: {task.acceptance_command or 'none'}
                         # Force tool use at the API level until a write succeeds.
                         force_tool_call = True
                         continue
+                    if task.task_type == "action" and not external_action_completed:
+                        premature_completion_count += 1
+                        messages.append({
+                            "role": "assistant",
+                            "content": (content or "")[-1600:],
+                        })
+                        if premature_completion_count >= 2:
+                            return self._failure(
+                                "External action task ended without calling a "
+                                "mutating MCP tool",
+                                tool_calls_made, total_input, total_output,
+                            )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "This action task has not changed the external "
+                                "system. Call the configured mutating MCP tool now."
+                            ),
+                        })
+                        force_tool_call = True
+                        continue
                     if task.task_type in REPORT_TASK_TYPES and not (content or "").strip():
                         empty_report_count += 1
                         messages.append({
@@ -518,14 +558,31 @@ Acceptance Command: {task.acceptance_command or 'none'}
                         json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
                         has_written,
                     )
+                    is_read_only_mcp = bool(getattr(
+                        self.tool_broker, "is_read_only_mcp_tool",
+                        lambda _name: False,
+                    )(func_name))
+                    is_mutating_mcp = bool(getattr(
+                        self.tool_broker, "is_mutating_mcp_tool",
+                        lambda _name: False,
+                    )(func_name))
+                    is_exploration = (
+                        func_name in EXPLORATION_TOOLS or is_read_only_mcp
+                    )
+                    external_signature = (
+                        func_name,
+                        json.dumps(
+                            args, sort_keys=True, ensure_ascii=False, default=str
+                        ),
+                    )
                     repeated_exploration = (
-                        task.task_type in {"coding", "analysis", "review"}
-                        and func_name in EXPLORATION_TOOLS
+                        task.task_type in {"coding", "analysis", "review", "action"}
+                        and is_exploration
                         and exploration_signature in seen_exploration_calls
                     )
                     if (
                         budget_finalization_mode
-                        and func_name in EXPLORATION_TOOLS
+                        and is_exploration
                     ):
                         result = {
                             "status": "rejected",
@@ -545,8 +602,8 @@ Acceptance Command: {task.acceptance_command or 'none'}
                         }
                         exploration_blocked = True
                     elif (
-                        task.task_type in {"coding", "analysis", "review"}
-                        and func_name in EXPLORATION_TOOLS
+                        task.task_type in {"coding", "analysis", "review", "action"}
+                        and is_exploration
                         and exploration_calls >= (
                             self.max_exploration_turns + (2 if has_written else 0)
                         )
@@ -563,6 +620,17 @@ Acceptance Command: {task.acceptance_command or 'none'}
                             ),
                         }
                         exploration_blocked = True
+                    elif (
+                        is_mutating_mcp
+                        and external_signature in external_action_signatures
+                    ):
+                        result = {
+                            "status": "rejected",
+                            "error": (
+                                "This external action already succeeded in this "
+                                "task. Do not repeat it; return the final result."
+                            ),
+                        }
                     elif argument_error:
                         result = {"status": "error", "error": argument_error}
                     else:
@@ -639,9 +707,17 @@ Acceptance Command: {task.acceptance_command or 'none'}
                                 total_input,
                                 total_output,
                             )
-                        if func_name in EXPLORATION_TOOLS:
+                        if is_exploration:
                             exploration_calls += 1
                             seen_exploration_calls.add(exploration_signature)
+                        if (
+                            is_mutating_mcp
+                            and result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
+                            external_action_completed = True
+                            external_action_signatures.add(external_signature)
+                            force_tool_call = False
                         if (
                             func_name in WRITE_TOOLS
                             and result.get("status") not in {"error", "rejected"}
@@ -718,6 +794,8 @@ Acceptance Command: {task.acceptance_command or 'none'}
                 "tool_calls": tool_calls_made,
                 "input_tokens": total_input,
                 "output_tokens": total_output,
+                "skills": selected_skills,
+                "external_action": external_action_completed,
             }
             if no_changes_declared:
                 result["no_changes"] = True

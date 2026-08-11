@@ -1,16 +1,23 @@
-"""Project AI Configuration Dialog — per-project agent and workflow settings."""
+"""Project AI Configuration Dialog — Agents, Skills, MCP, and workflow."""
+
+import json
+from dataclasses import asdict
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
     QPushButton, QComboBox, QSpinBox, QCheckBox, QTabWidget,
-    QWidget, QMessageBox, QGroupBox
+    QWidget, QMessageBox, QGroupBox, QListWidget, QListWidgetItem,
+    QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt
 
 from orchestrator.agent_config import (
     ProjectAgentConfig, load_project_config, save_project_config,
-    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS,
+    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, BUILTIN_SKILLS,
+    SkillConfig, MCPConfig,
 )
+from mcp_runtime.trust import approve_project_mcp, revoke_project_mcp
+from skills.trust import approve_project_skills, revoke_project_skills
 
 
 PROVIDERS = ["codex", "kimi", "deepseek"]
@@ -225,6 +232,77 @@ class ProjectConfigDialog(QDialog):
         worker_layout.addStretch()
         self.tabs.addTab(worker_widget, "执行者")
 
+        # ── Skills Tab ──
+        skills_widget = QWidget()
+        skills_layout = QVBoxLayout(skills_widget)
+        self.skills_enabled_cb = QCheckBox("启用 Skills 按需加载")
+        self.skills_enabled_cb.setChecked(True)
+        self.skills_enabled_cb.setToolTip(
+            "只把当前任务命中的 Skill 正文加入上下文，未命中的仅保留元数据"
+        )
+        skills_layout.addWidget(self.skills_enabled_cb)
+
+        self.project_skills_cb = QCheckBox(
+            "信任并加载项目自定义 .ai/skills"
+        )
+        self.project_skills_cb.setChecked(True)
+        skills_layout.addWidget(self.project_skills_cb)
+
+        skills_form = QFormLayout()
+        self.max_skills_spin = QSpinBox()
+        self.max_skills_spin.setRange(1, 8)
+        self.max_skills_spin.setValue(3)
+        self.max_skills_spin.setToolTip("限制单个任务注入的 Skill 数量，控制上下文大小")
+        skills_form.addRow("单任务最多加载：", self.max_skills_spin)
+        skills_layout.addLayout(skills_form)
+
+        skills_layout.addWidget(QLabel("内置 Skills："))
+        self.skill_list = QListWidget()
+        self._skill_items = {}
+        for name in BUILTIN_SKILLS:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.skill_list.addItem(item)
+            self._skill_items[name] = item
+        skills_layout.addWidget(self.skill_list)
+        skill_hint = QLabel(
+            "项目 Skill 目录：.ai/skills/<skill-name>/SKILL.md\n"
+            "SKILL.md 仅使用 name、description 元数据，正文只在命中后加载。"
+            "保存会把当前 Skill 内容指纹批准到项目外；文件变化后需重新确认。"
+        )
+        skill_hint.setWordWrap(True)
+        skills_layout.addWidget(skill_hint)
+        self.tabs.addTab(skills_widget, "Skills")
+
+        # ── MCP Tab ──
+        mcp_widget = QWidget()
+        mcp_layout = QVBoxLayout(mcp_widget)
+        self.mcp_enabled_cb = QCheckBox("启用 MCP 外部工具")
+        self.mcp_enabled_cb.setChecked(False)
+        self.mcp_enabled_cb.setToolTip(
+            "MCP 连接失败不会禁用本地文件、Git、Shell 和测试工具"
+        )
+        mcp_layout.addWidget(self.mcp_enabled_cb)
+        mcp_layout.addWidget(QLabel("MCP stdio 服务（JSON 数组）："))
+        self.mcp_servers_text = QPlainTextEdit()
+        self.mcp_servers_text.setPlaceholderText(
+            '[\n  {\n    "name": "github",\n'
+            '    "command": "npx",\n    "args": ["-y", "server-package"],\n'
+            '    "env": {"TOKEN": "${GITHUB_TOKEN}"},\n'
+            '    "read_only": true,\n    "allow_tools": ["*"]\n  }\n]'
+        )
+        mcp_layout.addWidget(self.mcp_servers_text)
+        mcp_hint = QLabel(
+            "安全规则：不通过 shell 启动；密钥请写 ${环境变量名}；"
+            "read_only=true 时会隐藏写入型工具。工具统一显示为 "
+            "mcp__服务__工具。启用并保存表示信任这些本地启动命令；"
+            "审批记录保存在项目目录之外，仓库不能自行授权。"
+        )
+        mcp_hint.setWordWrap(True)
+        mcp_layout.addWidget(mcp_hint)
+        self.tabs.addTab(mcp_widget, "MCP")
+
         # ── Features Tab ──
         feat_widget = QWidget()
         feat_layout = QVBoxLayout(feat_widget)
@@ -363,8 +441,36 @@ class ProjectConfigDialog(QDialog):
         self.auto_validate_cb.setChecked(cfg.auto_validation)
         self.auto_repair_cb.setChecked(cfg.auto_repair)
 
+        # Skills
+        self.skills_enabled_cb.setChecked(cfg.skills.enabled)
+        self.project_skills_cb.setChecked(cfg.skills.allow_project_skills)
+        self.max_skills_spin.setValue(cfg.skills.max_selected)
+        enabled_builtin = set(cfg.skills.enabled_builtin)
+        for name, item in self._skill_items.items():
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if name in enabled_builtin else Qt.CheckState.Unchecked
+            )
+
+        # MCP
+        self.mcp_enabled_cb.setChecked(cfg.mcp.enabled)
+        self.mcp_servers_text.setPlainText(json.dumps(
+            [asdict(server) for server in cfg.mcp.servers],
+            ensure_ascii=False, indent=2,
+        ))
+
     def _save(self):
         cfg = self._config
+        try:
+            raw_mcp = self.mcp_servers_text.toPlainText().strip() or "[]"
+            servers = json.loads(raw_mcp)
+            cfg.mcp = MCPConfig.from_dict({
+                "enabled": self.mcp_enabled_cb.isChecked(),
+                "servers": servers,
+            })
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            QMessageBox.warning(self, "MCP 配置无效", str(error))
+            return
         cfg.mode = self.mode_combo.currentData() or "auto"
 
         for agent_type in (
@@ -404,9 +510,26 @@ class ProjectConfigDialog(QDialog):
         cfg.continuation_context = self.continuation_cb.isChecked()
         cfg.auto_validation = self.auto_validate_cb.isChecked()
         cfg.auto_repair = self.auto_repair_cb.isChecked()
+        cfg.skills = SkillConfig(
+            enabled=self.skills_enabled_cb.isChecked(),
+            enabled_builtin=[
+                name for name, item in self._skill_items.items()
+                if item.checkState() == Qt.CheckState.Checked
+            ],
+            allow_project_skills=self.project_skills_cb.isChecked(),
+            max_selected=self.max_skills_spin.value(),
+        )
 
         try:
             save_project_config(self.project_root, cfg)
+            if cfg.mcp.enabled:
+                approve_project_mcp(self.project_root, cfg.mcp)
+            else:
+                revoke_project_mcp(self.project_root)
+            if cfg.skills.allow_project_skills:
+                approve_project_skills(self.project_root, cfg.skills)
+            else:
+                revoke_project_skills(self.project_root)
             QMessageBox.information(self, "保存成功",
                 f"配置已保存到 {self.project_root}/.ai/agents.json")
             self.accept()

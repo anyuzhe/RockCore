@@ -997,6 +997,7 @@ class TaskPanel(QWidget):
             "job_total_budget", "job_api_call_budget", "pdf_pages",
             "estimated_pages", "page_batches", "extension_round",
             "previous_task_input_budget", "budget_reason",
+            "skills", "project_skills_approved", "mcp",
         ):
             value = data.get(key)
             if value not in (None, ""):

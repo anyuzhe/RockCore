@@ -63,9 +63,10 @@ Output ONLY valid JSON with this structure:
 class ReviewerAgent:
     """Codex Reviewer: read-only code review via Codex SDK."""
 
-    def __init__(self, model_router: ModelRouter):
+    def __init__(self, model_router: ModelRouter, skill_manager=None):
         self.model_router = model_router
         self.agent_type = "reviewer"
+        self.skill_manager = skill_manager
 
     async def run(self, job) -> dict:
         """Run a review on the job's changes."""
@@ -144,9 +145,16 @@ Output ONLY valid JSON."""
         for provider_override, attempt_messages in attempts:
             provider_name = provider_override or "codex"
             try:
+                skill_prompt = ""
+                if self.skill_manager:
+                    body = self.skill_manager.get_body("code-review")
+                    if body:
+                        skill_prompt = (
+                            "\n\nSelected Skill: code-review\n" + body[:12000]
+                        )
                 response = await self.model_router.chat(
                     self.agent_type,
-                    REVIEWER_SYSTEM_PROMPT,
+                    REVIEWER_SYSTEM_PROMPT + skill_prompt,
                     attempt_messages,
                     provider_override=provider_override,
                     allow_provider_fallback=False,

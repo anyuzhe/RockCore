@@ -49,6 +49,7 @@ async def main():
     from agents.emergency_coder import EmergencyCoderAgent
     from app.ui.settings_dialog import load_config, save_config
     from memory.context_manager import ContextManager
+    from skills.manager import SkillManager
 
     config = load_config()
     working_path = resolve_working_dir(
@@ -129,6 +130,8 @@ async def main():
         logger.warning("No DeepSeek API key configured — Worker will use defaults")
 
     # ── Register agents ──
+    skill_manager = SkillManager(working_dir)
+    engine.skill_manager = skill_manager
     tool_broker = ToolBroker(
         project_root=working_dir,
         policy_engine=engine.policy_engine,
@@ -136,12 +139,23 @@ async def main():
     engine.tool_broker = tool_broker
 
     engine.register_agent("governor", GovernorAgent(engine.model_router))
-    engine.register_agent("planner", PlannerAgent(engine.model_router, context_manager=context_manager))
-    engine.register_agent("worker", WorkerAgent(engine.model_router, tool_broker, context_manager=context_manager))
-    engine.register_agent("reviewer", ReviewerAgent(engine.model_router))
+    engine.register_agent("planner", PlannerAgent(
+        engine.model_router, context_manager=context_manager,
+        skill_manager=skill_manager,
+    ))
+    engine.register_agent("worker", WorkerAgent(
+        engine.model_router, tool_broker, context_manager=context_manager,
+        skill_manager=skill_manager,
+    ))
+    engine.register_agent("reviewer", ReviewerAgent(
+        engine.model_router, skill_manager=skill_manager,
+    ))
     engine.register_agent("emergency_coder", EmergencyCoderAgent(engine.model_router, tool_broker))
 
-    logger.info("V5 agents registered: Codex(Governor/Reviewer/Emergency) + Kimi(Planner) + DeepSeek(Worker) + Memory")
+    logger.info(
+        "Agents registered: Codex(Governor/Reviewer/Emergency) + "
+        "Kimi(Planner) + DeepSeek(Worker) + Skills + MCP + Memory"
+    )
 
     if "--startup-smoke-test" in sys.argv:
         logger.info("Packaged startup smoke test passed")

@@ -6,6 +6,9 @@ import os
 import time
 from typing import Any
 
+from mcp_runtime.manager import MCPManager
+from mcp_runtime.trust import is_project_mcp_approved
+from orchestrator.agent_config import MCPConfig
 from orchestrator.policy_engine import PolicyEngine
 from tools.file_tools import FileTools
 from tools.shell_tools import ShellTools
@@ -20,11 +23,13 @@ class ToolBroker:
     """Central security layer: all AI tool calls go through here."""
 
     def __init__(self, project_root: str | os.PathLike[str] | None,
-                 policy_engine: PolicyEngine):
+                 policy_engine: PolicyEngine,
+                 mcp_manager: MCPManager | None = None):
         self.project_root = (
             os.fspath(project_root) if project_root is not None else os.getcwd()
         )
         self.policy = policy_engine
+        self.mcp_manager = mcp_manager
         self.file_tools = FileTools(self.project_root)
         self.shell_tools = ShellTools(self.project_root)
         self.search_tools = SearchTools(self.project_root)
@@ -302,26 +307,43 @@ class ToolBroker:
                 "write_file", "apply_patch", "insert_before", "insert_after",
                 "run_command", "run_tests", "git_status", "git_diff",
             }
+        elif task_type == "action":
+            allowed = {
+                "list_files", "read_file", "read_pdf", "search_in_file",
+                "search_code", "git_status", "git_diff", "read_log",
+            }
         else:
-            return definitions
-        return [
-            definition for definition in definitions
-            if definition["function"]["name"] in allowed
-        ]
+            allowed = None
+        local_definitions = (
+            definitions if allowed is None else [
+                definition for definition in definitions
+                if definition["function"]["name"] in allowed
+            ]
+        )
+        if self.mcp_manager:
+            local_definitions += self.mcp_manager.tool_definitions(task_type)
+        return local_definitions
 
     async def execute(self, task, tool_name: str, args: dict) -> dict:
         """Execute a tool call with policy enforcement."""
         start = time.time()
 
         handler = self._tool_registry.get(tool_name)
-        if not handler:
+        is_mcp = bool(
+            self.mcp_manager and self.mcp_manager.has_tool(tool_name)
+        )
+        if not handler and not is_mcp:
             return {
                 "status": "error",
                 "error": f"Unknown tool: {tool_name}",
                 "tool": tool_name,
             }
 
-        args, ignored_arguments = self._normalize_tool_arguments(handler, args)
+        if handler:
+            args, ignored_arguments = self._normalize_tool_arguments(handler, args)
+        else:
+            args = dict(args) if isinstance(args, dict) else {}
+            ignored_arguments = []
         if ignored_arguments:
             logger.info(
                 "Ignored unsupported arguments for %s: %s",
@@ -331,6 +353,16 @@ class ToolBroker:
         # 1. Policy check
         try:
             self.policy.check_tool_call(task, tool_name, args)
+            if (
+                is_mcp
+                and getattr(task, "task_type", "") in {
+                    "analysis", "review", "testing",
+                }
+                and not self.mcp_manager.tool_is_read_only(tool_name)
+            ):
+                raise PermissionError(
+                    "Read-only tasks cannot call a mutating MCP tool"
+                )
         except Exception as e:
             logger.warning(f"Tool call rejected: {tool_name} -> {e}")
             return {
@@ -342,7 +374,10 @@ class ToolBroker:
 
         # 2. Execute
         try:
-            result = await handler(**args)
+            result = (
+                await self.mcp_manager.call_tool(tool_name, args)
+                if is_mcp else await handler(**args)
+            )
             duration = int((time.time() - start) * 1000)
             if isinstance(result, dict):
                 result["tool"] = tool_name
@@ -409,5 +444,50 @@ class ToolBroker:
         }
         logger.info(f"ToolBroker project root updated: {project_root}")
 
+    async def configure_mcp(self, project_root: str | os.PathLike[str],
+                            config: MCPConfig | None = None) -> dict[str, dict]:
+        """Configure external tools without affecting the local tool registry."""
+        if self.mcp_manager is None:
+            self.mcp_manager = MCPManager(project_root)
+        if config and config.enabled and not is_project_mcp_approved(
+            project_root, config
+        ):
+            await self.mcp_manager.close()
+            return {
+                "policy": {
+                    "status": "approval_required",
+                    "tools": 0,
+                    "error": (
+                        "项目 MCP 配置尚未由本机用户批准；请在项目设置的 "
+                        "MCP 页确认并保存"
+                    ),
+                }
+            }
+        return await self.mcp_manager.configure(project_root, config)
+
+    async def close(self):
+        if self.mcp_manager:
+            await self.mcp_manager.close()
+
+    def is_read_only_mcp_tool(self, tool_name: str) -> bool:
+        return bool(
+            self.mcp_manager
+            and self.mcp_manager.has_tool(tool_name)
+            and self.mcp_manager.tool_is_read_only(tool_name)
+        )
+
+    def is_mutating_mcp_tool(self, tool_name: str) -> bool:
+        return bool(
+            self.mcp_manager
+            and self.mcp_manager.has_tool(tool_name)
+            and not self.mcp_manager.tool_is_read_only(tool_name)
+        )
+
     def get_available_tools(self) -> list[str]:
-        return list(self._tool_registry.keys())
+        names = list(self._tool_registry.keys())
+        if self.mcp_manager:
+            names.extend(
+                definition["function"]["name"]
+                for definition in self.mcp_manager.tool_definitions()
+            )
+        return names

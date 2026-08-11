@@ -14,7 +14,9 @@ Your role is to create a detailed task plan that respects the Constitution.
 
 Rules:
 1. Each task must be concrete and executable
-2. Task types: analysis, coding, testing, review
+2. Task types: analysis, coding, testing, review, action. Use action only for
+   an explicitly requested external side effect through MCP (for example,
+   creating an issue or PR); it must not stand in for a local code edit.
 3. Tasks can depend on other tasks
 4. Each task must specify allowed file paths
 5. Do NOT suggest modifying protected paths
@@ -51,6 +53,8 @@ Rules:
 20. Dependencies are authoritative. If a title or description mentions a task ID,
     that ID must still exist in the final tasks array. Never refer to a removed,
     merged, or renumbered task by its old ID.
+21. Select zero to three Skills from the supplied Skill Catalog for each task.
+    Do not invent skill names. Skills describe the execution SOP, not dependencies.
 
 Output ONLY valid JSON with this structure:
 {
@@ -59,9 +63,10 @@ Output ONLY valid JSON with this structure:
     {
       "id": "T001",
       "title": "Task title",
-      "type": "analysis|coding|testing|review",
+      "type": "analysis|coding|testing|review|action",
       "description": "What to do",
       "dependencies": [],
+      "skills": ["simple-edit"],
       "allowed_paths": ["relative/path/glob", "*.html", "src/**/*.py"],
       "acceptance_command": "pytest ..."
     }
@@ -101,6 +106,7 @@ Output ONLY valid JSON with this structure:
         "type": "coding|testing|analysis",
         "description": "Concrete repair work",
         "dependencies": [],
+        "skills": ["bug-fix"],
         "allowed_paths": ["relative/path/or/glob"],
         "acceptance_command": ""
       }
@@ -113,10 +119,12 @@ Output ONLY valid JSON with this structure:
 class PlannerAgent:
     """Kimi Planner: creates task DAG within Constitution bounds."""
 
-    def __init__(self, model_router: ModelRouter, context_manager=None):
+    def __init__(self, model_router: ModelRouter, context_manager=None,
+                 skill_manager=None):
         self.model_router = model_router
         self.context_manager = context_manager
         self.agent_type = "planner"
+        self.skill_manager = skill_manager
 
     async def run(self, job, constitution=None, continuation_context: str = "") -> dict:
         """Run the Planner to produce a task plan."""
@@ -147,6 +155,10 @@ Image Observations: {json.dumps(
         from app.image_attachments import attachment_context
 
         image_context = attachment_context(getattr(job, "attachments", None))
+        skill_catalog = (
+            self.skill_manager.catalog_text()
+            if self.skill_manager else "(no skills enabled)"
+        )
         messages = [
             {
                 "role": "user",
@@ -159,6 +171,9 @@ User Request: {job.user_request}{image_context}
 Constitution:
 {constitution_text}
 {memory_context}
+Skill Catalog:
+{skill_catalog}
+
 Create a plan with concrete, executable tasks.
 Each task should have a clear purpose and acceptance criteria.
 Tasks must NOT modify protected paths.
@@ -190,6 +205,7 @@ Output ONLY valid JSON."""
                 task.setdefault("type", "coding")
                 task.setdefault("dependencies", [])
                 task.setdefault("allowed_paths", [])
+                task.setdefault("skills", [])
                 task.setdefault("acceptance_command", "")
 
             logger.info(f"Planner: created {len(plan['tasks'])} tasks")
@@ -209,6 +225,7 @@ Output ONLY valid JSON."""
                         "description": job.user_request + image_context,
                         "dependencies": [],
                         "allowed_paths": [],
+                        "skills": [],
                         "acceptance_command": "",
                     }
                 ],
@@ -227,6 +244,9 @@ Job: {job.job_id}
 Failed Task: {repair_context.get('failed_task_id')} - {repair_context.get('failed_task_title')}
 Original Description: {repair_context.get('original_description')}
 Error: {repair_context.get('error')}
+
+Skill Catalog:
+{self.skill_manager.catalog_text() if self.skill_manager else '(no skills enabled)'}
 
 Create a minimal repair plan to fix this task. Focus on the specific error.
 Output ONLY valid JSON with the same structure as a normal plan."""

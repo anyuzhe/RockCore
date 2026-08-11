@@ -872,6 +872,14 @@ class MainWindow(QMainWindow):
             if not self.task_panel.has_task(data.get("task_id", "")):
                 self._reload_selected_workflow()
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
+            skills = data.get("skills") or []
+            if skills:
+                self.task_panel.append_stage_output(
+                    "worker",
+                    f"{data.get('task_id', '')} 已加载 Skills："
+                    + "、".join(map(str, skills)),
+                    repair_round=task_repair_round,
+                )
         elif event_type == "task_done" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "done")
             result = data.get("result") or {}
