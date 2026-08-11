@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +73,14 @@ def test_project_state_cleanup_unregisters_generated_git_worktrees(
             text=True, check=True,
         )
 
+    def registered_worktrees():
+        output = git("worktree", "list", "--porcelain").stdout
+        return {
+            Path(line[9:].strip()).resolve()
+            for line in output.splitlines()
+            if line.startswith("worktree ") and line[9:].strip()
+        }
+
     git("init", "-b", "main")
     git("config", "user.name", "RockCore Test")
     git("config", "user.email", "test@rockcore.local")
@@ -81,10 +90,9 @@ def test_project_state_cleanup_unregisters_generated_git_worktrees(
     worktree = project / ".ai" / "worktrees" / "ai-task"
     worktree.parent.mkdir(parents=True)
     git("worktree", "add", "-b", "ai/test", str(worktree))
-    assert str(worktree) in git("worktree", "list", "--porcelain").stdout
+    assert worktree.resolve() in registered_worktrees()
 
     app_paths.remove_project_state(project)
 
-    listing = git("worktree", "list", "--porcelain").stdout
-    assert str(worktree) not in listing
+    assert worktree.resolve() not in registered_worktrees()
     assert not (project / ".ai").exists()
