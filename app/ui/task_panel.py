@@ -237,6 +237,7 @@ class TaskPanel(QWidget):
     """A requirement shown as a conversation with an inline execution trace."""
 
     followup_requested = pyqtSignal(dict)
+    attention_resume_requested = pyqtSignal(dict)
 
     STAGES = (
         ("user", "已接收需求", "用户输入"),
@@ -392,6 +393,37 @@ class TaskPanel(QWidget):
         self.agent_summary.setObjectName("assistantSummary")
         self.agent_summary.setWordWrap(True)
         agent_layout.addWidget(self.agent_summary)
+
+        self.attention_card = QFrame()
+        self.attention_card.setObjectName("attentionCard")
+        attention_layout = QVBoxLayout(self.attention_card)
+        attention_layout.setContentsMargins(14, 12, 14, 12)
+        attention_layout.setSpacing(7)
+        attention_title = QLabel("需要你完成以下操作")
+        attention_title.setObjectName("attentionTitle")
+        self.attention_reason = QLabel("")
+        self.attention_reason.setObjectName("attentionReason")
+        self.attention_reason.setWordWrap(True)
+        self.attention_hint = QLabel("")
+        self.attention_hint.setObjectName("attentionHint")
+        self.attention_hint.setWordWrap(True)
+        attention_actions = QHBoxLayout()
+        attention_actions.addStretch(1)
+        self.attention_resume_btn = QPushButton("已处理，继续完成任务")
+        self.attention_resume_btn.setObjectName("attentionResumeButton")
+        self.attention_resume_btn.setToolTip(
+            "沿用当前 Job 和检查点，从中断步骤继续，不会创建新需求"
+        )
+        self.attention_resume_btn.clicked.connect(
+            self._request_attention_resume
+        )
+        attention_actions.addWidget(self.attention_resume_btn)
+        attention_layout.addWidget(attention_title)
+        attention_layout.addWidget(self.attention_reason)
+        attention_layout.addWidget(self.attention_hint)
+        attention_layout.addLayout(attention_actions)
+        self.attention_card.hide()
+        agent_layout.addWidget(self.attention_card)
 
         trace_label = QLabel("执行过程")
         trace_label.setObjectName("traceLabel")
@@ -763,9 +795,7 @@ class TaskPanel(QWidget):
             meta += f"  ·  承接 {source}"
         self.job_meta_label.setText(meta)
         self._set_header_status(status)
-        self.followup_btn.setEnabled(status in {
-            "done", "failed", "cancelled", "interrupted", "needs_attention"
-        })
+        self._set_terminal_actions(status, job)
         self.user_output.setText(request)
         self._set_user_attachments(job.get("attachments") or [])
         self.user_source_label.setText(f"继续自 {source}" if source else "")
@@ -864,7 +894,10 @@ class TaskPanel(QWidget):
             self.agent_summary.setText(f"已保存有效进度：{reason}。{hint}")
         elif status == "needs_attention":
             reason = job.get("failure_reason") or "需要你完成一项操作"
-            hint = job.get("recovery_hint") or "完成后可以继续此需求"
+            hint = (
+                job.get("recovery_hint")
+                or "完成后点击“已处理，继续完成任务”，将从当前检查点恢复。"
+            )
             self.agent_summary.setText(f"需要你的处理：{reason}。{hint}")
         elif status == "cancelled":
             self.agent_summary.setText("执行已停止。当前结果仍然保留，可以从这里继续。")
@@ -888,6 +921,9 @@ class TaskPanel(QWidget):
         self.job_meta_label.setText("选择项目后即可开始")
         self.job_status_indicator.clear()
         self.job_status_label.clear()
+        self.attention_card.hide()
+        self.attention_resume_btn.setEnabled(True)
+        self.followup_btn.show()
         self.followup_btn.setEnabled(False)
         self.user_row_widget.hide()
         self.agent_frame.hide()
@@ -1032,9 +1068,7 @@ class TaskPanel(QWidget):
             return
         self._current_job["status"] = status
         self._set_header_status(status)
-        self.followup_btn.setEnabled(status in {
-            "done", "failed", "cancelled", "interrupted", "needs_attention"
-        })
+        self._set_terminal_actions(status, self._current_job)
 
     def log(self, message: str, tab: str = "log"):
         if tab.lower() == "test":
@@ -1084,6 +1118,36 @@ class TaskPanel(QWidget):
     def _request_followup(self):
         if self._current_job:
             self.followup_requested.emit(self._current_job)
+
+    def _request_attention_resume(self):
+        if (
+            self._current_job
+            and self._current_job.get("status") == "needs_attention"
+        ):
+            self.attention_resume_btn.setEnabled(False)
+            self.attention_resume_requested.emit(self._current_job)
+
+    def _set_terminal_actions(self, status: str, job: dict | None = None):
+        """Keep checkpoint resume separate from creating a follow-up Job."""
+        is_attention = status == "needs_attention"
+        self.followup_btn.setVisible(not is_attention)
+        self.followup_btn.setEnabled(status in {
+            "done", "failed", "cancelled", "interrupted"
+        })
+        self.attention_card.setVisible(is_attention)
+        self.attention_resume_btn.setEnabled(is_attention)
+        if not is_attention:
+            return
+        job = job or self._current_job or {}
+        reason = str(
+            job.get("failure_reason") or "需要你完成一项外部操作"
+        ).strip()
+        hint = str(
+            job.get("recovery_hint")
+            or "完成操作后点击下方按钮；RockCore 会从刚才中断的位置继续。"
+        ).strip()
+        self.attention_reason.setText(f"原因：{reason}")
+        self.attention_hint.setText(f"处理方法：{hint}")
 
     def _set_header_status(self, status: str):
         style = STATUS_STYLE.get(status, STATUS_STYLE["created"])

@@ -346,6 +346,9 @@ class MainWindow(QMainWindow):
         self.project_panel.job_selected.connect(self._on_job_selected)
         self.project_panel.settings_requested.connect(self._open_settings)
         self.task_panel.followup_requested.connect(self._on_followup_requested)
+        self.task_panel.attention_resume_requested.connect(
+            self._on_attention_resume_requested
+        )
 
         self.project_panel.project_selected.connect(self._on_project_selected)
         self.project_panel.project_deleted.connect(self._on_project_deleted)
@@ -453,10 +456,22 @@ class MainWindow(QMainWindow):
                     self.task_panel.set_workflow(
                         job_dict, constitution_dict, plan_dict, task_dicts, review_dicts
                     )
-                    self._followup_source_job_id = job.job_id
-                    self.followup_source_label.setText(f"继续 {job.job_id}")
-                    self.clear_followup_btn.setVisible(True)
-                    self.input_text.setPlaceholderText("继续描述要补充、修改或修复的内容")
+                    if job.status == "needs_attention":
+                        self._followup_source_job_id = None
+                        self.followup_source_label.setText(
+                            f"等待处理 {job.job_id}"
+                        )
+                        self.clear_followup_btn.setVisible(False)
+                        self.input_text.setPlaceholderText(
+                            "请按上方提示处理，然后点击“已处理，继续完成任务”"
+                        )
+                    else:
+                        self._followup_source_job_id = job.job_id
+                        self.followup_source_label.setText(f"继续 {job.job_id}")
+                        self.clear_followup_btn.setVisible(True)
+                        self.input_text.setPlaceholderText(
+                            "继续描述要补充、修改或修复的内容"
+                        )
                     self._sync_project_runtime_state()
                     self._replay_buffered_job_events(job.job_id)
                     self._capture_diff()
@@ -473,6 +488,60 @@ class MainWindow(QMainWindow):
         self.input_text.setFocus()
         self.input_text.setPlaceholderText("继续描述要补充、修改或修复的内容")
         self.status_label.setText(f"已选择 {source_id}，请输入后续需求")
+
+    def _on_attention_resume_requested(self, data: dict):
+        """Resume the persisted Job instead of creating a continuation Job."""
+        job_id = str(data.get("job_id") or "")
+        if not job_id or not self.engine or not self._current_project:
+            return
+        project_data = dict(self._current_project)
+        project_key = self._project_key(project_data)
+        if project_key in self._running_jobs or project_key in self._starting_projects:
+            self.task_panel.attention_resume_btn.setEnabled(True)
+            QMessageBox.information(
+                self,
+                "项目正在执行",
+                "这个项目已有任务在运行，请等待当前任务结束后再继续。",
+            )
+            return
+        self._running_jobs[project_key] = job_id
+        self._job_projects[job_id] = project_key
+        self._running_job_id = job_id
+        self._selected_job_id = job_id
+        self._followup_source_job_id = None
+        self.followup_source_label.setText(f"恢复 {job_id}")
+        self.clear_followup_btn.setVisible(False)
+        self.pause_btn.show()
+        self.stop_btn.show()
+        self.task_panel.update_job_status(job_id, "executing")
+        self.status_label.setText("正在从中断位置继续任务")
+        asyncio.ensure_future(
+            self._resume_attention_job_async(job_id, project_data)
+        )
+
+    async def _resume_attention_job_async(self, job_id: str,
+                                          project_data: dict):
+        project_key = self._project_key(project_data)
+        try:
+            await self.engine.resume_attention_job(
+                job_id, str(project_data.get("root_path") or "")
+            )
+        except Exception as error:
+            if project_key == self._current_project_key():
+                self.bridge.log_message.emit(
+                    f"恢复任务失败：{error}", "log"
+                )
+            logger.exception("恢复任务失败：%s", job_id)
+        finally:
+            if self._running_jobs.get(project_key) == job_id:
+                self._running_jobs.pop(project_key, None)
+            self._job_projects.pop(job_id, None)
+            if project_key == self._current_project_key():
+                self._running_job_id = self._running_jobs.get(project_key)
+                self._refresh_job_list()
+                self.project_panel.select_job(job_id)
+                self._sync_project_runtime_state()
+                self._update_send_state()
 
     def _clear_followup_source(self):
         self._followup_source_job_id = None
@@ -978,6 +1047,7 @@ class MainWindow(QMainWindow):
             "job_governing": "governing",
             "job_planning": "planning",
             "job_executing": "executing",
+            "job_resuming_from_checkpoint": "executing",
             "job_reviewing": "reviewing",
             "job_done": "done",
             "job_failed": "failed",
@@ -1120,7 +1190,7 @@ class MainWindow(QMainWindow):
             )
             self.task_panel.update_stage(
                 "worker", "needs_attention",
-                "任务需要用户完成授权、选择或冲突处理",
+                "任务需要你完成一项外部操作",
                 repair_round=task_repair_round,
             )
             self.task_panel.append_stage_output(
@@ -1303,6 +1373,10 @@ class MainWindow(QMainWindow):
                     "worker",
                     f"请处理后继续：{data.get('reason', '需要用户完成必要操作')}",
                 )
+        elif event_type == "job_resuming_from_checkpoint":
+            self.status_label.setText("正在从中断位置继续任务")
+            if is_selected:
+                self._reload_selected_workflow()
         elif event_type == "job_failed":
             self.status_label.setText("任务失败")
             self._capture_diff()

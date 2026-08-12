@@ -175,6 +175,39 @@ def test_submitted_request_can_copy_the_complete_original_text():
     panel.close()
 
 
+def test_needs_attention_has_distinct_checkpoint_resume_action():
+    _app()
+    panel = TaskPanel()
+    emitted = []
+    panel.attention_resume_requested.connect(emitted.append)
+    job = {
+        "job_id": "JOB-ATTENTION",
+        "user_request": "处理加密文档",
+        "status": "needs_attention",
+        "failure_reason": "PDF 需要密码",
+        "recovery_hint": "请替换为已解密 PDF",
+        "created_at": "2026-08-12T01:00:00Z",
+    }
+
+    panel.set_workflow(job)
+
+    assert not panel.attention_card.isHidden()
+    assert "PDF 需要密码" in panel.attention_reason.text()
+    assert "已解密 PDF" in panel.attention_hint.text()
+    assert panel.attention_resume_btn.text() == "已处理，继续完成任务"
+    assert panel.followup_btn.isHidden()
+
+    panel.attention_resume_btn.click()
+    assert [item["job_id"] for item in emitted] == ["JOB-ATTENTION"]
+    assert not panel.attention_resume_btn.isEnabled()
+
+    panel.update_job_status("JOB-ATTENTION", "executing")
+    assert panel.attention_card.isHidden()
+    assert not panel.followup_btn.isHidden()
+    assert not panel.followup_btn.isEnabled()
+    panel.close()
+
+
 def test_workflow_shows_governor_fallback_and_unrepairable_reason():
     _app()
     panel = TaskPanel()

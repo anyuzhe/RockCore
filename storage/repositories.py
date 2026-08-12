@@ -82,6 +82,8 @@ class JobRepository:
                 "needs_attention",
             ):
                 job.completed_at = datetime.now(timezone.utc)
+            else:
+                job.completed_at = None
             self.session.commit()
         return job
 
@@ -316,6 +318,8 @@ class TaskRepository:
             task.updated_at = datetime.now(timezone.utc)
             if status in ("done", "failed", "blocked", "cancelled"):
                 task.completed_at = datetime.now(timezone.utc)
+            else:
+                task.completed_at = None
             self.session.commit()
         return task
 

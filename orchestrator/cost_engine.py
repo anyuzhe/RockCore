@@ -112,6 +112,7 @@ class CostEngine:
     def __init__(self, default_budget: JobBudget | None = None):
         self._budgets: dict[str, JobBudget] = {}
         self._usage: dict[str, list[UsageRecord]] = {}
+        self._persisted_usage: dict[str, dict[str, float | int]] = {}
         self._default_budget = replace(default_budget or JobBudget())
         self._repair_reservations: set[str] = set()
         self._review_reservations: set[str] = set()
@@ -181,6 +182,7 @@ class CostEngine:
     def set_budget(self, job_id: str, budget: JobBudget):
         self._budgets[job_id] = budget
         self._usage[job_id] = []
+        self._persisted_usage.pop(job_id, None)
         self._repair_reservations = {
             key for key in self._repair_reservations
             if not key.startswith(f"{job_id}:repair:")
@@ -360,6 +362,56 @@ class CostEngine:
     def get_budget(self, job_id: str) -> JobBudget:
         return self._budgets.get(job_id, self._default_budget)
 
+    def refresh_job_limits(self, job_id: str) -> JobBudget:
+        """Apply current user limits to a resumed Job without erasing usage."""
+        budget = self._ensure_job_budget(job_id)
+        defaults = self._default_budget
+        for name in (
+            "max_total_tokens", "max_input_tokens", "max_output_tokens",
+            "max_api_calls", "max_auto_total_tokens", "max_auto_input_tokens",
+            "max_auto_output_tokens", "max_auto_api_calls",
+        ):
+            setattr(budget, name, max(getattr(budget, name), getattr(defaults, name)))
+        budget.cached_input_weight = defaults.cached_input_weight
+        budget.max_cost_cny = defaults.max_cost_cny
+        return budget
+
+    def restore_persisted_usage(
+        self, job_id: str, *, input_tokens: int = 0,
+        cached_input_tokens: int = 0, output_tokens: int = 0,
+        calls: int = 0, billable_cost: float = 0.0,
+    ) -> None:
+        """Restore aggregate usage so a resumed Job keeps its hard limits."""
+        if job_id in self._persisted_usage:
+            return
+        input_tokens = max(0, int(input_tokens or 0))
+        cached_input_tokens = min(
+            input_tokens, max(0, int(cached_input_tokens or 0))
+        )
+        live = self._usage.get(job_id, [])
+        live_input = sum(record.input_tokens for record in live)
+        live_cached = sum(record.cached_input_tokens for record in live)
+        live_output = sum(record.output_tokens for record in live)
+        live_billable = sum(
+            self.estimate_billable_cost(
+                record.agent_type, record.input_tokens, record.output_tokens,
+                record.provider, record.billing_mode,
+                record.cached_input_tokens, record.model_name,
+            )
+            for record in live
+        )
+        self._persisted_usage[job_id] = {
+            # The current process may still hold the calls that were just
+            # persisted. Store only the missing historical prefix.
+            "input": max(0, input_tokens - live_input),
+            "cached_input": max(0, cached_input_tokens - live_cached),
+            "output": max(0, int(output_tokens or 0) - live_output),
+            "calls": max(0, int(calls or 0) - len(live)),
+            "billable_cost": max(
+                0.0, float(billable_cost or 0.0) - live_billable
+            ),
+        }
+
     async def record_usage(self, job_id: str, agent_type: str,
                            input_tokens: int = 0,
                            cached_input_tokens: int = 0,
@@ -500,9 +552,21 @@ class CostEngine:
     def _usage_totals(self, job_id: str) -> dict[str, Any]:
         budget = self.get_budget(job_id)
         usage = self._usage.get(job_id, [])
-        effective_input = self._effective_input(budget, usage)
-        output = sum(record.output_tokens for record in usage)
-        billable_cost = sum(
+        persisted = self._persisted_usage.get(job_id, {})
+        persisted_input = int(persisted.get("input", 0) or 0)
+        persisted_cached = min(
+            persisted_input,
+            int(persisted.get("cached_input", 0) or 0),
+        )
+        effective_input = (
+            persisted_input - persisted_cached
+            + math.ceil(persisted_cached * budget.cached_input_weight)
+            + self._effective_input(budget, usage)
+        )
+        output = int(persisted.get("output", 0) or 0) + sum(
+            record.output_tokens for record in usage
+        )
+        billable_cost = float(persisted.get("billable_cost", 0.0) or 0.0) + sum(
             self.estimate_billable_cost(
                 record.agent_type, record.input_tokens, record.output_tokens,
                 record.provider, record.billing_mode,
@@ -514,7 +578,7 @@ class CostEngine:
             "effective_input": effective_input,
             "output": output,
             "effective_total": effective_input + output,
-            "calls": len(usage),
+            "calls": int(persisted.get("calls", 0) or 0) + len(usage),
             "billable_cost": billable_cost,
         }
 

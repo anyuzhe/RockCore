@@ -535,3 +535,32 @@ def test_workflow_budget_exposes_and_releases_protected_phase_capacity():
     assert released["reserved_tokens"] == 0
     assert released["reserved_calls"] == 0
     assert budget.max_cost_cny == 10.0
+
+
+def test_resumed_budget_restores_only_usage_missing_from_live_memory():
+    async def scenario():
+        engine = CostEngine()
+        await engine.record_usage(
+            "JOB-RESUMED", "worker",
+            input_tokens=100_000,
+            cached_input_tokens=20_000,
+            output_tokens=10_000,
+            provider="deepseek",
+            model_name="deepseek-v4-pro",
+        )
+        engine.restore_persisted_usage(
+            "JOB-RESUMED",
+            input_tokens=160_000,
+            cached_input_tokens=30_000,
+            output_tokens=15_000,
+            calls=2,
+            billable_cost=0.34,
+        )
+        snapshot = engine.get_budget_snapshot("JOB-RESUMED")
+
+        assert snapshot["used_effective_input_tokens"] == 134_500
+        assert snapshot["used_output_tokens"] == 15_000
+        assert snapshot["used_calls"] == 2
+        assert snapshot["billable_cost"] == 0.34
+
+    asyncio.run(scenario())

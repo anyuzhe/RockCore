@@ -848,6 +848,245 @@ class Engine:
                 self._runtime_context.reset(token)
                 await self._close_job_runtime(runtime)
 
+    async def resume_attention_job(self, job_id: str, project_root: str):
+        """Resume one persisted needs-attention Job at its checkpoint."""
+        project_key = str(Path(project_root).resolve())
+        lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
+        async with lock:
+            runtime = await self._create_job_runtime(job_id, project_key)
+            token = self._runtime_context.set(runtime)
+            event_token = (
+                self.event_bus.bind_job(job_id)
+                if hasattr(self.event_bus, "bind_job") else None
+            )
+            self._job_runtimes[job_id] = runtime
+            try:
+                return await self._resume_attention_pipeline(
+                    job_id, project_key
+                )
+            finally:
+                self._job_runtimes.pop(job_id, None)
+                if event_token is not None:
+                    self.event_bus.reset_job(event_token)
+                self._runtime_context.reset(token)
+                await self._close_job_runtime(runtime)
+
+    def _configure_job_runtime(self, job, project_root: str,
+                               proj_config: ProjectAgentConfig) -> None:
+        """Restore provider and project context needed by a checkpoint run."""
+        self.model_router.set_job_id(job.job_id)
+        if self.tool_broker:
+            self.tool_broker.set_project_root(project_root)
+        profiles = {
+            "governor": proj_config.governor,
+            "planner": proj_config.planner,
+            "worker": proj_config.worker,
+            "reviewer": proj_config.reviewer,
+            "emergency_coder": proj_config.emergency_coder,
+        }
+        self.model_router.set_job_routing(
+            job.job_id,
+            provider_map={
+                role: profile.provider for role, profile in profiles.items()
+                if profile.provider
+            },
+            model_map={
+                role: profile.model for role, profile in profiles.items()
+                if profile.model
+            },
+            reasoning_map={
+                role: profile.reasoning_effort
+                for role, profile in profiles.items()
+                if profile.reasoning_effort
+            },
+        )
+
+    @staticmethod
+    def _resumable_task_ids(tasks: list) -> set[str]:
+        """Return the unfinished checkpoint and its downstream dependency chain."""
+        candidates = {
+            task.task_id for task in tasks
+            if task.status in {
+                "needs_attention", "interrupted", "blocked", "pending",
+                "running",
+            }
+        }
+        roots = {
+            task.task_id for task in tasks
+            if task.status in {"needs_attention", "interrupted", "running"}
+        }
+        if not roots:
+            roots = set(candidates)
+        selected = set(roots)
+        changed = True
+        while changed:
+            changed = False
+            for task in tasks:
+                if task.task_id not in candidates or task.task_id in selected:
+                    continue
+                if selected.intersection(task.dependencies or []):
+                    selected.add(task.task_id)
+                    changed = True
+        return selected
+
+    async def _resume_attention_pipeline(self, job_id: str,
+                                         project_root: str):
+        """Continue the same Job from its persisted phase and task worktrees."""
+        repos = self._get_repos()
+        job = None
+        worker = None
+        saved_turns = None
+        finalized = False
+        try:
+            job = repos["job"].get_by_id(job_id)
+            if not job:
+                raise ValueError(f"Job not found: {job_id}")
+            if job.status != "needs_attention":
+                raise ValueError(
+                    f"Job {job_id} is not waiting for user action: {job.status}"
+                )
+
+            self.state_machine.restore(job_id, JobState.WAITING_USER)
+            self._cancelled_job_ids.discard(job_id)
+            proj_root = job.project.root_path if job.project else project_root
+            proj_config = load_project_config(proj_root)
+            self._configure_job_runtime(job, proj_root, proj_config)
+            self.model_router.cost_engine.refresh_job_limits(job_id)
+            self.model_router.cost_engine.restore_persisted_usage(
+                job_id,
+                input_tokens=job.usage_input_tokens,
+                cached_input_tokens=job.usage_cached_input_tokens,
+                output_tokens=job.usage_output_tokens,
+                calls=job.usage_calls,
+                billable_cost=job.usage_billable_cost,
+            )
+
+            if self.skill_manager:
+                self.skill_manager.configure(
+                    proj_root, proj_config.skills, proj_config.plugins
+                )
+            if self.tool_broker and hasattr(self.tool_broker, "configure_mcp"):
+                await self.tool_broker.configure_mcp(
+                    proj_root, proj_config.mcp,
+                    trusted_servers=proj_config.builtin_mcp_servers(
+                        job.user_request
+                    ),
+                )
+
+            for role in ("worker", "planner"):
+                agent = self.get_agent(role)
+                if agent and getattr(agent, "context_manager", None):
+                    await agent.context_manager.switch_project(proj_root)
+
+            repository = Repository(proj_root)
+            repository.ensure_initialized()
+            self.merge_manager = MergeManager(proj_root)
+            baseline = self.test_manager.capture_snapshot(proj_root)
+            complexity = self._classify_request(job.user_request)
+            job._rockcore_complexity = complexity
+            worker = self.get_agent("worker")
+            if worker:
+                saved_turns = worker.max_turns
+                worker.max_turns = proj_config.get_worker_turns(complexity)
+
+            await self.event_bus.publish(
+                "job_resuming_from_checkpoint",
+                job_id=job_id,
+                checkpoint=dict(job.last_checkpoint or {}),
+            )
+            repos["job"].update_status(job_id, "executing")
+            repos["job"].clear_failure(job_id)
+            repos["_session"].refresh(job)
+
+            constitution = repos["constitution"].get_by_job(job.id)
+            if not constitution:
+                precheck = self.model_router.risk_engine.precheck_request(
+                    job.user_request, proj_root
+                )
+                await self._run_governor(
+                    job, repos, proj_config, fallback_precheck=precheck
+                )
+                constitution = repos["constitution"].get_by_job(job.id)
+
+            plan = repos["plan"].get_by_job(job.id)
+            if not plan:
+                await self._run_planner(job, repos, proj_config)
+                repos["_session"].refresh(job)
+                if job.status in {"failed", "needs_attention"}:
+                    return {"status": job.status}
+
+            tasks = repos["task"].list_by_job(job.id)
+            resume_ids = self._resumable_task_ids(tasks)
+            if resume_ids:
+                for task in tasks:
+                    if task.task_id in resume_ids:
+                        repos["task"].update_status_by_pk(task.id, "pending")
+                result = await self._run_execution(
+                    job, repos, baseline,
+                    proj_config=proj_config,
+                    complexity=complexity,
+                    task_ids=resume_ids,
+                    resume_source_job_id=job_id,
+                )
+                repos["_session"].refresh(job)
+                if result.get("status") != "completed":
+                    return result
+
+            # If execution had already completed, the checkpoint belongs to
+            # Reviewer (for example a production credential was missing).
+            constitution = repos["constitution"].get_by_job(job.id)
+            auto_medium = (
+                proj_config.mode == "auto"
+                and self._risk_route(getattr(job, "risk_level", "medium"))
+                == "medium"
+            )
+            if (
+                proj_config.reviewer.enabled
+                and not auto_medium
+                and bool(getattr(constitution, "requires_final_review", True))
+            ):
+                await self._run_reviewer(
+                    job, repos, proj_config=proj_config,
+                    complexity=complexity,
+                )
+            else:
+                await self._skip_review(
+                    job, repos, "从检查点恢复后已通过确定性验证"
+                )
+            repos["_session"].refresh(job)
+            if not self._is_cancelled(job_id, job, repos):
+                await self._finalize(job, repos)
+                finalized = True
+            return {"status": job.status, "job_id": job_id}
+        except BudgetExceededError as error:
+            repos["job"].update_status(job_id, "needs_attention")
+            self._store_job_failure(repos, job_id, str(error))
+            self.state_machine.restore(job_id, JobState.WAITING_USER)
+            await self.event_bus.publish(
+                "job_needs_attention", job_id=job_id,
+                reason=str(error), failure_stage="budget_continuation",
+            )
+            return {"status": "needs_attention", "reason": str(error)}
+        except Exception as error:
+            logger.exception("Checkpoint resume failed for %s", job_id)
+            repos["job"].update_status(job_id, "failed")
+            self._store_job_failure(repos, job_id, str(error))
+            self.state_machine.restore(job_id, JobState.FAILED)
+            await self.event_bus.publish(
+                "job_failed", job_id=job_id, error=str(error),
+                failure_stage="checkpoint_resume",
+            )
+            return {"status": "failed", "reason": str(error)}
+        finally:
+            if worker and saved_turns is not None:
+                worker.max_turns = saved_turns
+            if job is not None and not finalized:
+                try:
+                    await self._finalize(job, repos)
+                except Exception as error:
+                    logger.warning("Could not finalize resumed %s: %s", job_id, error)
+            self._close_repos(repos)
+
     async def _run_job_pipeline(self, job_id: str, project_root: str):
         """Run the full job lifecycle: Governor → Planner → Worker → Test → Reviewer."""
         logger.info(f"Running job: {job_id}")
@@ -2085,7 +2324,8 @@ class Engine:
                              proj_config: ProjectAgentConfig | None = None,
                              complexity: str = "normal",
                              task_ids: set[str] | None = None,
-                             repair_round: int = 0) -> dict:
+                             repair_round: int = 0,
+                             resume_source_job_id: str = "") -> dict:
         """Execute tasks in parallel using DAG scheduler (V4: worktree isolation)."""
         if self._is_cancelled(job.job_id, job, repos):
             return {"status": "cancelled", "reason": "任务已由用户停止"}
@@ -2104,7 +2344,8 @@ class Engine:
             return {"status": "failed", "reason": "未注册执行者"}
 
         # Collect all tasks as dicts for the DAG scheduler
-        all_tasks = repos["task"].list_by_job(job.id)
+        all_job_tasks = repos["task"].list_by_job(job.id)
+        all_tasks = all_job_tasks
         if task_ids is not None:
             all_tasks = [task for task in all_tasks if task.task_id in task_ids]
         if not all_tasks:
@@ -2178,6 +2419,7 @@ class Engine:
             budget=self.model_router.cost_engine.get_budget_snapshot(job.job_id),
         )
 
+        selected_task_ids = {task.task_id for task in all_tasks}
         task_dicts = []
         for t in all_tasks:
             task_dicts.append({
@@ -2185,7 +2427,12 @@ class Engine:
                 "title": t.title,
                 "description": t.description,
                 "type": t.task_type,
-                "dependencies": t.dependencies or [],
+                # Dependencies already completed before this checkpoint are
+                # satisfied; keep only dependencies participating in this run.
+                "dependencies": [
+                    dependency for dependency in (t.dependencies or [])
+                    if dependency in selected_task_ids
+                ],
                 "allowed_paths": t.allowed_paths or [],
                 "skills": t.skills or [],
                 "acceptance_command": t.acceptance_command or "",
@@ -2260,7 +2507,10 @@ class Engine:
                 try:
                     wt_result = await self.merge_manager.create_task_worktree(
                         task_id, job.job_id,
-                        source_job_id=str(job.source_job_id or ""),
+                        source_job_id=(
+                            resume_source_job_id
+                            or str(job.source_job_id or "")
+                        ),
                     )
                 except TypeError:
                     wt_result = await self.merge_manager.create_task_worktree(
@@ -2403,7 +2653,10 @@ class Engine:
                     final_outputs=final_outputs,
                     input_paths=list(artifact_manifest.get("inputs") or []),
                     require_declared_outputs=bool(document_profile),
-                    source_job_id=str(job.source_job_id or ""),
+                    source_job_id=(
+                        resume_source_job_id
+                        or str(job.source_job_id or "")
+                    ),
                 )
                 t._rockcore_runtime_checkpoint = runtime_checkpoint
             t._rockcore_max_auto_input_budget = int(
@@ -4561,11 +4814,13 @@ class Engine:
             if "ocr" in normalized or "extractable text" in normalized:
                 return (
                     "pdf_ocr_required",
-                    "请提供可搜索文本版或完成 OCR 的 PDF，然后点击“继续此需求”。",
+                    "请提供可搜索文本版或完成 OCR 的 PDF，然后点击"
+                    "“已处理，继续完成任务”。",
                 )
             return (
                 "user_input_required",
-                "补充所需文件或信息后点击“继续此需求”，将从当前检查点恢复。",
+                "补充所需文件或信息后点击“已处理，继续完成任务”，"
+                "将从当前检查点恢复。",
             )
         if cls._is_budget_error(error):
             return (
@@ -4610,7 +4865,7 @@ class Engine:
             )
         return (
             "execution_failed",
-            "已保留任务检查点；可继续此需求，只重做失败和受阻步骤。",
+            "已保留任务检查点；恢复时只重做失败和受阻步骤。",
         )
 
     def _store_job_failure(self, repos, job_id: str, error: str):

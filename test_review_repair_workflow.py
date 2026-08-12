@@ -221,6 +221,84 @@ def test_planner_explains_when_rejected_review_cannot_be_repaired(tmp_path):
     asyncio.run(scenario())
 
 
+def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
+        tmp_path, monkeypatch):
+    async def scenario():
+        project_root = tmp_path / "resume-project"
+        project_root.mkdir()
+        engine = Engine(db_path=str(tmp_path / "resume.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Resume", str(project_root))
+            job = repos["job"].create(
+                "JOB-RESUME", project.id, "完成剩余实现"
+            )
+            repos["constitution"].create(
+                job.id, "完成剩余实现", [], ["验证通过"],
+                risk="medium", requires_final_review=False,
+            )
+            repos["plan"].create(
+                job.id, "原计划", raw_output={"tasks": []}
+            )
+            done = repos["task"].create(
+                "T001", job.id, "已完成分析", task_type="analysis"
+            )
+            attention = repos["task"].create(
+                "T002", job.id, "等待外部操作", dependencies=["T001"]
+            )
+            blocked = repos["task"].create(
+                "T003", job.id, "后续实现", dependencies=["T002"]
+            )
+            repos["task"].update_status_by_pk(done.id, "done")
+            repos["task"].update_status_by_pk(attention.id, "needs_attention")
+            repos["task"].update_status_by_pk(blocked.id, "blocked")
+            repos["job"].update_status(job.job_id, "needs_attention")
+            engine.state_machine.restore(job.job_id, JobState.WAITING_USER)
+        finally:
+            repos["_session"].close()
+
+        calls = []
+
+        async def fake_execution(job, repos, _baseline, **kwargs):
+            calls.append({
+                "job_id": job.job_id,
+                "task_ids": set(kwargs["task_ids"]),
+                "resume_source_job_id": kwargs["resume_source_job_id"],
+            })
+            for task in repos["task"].list_by_job(job.id):
+                if task.task_id in kwargs["task_ids"]:
+                    repos["task"].update_status_by_pk(task.id, "done")
+            engine.state_machine.transition(job.job_id, JobState.EXECUTING)
+            engine.state_machine.transition(job.job_id, JobState.TESTING)
+            return {"status": "completed"}
+
+        monkeypatch.setattr(engine, "_run_execution", fake_execution)
+
+        result = await engine.resume_attention_job(
+            "JOB-RESUME", str(project_root)
+        )
+
+        check = engine._get_repos()
+        try:
+            jobs = check["job"].list_by_project(project.id)
+            resumed = check["job"].get_by_id("JOB-RESUME")
+            tasks = check["task"].list_by_job(resumed.id)
+            assert result["status"] == "done"
+            assert len(jobs) == 1
+            assert calls == [{
+                "job_id": "JOB-RESUME",
+                "task_ids": {"T002", "T003"},
+                "resume_source_job_id": "JOB-RESUME",
+            }]
+            assert [(task.task_id, task.status) for task in tasks] == [
+                ("T001", "done"), ("T002", "done"), ("T003", "done")
+            ]
+        finally:
+            check["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_two_repair_rounds_are_recorded_then_stop_with_clear_reason(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

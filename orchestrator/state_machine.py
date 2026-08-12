@@ -68,7 +68,10 @@ VALID_TRANSITIONS: dict[JobState, set[JobState]] = {
     JobState.REPAIRING: {JobState.EXECUTING, JobState.REPLANNING, JobState.ESCALATING, JobState.FAILED, JobState.CANCELLED},
     JobState.REPLANNING: {JobState.PLANNING, JobState.ESCALATING, JobState.FAILED, JobState.CANCELLED},
     JobState.ESCALATING: {JobState.EXECUTING, JobState.WAITING_USER, JobState.FAILED, JobState.CANCELLED},
-    JobState.WAITING_USER: {JobState.EXECUTING, JobState.REPLANNING, JobState.CANCELLED},
+    JobState.WAITING_USER: {
+        JobState.GOVERNING, JobState.PLANNING, JobState.EXECUTING,
+        JobState.REVIEWING, JobState.REPLANNING, JobState.CANCELLED,
+    },
     JobState.REVIEWING: {
         JobState.DONE, JobState.REWORK, JobState.WAITING_USER,
         JobState.FAILED, JobState.CANCELLED,
@@ -125,3 +128,7 @@ class StateMachine:
 
     def reset(self, job_id: str):
         self._states.pop(job_id, None)
+
+    def restore(self, job_id: str, state: JobState):
+        """Restore a persisted checkpoint state without emitting a transition."""
+        self._states[job_id] = state

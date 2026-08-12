@@ -207,6 +207,12 @@ async def main():
         QFrame#userMessage {
             background: #efede8; border: 1px solid #ded9d1; border-radius: 8px;
         }
+        QFrame#attentionCard {
+            background: #fff8e6; border: 1px solid #e2bd63; border-radius: 8px;
+        }
+        QLabel#attentionTitle { color: #7a5200; font-size: 13px; font-weight: 700; }
+        QLabel#attentionReason { color: #4f3b12; font-size: 12px; }
+        QLabel#attentionHint { color: #755d27; font-size: 12px; }
         QLabel#submittedImagePreview {
             background: #ffffff; border: 1px solid #d8d3cb; border-radius: 6px;
             color: #756f67; font-size: 10px;
@@ -281,6 +287,12 @@ async def main():
         QPushButton#iconButton:hover, QPushButton#quietIconButton:hover,
         QPushButton#composerToolButton:hover { background: #e6e1da; }
         QPushButton#quietButton { background: transparent; border: 1px solid #d8d3cb; }
+        QPushButton#attentionResumeButton {
+            background: #c87a22; color: #ffffff; border: 1px solid #b46a18;
+            border-radius: 6px; padding: 7px 14px; font-weight: 600;
+        }
+        QPushButton#attentionResumeButton:hover { background: #b96c18; }
+        QPushButton#attentionResumeButton:disabled { background: #d8c5aa; color: #ffffff; }
         QToolButton#disclosureButton, QToolButton#detailButton {
             background: transparent; color: #766f67; border: none; padding: 3px;
         }
