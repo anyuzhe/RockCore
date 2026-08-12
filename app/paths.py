@@ -16,6 +16,41 @@ def application_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def bundled_git_root() -> Path | None:
+    """Return the packaged MinGit root when this build includes it."""
+    roots = []
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        roots.append(Path(frozen_root))
+    roots.append(application_dir())
+    for root in roots:
+        candidate = root / "runtime" / "git"
+        if (candidate / "cmd" / "git.exe").is_file():
+            return candidate
+    return None
+
+
+def configure_bundled_git() -> Path | None:
+    """Put packaged MinGit first on PATH without requiring a system install."""
+    if sys.platform != "win32":
+        return None
+    root = bundled_git_root()
+    if root is None:
+        return None
+    directories = [root / "cmd", root / "mingw64" / "bin"]
+    current = os.environ.get("PATH", "")
+    existing = [item for item in current.split(os.pathsep) if item]
+    normalized = {os.path.normcase(os.path.abspath(item)) for item in existing}
+    prepend = [
+        str(path) for path in directories
+        if path.is_dir()
+        and os.path.normcase(os.path.abspath(path)) not in normalized
+    ]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join([*prepend, *existing])
+    return root / "cmd" / "git.exe"
+
+
 def is_writable_directory(path: str | os.PathLike[str], *,
                           create: bool = False) -> bool:
     """Verify writability with a real file probe (``os.access`` is unreliable)."""

@@ -11,6 +11,13 @@ APP = ROOT / "app" / "main.py"
 ASSETS = ROOT / "assets"
 BUILTIN_SKILLS = ROOT / "skills" / "builtin"
 VERSION_FILE = ROOT / "build" / "version_info.generated.txt"
+MINGIT = ROOT / "build" / "vendor" / "mingit"
+
+if not (MINGIT / "cmd" / "git.exe").is_file():
+    raise SystemExit(
+        "Bundled MinGit is missing. Run scripts/build_windows.ps1 so the "
+        "verified runtime is downloaded before PyInstaller."
+    )
 
 hiddenimports = ["qasync", "PyQt6.QtSvg", "PyQt6.QtSvgWidgets"]
 hiddenimports += collect_submodules("sqlalchemy")
@@ -27,6 +34,7 @@ a = Analysis(
     datas=[
         (str(ASSETS), "assets"),
         (str(BUILTIN_SKILLS), "skills/builtin"),
+        (str(MINGIT), "runtime/git"),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],

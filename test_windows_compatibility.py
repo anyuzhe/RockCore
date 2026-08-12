@@ -59,6 +59,41 @@ def test_windows_appdata_path_supports_chinese_user_names(tmp_path, monkeypatch)
     assert app_paths.app_data_dir() == (appdata / "RockCore").resolve()
 
 
+def test_packaged_windows_prepends_bundled_git_without_system_git(
+    tmp_path, monkeypatch
+):
+    app_dir = tmp_path / "RockCore"
+    git_root = app_dir / "runtime" / "git"
+    git_exe = git_root / "cmd" / "git.exe"
+    git_exe.parent.mkdir(parents=True)
+    git_exe.write_bytes(b"MZ")
+    (git_root / "mingw64" / "bin").mkdir(parents=True)
+    monkeypatch.setattr(app_paths.sys, "platform", "win32")
+    monkeypatch.setattr(app_paths, "application_dir", lambda: app_dir)
+    monkeypatch.setattr(app_paths.sys, "_MEIPASS", str(app_dir), raising=False)
+    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+
+    resolved = app_paths.configure_bundled_git()
+
+    assert resolved == git_exe
+    entries = app_paths.os.environ["PATH"].split(app_paths.os.pathsep)
+    assert entries[0] == str(git_root / "cmd")
+    assert entries[1] == str(git_root / "mingw64" / "bin")
+    assert app_paths.os.environ["PATH"].endswith(r"C:\Windows\System32")
+
+
+def test_source_windows_without_bundled_git_leaves_path_unchanged(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(app_paths.sys, "platform", "win32")
+    monkeypatch.setattr(app_paths, "application_dir", lambda: tmp_path)
+    monkeypatch.delattr(app_paths.sys, "_MEIPASS", raising=False)
+    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+
+    assert app_paths.configure_bundled_git() is None
+    assert app_paths.os.environ["PATH"] == r"C:\Windows\System32"
+
+
 def test_read_only_project_metadata_falls_back_to_user_data(
     tmp_path, monkeypatch
 ):

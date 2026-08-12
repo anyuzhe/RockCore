@@ -1,4 +1,5 @@
 build/pyinstaller/
+build/vendor/
 dist/
 release/
 build/version_info.generated.txt

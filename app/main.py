@@ -21,6 +21,7 @@ from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, icon_path
 from app.paths import (
     app_data_dir,
     application_dir,
+    configure_bundled_git,
     resolve_working_dir,
 )
 from app.runtime import configure_runtime_logging, configure_windows_identity
@@ -35,6 +36,20 @@ logger = logging.getLogger(__name__)
 
 async def main():
     configure_runtime_logging()
+    bundled_git = configure_bundled_git()
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        if bundled_git is None:
+            raise RuntimeError("Windows 安装包缺少内置 Git 运行时")
+        from app.subprocess_utils import run_process
+        git_check = run_process(
+            [str(bundled_git), "--version"], capture_output=True
+        )
+        if git_check.returncode != 0:
+            raise RuntimeError(
+                "内置 Git 无法启动："
+                + (git_check.stderr.strip() or f"exit {git_check.returncode}")
+            )
+        logger.info("Bundled Git ready: %s", git_check.stdout.strip())
     from storage.database import init_database
     from orchestrator.engine import Engine
     from orchestrator.model_router import ModelRouter
