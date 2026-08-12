@@ -10,6 +10,7 @@ from orchestrator.cost_engine import BudgetExceededError, JobBudget
 from orchestrator.engine import Engine
 from orchestrator.event_bus import EventBus
 from orchestrator.model_router import DEFAULT_REQUEST_TIMEOUT, ModelRouter
+from orchestrator.state_machine import JobState
 
 
 def _task(task_type="coding"):
@@ -764,7 +765,7 @@ class _ThrowingProviderWorker:
         raise RuntimeError("Missing credentials for DeepSeek")
 
 
-def test_max_turn_failures_without_progress_are_terminal_after_retries(tmp_path):
+def test_max_turn_failures_without_progress_pause_for_user_confirmation(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         worker = _RecoveringWorker()
@@ -783,14 +784,56 @@ def test_max_turn_failures_without_progress_are_terminal_after_retries(tmp_path)
             str(tmp_path),
         )
 
-        assert result["status"] == "failed"
-        assert result["failure_stage"] == "execution_failed_without_progress"
-        assert len(worker.calls) == 3
-        assert all(call.get("provider_override") is None for call in worker.calls)
-        assert "attempt 1 failed" in worker.calls[1]["recovery_context"]
-        assert "final focused Worker strategy attempt" in (
-            worker.calls[2]["recovery_context"]
-        )
+        assert result["status"] == "needs_user_action"
+        assert result["failure_stage"] == "turn_limit_continuation"
+        assert len(worker.calls) == 1
+        assert not engine.event_bus.get_history("task_escalating")
+
+    asyncio.run(scenario())
+
+
+def test_max_turn_checkpoint_is_user_action_in_execution_pipeline(tmp_path):
+    class TurnLimitedWorker:
+        def scoped_to(self, _root):
+            return self
+
+        async def run(self, *_args, **_kwargs):
+            return {
+                "status": "needs_continuation",
+                "error": "Max turns (120) reached",
+                "tool_calls": [{"tool": "read_file", "status": "completed"}],
+            }
+
+    async def scenario():
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Turn limit", str(project_root))
+            job = repos["job"].create("JOB-TURN-LIMIT", project.id, "检查项目")
+            task = repos["task"].create(
+                "T001", job.id, "读取项目并分析", task_type="analysis",
+                allowed_paths=["*"],
+            )
+            engine.register_agent("worker", TurnLimitedWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            result = await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(job)
+            repos["_session"].refresh(task)
+            assert result["status"] == "needs_attention"
+            assert job.status == "needs_attention"
+            assert task.status == "needs_attention"
+            assert engine.event_bus.get_history("task_needs_user_action")
+            assert engine.event_bus.get_history("job_needs_attention")
+            assert not engine.event_bus.get_history("task_failed")
+        finally:
+            repos["_session"].close()
 
     asyncio.run(scenario())
 
@@ -1286,7 +1329,7 @@ def test_model_router_auto_expands_soft_token_budget_before_provider_call():
     asyncio.run(scenario())
 
 
-def test_budget_error_stops_worker_escalation_immediately(tmp_path):
+def test_budget_error_pauses_for_user_confirmation_without_escalation(tmp_path):
     class BudgetWorker:
         def __init__(self):
             self.calls = 0
@@ -1309,8 +1352,8 @@ def test_budget_error_stops_worker_escalation_immediately(tmp_path):
             {}, worker, str(tmp_path),
         )
 
-        assert result["status"] == "failed"
-        assert result["failure_stage"] == "budget_exhausted_without_progress"
+        assert result["status"] == "needs_user_action"
+        assert result["failure_stage"] == "budget_continuation"
         assert "budget exceeded" in result["error"].lower()
         assert worker.calls == 1
         assert not engine.event_bus.get_history("task_replanning")

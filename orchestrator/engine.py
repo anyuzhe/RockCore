@@ -3230,13 +3230,24 @@ class Engine:
 
             if result and result.get("status") == "needs_continuation":
                 reason = str(result.get("error") or "任务已保存，等待继续")
-                repos["task"].update_status_by_pk(t.id, "interrupted")
+                # A worker turn/budget limit is actionable by the user: they
+                # can increase the project budget, add credits, or switch the
+                # provider. Keep the checkpoint visible as an attention item
+                # so the existing resume button continues this exact task.
+                requires_confirmation = self._checkpoint_requires_confirmation(
+                    result
+                )
+                task_status = (
+                    "needs_attention" if requires_confirmation else "interrupted"
+                )
+                repos["task"].update_status_by_pk(t.id, task_status)
                 self._checkpoint_task(
-                    repos, job, t, status="interrupted", result=result,
+                    repos, job, t, status=task_status, result=result,
                     error=reason,
                 )
                 await self.event_bus.publish(
-                    "task_needs_continuation",
+                    "task_needs_user_action"
+                    if requires_confirmation else "task_needs_continuation",
                     job_id=job.job_id,
                     task_id=task_id,
                     reason=reason,
@@ -3256,6 +3267,14 @@ class Engine:
                     )
                     if callable(preserve):
                         preserve(task_id)
+                if requires_confirmation:
+                    return {
+                        **result,
+                        "status": "needs_user_action",
+                        "failure_stage": result.get(
+                            "failure_stage", "budget_continuation"
+                        ),
+                    }
                 return result
 
             if result and result.get("status") in {
@@ -4129,6 +4148,16 @@ class Engine:
                     "failure_stage": "user_action_required",
                     "checkpoint": {"reason": error},
                 }
+            # Exhausting a configurable RockCore budget is recoverable even
+            # when no file was written yet. Pause for confirmation instead of
+            # turning a resource limit into a terminal coding failure.
+            if self._is_budget_error(error):
+                return {
+                    "status": "needs_user_action",
+                    "error": error,
+                    "failure_stage": "budget_continuation",
+                    "checkpoint": {"reason": error},
+                }
             return {
                 "status": "failed",
                 "error": error,
@@ -4180,6 +4209,12 @@ class Engine:
                     if current_evidence:
                         retry_evidence = current_evidence
                         task._rockcore_retry_evidence = current_evidence
+                # Worker already persisted a continuation checkpoint (most
+                # commonly because it reached max turns). Do not spend more
+                # retries rereading the project; the execution layer will
+                # surface this as an actionable pause and preserve the task.
+                if result and result.get("status") == "needs_continuation":
+                    return result
                 if result and result.get("status") == "completed":
                     return {"status": "completed", "result": result}
 
@@ -4326,9 +4361,18 @@ class Engine:
                         last_error = "Max turns reached: no changes detected"
                         logger.warning(
                             f"Task {task.task_id}: max turns with no changes; "
-                            "switching to focused repair"
+                            "pausing for user confirmation"
                         )
-                        continue
+                        return {
+                            "status": "needs_user_action",
+                            "error": last_error,
+                            "failure_stage": "turn_limit_continuation",
+                            "checkpoint": {
+                                "reason": last_error,
+                                "retry_evidence": retry_evidence,
+                                "document_progress": document_progress,
+                            },
+                        }
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Task {task.task_id} attempt {attempt} failed: {e}")
@@ -4456,6 +4500,22 @@ class Engine:
                     ),
                 }
 
+        # User-resolvable provider/budget failures must remain resumable even
+        # when automatic repair is disabled for this project.
+        if self._is_user_action_required(last_error):
+            return {
+                "status": "needs_user_action",
+                "error": last_error,
+                "failure_stage": "user_action_required",
+                "checkpoint": {"reason": last_error},
+            }
+        if self._is_budget_error(last_error):
+            return {
+                "status": "needs_user_action",
+                "error": last_error,
+                "failure_stage": "budget_continuation",
+                "checkpoint": {"reason": last_error},
+            }
         if not bool(getattr(task, "_rockcore_auto_repair", True)):
             return {"status": "failed", "error": last_error}
 
@@ -4470,14 +4530,6 @@ class Engine:
                 "status": "failed",
                 "error": f"模型配置不可用：{last_error}",
                 "failure_stage": "model_configuration",
-            }
-
-        if self._is_user_action_required(last_error):
-            return {
-                "status": "needs_user_action",
-                "error": last_error,
-                "failure_stage": "user_action_required",
-                "checkpoint": {"reason": last_error},
             }
 
         checkpoint_progress = dict(
@@ -4502,23 +4554,21 @@ class Engine:
                 },
             }
 
-        # No file change or structured progress exists here. Provider, tool,
-        # turn-limit and path failures are terminal rather than pretending the
-        # user has something useful to continue.
+        # No file change or structured progress exists here. Provider, budget,
+        # and turn-limit failures are recoverable after user confirmation.
         if (
-            self._is_provider_capability_error(last_error)
-            or self._is_provider_unavailable(last_error)
-            or self._is_stalled_worker_error(last_error)
-            or self._is_task_path_mismatch(last_error)
-            or self._is_budget_error(last_error)
+            self._is_budget_error(last_error)
             or "max turns" in last_error.lower()
-            or "ended without editing files" in last_error.lower()
-            or "tool_payload_truncated" in last_error.lower()
         ):
             return {
-                "status": "failed",
+                "status": "needs_user_action",
                 "error": last_error,
-                "failure_stage": "execution_failed_without_progress",
+                "failure_stage": (
+                    "budget_continuation"
+                    if self._is_budget_error(last_error)
+                    else "turn_limit_continuation"
+                ),
+                "checkpoint": {"reason": last_error},
             }
 
         # Non-budget/model failures with no usable artifact remain failures.
@@ -4587,6 +4637,26 @@ class Engine:
             or "output tokens exceeded" in normalized
             or "api calls exceeded" in normalized
             or "cost exceeded" in normalized
+        )
+
+    @classmethod
+    def _checkpoint_requires_confirmation(cls, result: dict | None) -> bool:
+        """Whether a saved continuation needs an explicit user confirmation.
+
+        Turn limits and configurable/token/provider budgets are not code
+        failures. The user may raise the limit, add credits, or change the
+        project provider before resuming the same task checkpoint.
+        """
+        if not isinstance(result, dict):
+            return False
+        error = str(result.get("error") or "")
+        stage = str(result.get("failure_stage") or "").lower()
+        return (
+            "max turns" in error.lower()
+            or cls._is_budget_error(error)
+            or "turn_limit" in stage
+            or "budget" in stage
+            or cls._is_user_action_required(error)
         )
 
     @staticmethod
@@ -5707,6 +5777,13 @@ class Engine:
                 "请充值当前模型供应商的 API 余额，或在项目 AI 配置中改用"
                 "有可用额度的执行模型；保存后点击“已处理，继续完成任务”，"
                 "将从当前任务检查点恢复。",
+            )
+        if "max turns" in normalized or "turn_limit" in normalized:
+            return (
+                "worker_turn_limit",
+                "本次读取或验证达到 Worker 轮次上限。可在项目设置中提高执行轮次，"
+                "或改用更适合的模型，然后点击“已处理，继续完成任务”，"
+                "将从当前检查点恢复。",
             )
         if cls._is_budget_error(error):
             return (
