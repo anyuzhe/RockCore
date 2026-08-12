@@ -69,6 +69,38 @@ def test_worktree_merge_requires_and_records_verified_commit(tmp_path):
     assert manager.active_count == 0
 
 
+def test_runtime_reports_are_excluded_from_task_merge(tmp_path):
+    project = _initialize_project(tmp_path)
+    report = project / ".ai" / "reports" / "JOB-REPORT.events.jsonl"
+    report.parent.mkdir(parents=True)
+    report.write_text("main report\n", encoding="utf-8")
+    assert _git(project, "add", ".ai/reports/JOB-REPORT.events.jsonl").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "report baseline",
+    ).returncode == 0
+    manager = MergeManager(str(project), worktrees_dir=str(tmp_path / "worktrees"))
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-REPORT")
+        assert created["status"] == "created"
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("task output\n", encoding="utf-8")
+        (worktree / ".ai" / "reports" / "JOB-REPORT.events.jsonl").write_text(
+            "task report\n", encoding="utf-8"
+        )
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "merged"
+    assert result["staged_paths"] == ["output.txt"]
+    assert (project / "output.txt").read_text(encoding="utf-8") == "task output\n"
+    assert (project / ".ai" / "reports" / "JOB-REPORT.events.jsonl").read_text(
+        encoding="utf-8"
+    ) == "main report\n"
+
+
 def test_job_rollback_reverts_only_that_job_and_preserves_later_commit(tmp_path):
     project = _initialize_project(tmp_path)
     (project / "feature.txt").write_text("job output\n", encoding="utf-8")

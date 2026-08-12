@@ -26,6 +26,7 @@ class MergeManager:
         ".xls", ".xlsx", ".jpg", ".jpeg", ".png", ".gif", ".webp",
         ".mp3", ".wav", ".mp4", ".mov", ".zip", ".7z", ".rar",
     }
+    RUNTIME_PATH_PREFIXES = (".ai/reports/",)
 
     def __init__(self, project_root: str, worktrees_dir: str | None = None):
         self.project_root = Path(project_root).resolve()
@@ -246,7 +247,52 @@ class MergeManager:
         )
         if result.returncode != 0:
             return []
-        return [item for item in result.stdout.split("\0") if item]
+        return [
+            item for item in result.stdout.split("\0")
+            if item and not self._is_runtime_path(item)
+        ]
+
+    @classmethod
+    def _is_runtime_path(cls, relative: str) -> bool:
+        normalized = str(relative or "").replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return any(
+            normalized == prefix.rstrip("/") or normalized.startswith(prefix)
+            for prefix in cls.RUNTIME_PATH_PREFIXES
+        )
+
+    def _exclude_runtime_paths(self, worktree_path: str) -> tuple[bool, str]:
+        """Remove generated RockCore reports from the task index before commit."""
+        result = run_process(
+            ["git", "diff", "--cached", "--name-only", "-z"],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if result.returncode != 0:
+            return False, self._process_output(result)
+        runtime_paths = [
+            item for item in result.stdout.split("\0")
+            if item and self._is_runtime_path(item)
+        ]
+        if not runtime_paths:
+            return True, ""
+        reset = run_process(
+            ["git", "reset", "-q", "HEAD", "--", *runtime_paths],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if reset.returncode != 0:
+            return False, self._process_output(reset)
+        # Reports may already be tracked by an older project. Restore those
+        # files in the task worktree so removing the worktree cannot be blocked
+        # by a generated diagnostic change.
+        restore = run_process(
+            ["git", "restore", "--worktree", "--", *runtime_paths],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if restore.returncode != 0:
+            return False, self._process_output(restore)
+        logger.info("Excluded RockCore runtime files from task commit: %s", runtime_paths)
+        return True, ""
 
     async def create_task_worktree(self, task_id: str, job_id: str,
                                    source_job_id: str = "") -> dict:
@@ -433,6 +479,12 @@ class MergeManager:
             if not assets_unstaged:
                 return self._integration_failure(
                     task_id, "unstage_input_assets", unstage_error
+                )
+
+            runtime_unstaged, runtime_error = self._exclude_runtime_paths(wt_path)
+            if not runtime_unstaged:
+                return self._integration_failure(
+                    task_id, "unstage_runtime_files", runtime_error
                 )
 
             staged_result = run_process(

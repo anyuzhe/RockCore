@@ -53,6 +53,7 @@ ROCKCORE_IGNORE_LINES = (
     ".ai/worktrees/",
     ".ai/runtime/",
     ".ai/recovery/",
+    ".ai/reports/",
 )
 
 
