@@ -282,15 +282,35 @@ class MergeManager:
         )
         if reset.returncode != 0:
             return False, self._process_output(reset)
-        # Reports may already be tracked by an older project. Restore those
-        # files in the task worktree so removing the worktree cannot be blocked
-        # by a generated diagnostic change.
-        restore = run_process(
-            ["git", "restore", "--worktree", "--", *runtime_paths],
-            capture_output=True, text=True, cwd=worktree_path,
-        )
-        if restore.returncode != 0:
-            return False, self._process_output(restore)
+        # Reports may be tracked by an older project or may be copied as
+        # untracked continuation state. Restore tracked files; remove only the
+        # safe worktree-local copies of untracked runtime files so cleanup can
+        # complete without touching the user's project.
+        tracked = []
+        untracked = []
+        for relative in runtime_paths:
+            check = run_process(
+                ["git", "ls-files", "--error-unmatch", "--", relative],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            (tracked if check.returncode == 0 else untracked).append(relative)
+        if tracked:
+            restore = run_process(
+                ["git", "restore", "--worktree", "--", *tracked],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            if restore.returncode != 0:
+                return False, self._process_output(restore)
+        for relative in untracked:
+            path = (Path(worktree_path) / relative).resolve()
+            try:
+                path.relative_to(Path(worktree_path).resolve())
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+            except (OSError, ValueError) as error:
+                return False, str(error)
         logger.info("Excluded RockCore runtime files from task commit: %s", runtime_paths)
         return True, ""
 
