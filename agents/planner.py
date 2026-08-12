@@ -9,6 +9,13 @@ from orchestrator.model_router import ModelRouter
 
 logger = logging.getLogger(__name__)
 
+
+class PlannerOutputTruncatedError(RuntimeError):
+    """Raised when the provider stops before returning a complete plan."""
+
+
+TRUNCATED_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
+
 PLANNER_SYSTEM_PROMPT = """You are the Planner agent in an AI Engineering Studio.
 Your role is to create a detailed task plan that respects the Constitution.
 
@@ -215,6 +222,16 @@ Output ONLY valid JSON."""
                 attachments=getattr(job, "attachments", None) or [],
             )
 
+            finish_reason = str(response.get("finish_reason") or "").lower()
+            if finish_reason in TRUNCATED_FINISH_REASONS:
+                output_tokens = int(
+                    (response.get("usage") or {}).get("output_tokens") or 0
+                )
+                raise PlannerOutputTruncatedError(
+                    "策划者输出被服务端截断，未生成完整计划"
+                    + (f"（已输出 {output_tokens} tokens）" if output_tokens else "")
+                )
+
             content = response.get("content", "{}")
             plan = self._parse_json(content)
 
@@ -234,6 +251,8 @@ Output ONLY valid JSON."""
             return plan
 
         except BudgetExceededError:
+            raise
+        except PlannerOutputTruncatedError:
             raise
         except Exception as e:
             logger.error(f"Planner failed: {e}")

@@ -3,6 +3,9 @@
 import asyncio
 import json
 
+import pytest
+
+from agents.planner import PlannerAgent, PlannerOutputTruncatedError
 from agents.governor import GovernorAgent
 from orchestrator.agent_config import (
     ProjectAgentConfig,
@@ -389,6 +392,67 @@ def test_missing_planner_creates_an_executable_fallback_plan(tmp_path):
             assert tasks[0].task_id == "T001"
             assert tasks[0].status == "pending"
             assert repos["plan"].get_by_job(job.id).raw_output["tasks"]
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_planner_rejects_a_provider_truncated_response():
+    class Router:
+        async def chat(self, *_args, **_kwargs):
+            return {
+                "content": '{"summary":"plan","tasks":[',
+                "finish_reason": "length",
+                "usage": {"output_tokens": 8192},
+            }
+
+    job = type("Job", (), {
+        "job_id": "JOB-TRUNCATED",
+        "user_request": "Build a page",
+        "attachments": [],
+    })()
+
+    with pytest.raises(
+        PlannerOutputTruncatedError, match="8192 tokens"
+    ):
+        asyncio.run(PlannerAgent(Router()).run(job))
+
+
+def test_truncated_plan_fails_before_tasks_are_created(tmp_path):
+    class TruncatedPlanner:
+        async def run(self, *_args, **_kwargs):
+            raise PlannerOutputTruncatedError(
+                "策划者输出被服务端截断，未生成完整计划"
+            )
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+            created = await engine.create_job(
+                project.id, "创建一个完整页面", str(tmp_path)
+            )
+            job = repos["job"].get_by_id(created["job_id"])
+            repos["constitution"].create(
+                job_id=job.id, goal=job.user_request,
+                constraints=[], acceptance_criteria=[], protected_paths=[],
+            )
+            engine.register_agent("planner", TruncatedPlanner())
+            engine.state_machine.transition(job.job_id, JobState.GOVERNING)
+            engine.state_machine.transition(job.job_id, JobState.GOVERNED)
+
+            await engine._run_planner(job, repos)
+            repos["_session"].refresh(job)
+
+            assert job.status == "failed"
+            assert repos["task"].list_by_job(job.id) == []
+            failed = engine.event_bus.get_history("job_failed")[-1]["data"]
+            assert failed["failure_stage"] == "planner_output_truncated"
+            summary = engine.event_bus.get_history("phase_summary")[-1]["data"]
+            assert summary["status"] == "failed"
+            assert "截断" in summary["summary"]
         finally:
             repos["_session"].close()
 

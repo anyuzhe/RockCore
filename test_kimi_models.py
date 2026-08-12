@@ -89,6 +89,38 @@ def test_kimi_forwards_required_tool_choice_only_for_tool_chat():
     assert completions.calls[1]["tool_choice"] == "required"
 
 
+def test_kimi_does_not_impose_a_default_output_limit():
+    class _Completions:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            message = SimpleNamespace(content="{}", tool_calls=[])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")],
+                usage=None,
+            )
+
+    completions = _Completions()
+    provider = KimiProvider({"api_key": "test", "model": "kimi-k3"})
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+
+    asyncio.run(provider.chat("system", [{"role": "user", "content": "plan"}]))
+    asyncio.run(provider.chat_with_tools(
+        "system", [{"role": "user", "content": "plan"}], []
+    ))
+    asyncio.run(provider.chat(
+        "system", [{"role": "user", "content": "short"}], max_tokens=1234
+    ))
+
+    assert "max_tokens" not in completions.calls[0]
+    assert "max_tokens" not in completions.calls[1]
+    assert completions.calls[2]["max_tokens"] == 1234
+
+
 def test_router_downgrades_unavailable_kimi_model_and_caches_result():
     class Provider:
         model = "kimi-k2.7-code"

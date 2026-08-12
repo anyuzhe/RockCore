@@ -81,6 +81,7 @@ from .scheduler import Scheduler
 from .policy_engine import PolicyEngine
 from .model_router import ModelRouter
 from .cost_engine import BudgetExceededError
+from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
 from .agent_config import ProjectAgentConfig, load_project_config
@@ -1909,9 +1910,13 @@ class Engine:
         used_fallback = planner is None
         if planner:
             continuation_context = self._continuation_context(job, repos, proj_config)
-            plan_data = await planner.run(
-                job, constitution, continuation_context=continuation_context
-            )
+            try:
+                plan_data = await planner.run(
+                    job, constitution, continuation_context=continuation_context
+                )
+            except PlannerOutputTruncatedError as error:
+                await self._fail_truncated_plan(job, repos, error)
+                return
         else:
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
@@ -1983,9 +1988,13 @@ class Engine:
                   " Split every task that combines three or more independent "
                   "features/scenes/systems, and cover every user requirement."
             )
-            revised = await planner.run(
-                job, constitution, continuation_context=rejection[:12000]
-            )
+            try:
+                revised = await planner.run(
+                    job, constitution, continuation_context=rejection[:12000]
+                )
+            except PlannerOutputTruncatedError as error:
+                await self._fail_truncated_plan(job, repos, error)
+                return
             if revised.get("tasks"):
                 plan_data = revised
                 self._optimize_plan(plan_data, effective_complexity)
@@ -2068,6 +2077,24 @@ class Engine:
                 f"制定了执行计划：{plan_data.get('summary', '')}，拆分为 {num_tasks} 个任务"
             ),
             details={"tasks": plan_data.get("tasks", [])},
+        )
+
+    async def _fail_truncated_plan(self, job, repos, error: Exception) -> None:
+        """Persist a provider-side plan truncation without fabricating tasks."""
+        message = str(error)
+        logger.error("Planner output truncated for %s: %s", job.job_id, message)
+        repos["job"].update_status(job.job_id, "failed")
+        self._store_job_failure(repos, job.job_id, message)
+        self.state_machine.transition(job.job_id, JobState.FAILED)
+        await self.event_bus.publish(
+            "phase_summary",
+            phase="planner", agent_type="planner", status="failed",
+            summary="策划者输出被服务端截断，未生成完整计划",
+            details={"error": message},
+        )
+        await self.event_bus.publish(
+            "job_failed", job_id=job.job_id, error=message,
+            failure_stage="planner_output_truncated",
         )
 
     def _direct_plan_data(self, job, repos, proj_config=None) -> dict:

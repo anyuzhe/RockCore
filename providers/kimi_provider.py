@@ -19,7 +19,6 @@ class KimiProvider(BaseProvider):
 
     DEFAULT_MODEL = "kimi-k2.6"
     BASE_URL = "https://api.moonshot.cn/v1"
-    MAX_OUTPUT_TOKENS = 8_192
 
     # Per-model temperature constraints
     MODEL_TEMPERATURES = {
@@ -74,12 +73,14 @@ class KimiProvider(BaseProvider):
         client = self._get_client()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
-        response = await client.chat.completions.create(
+        request = dict(
             model=self._normalize_model(kwargs.get("model", self.model)),
             messages=full_messages,
             temperature=self._resolve_temperature(**kwargs),
-            max_tokens=kwargs.get("max_tokens", 8192),
         )
+        if kwargs.get("max_tokens") is not None:
+            request["max_tokens"] = kwargs["max_tokens"]
+        response = await client.chat.completions.create(**request)
 
         choice = response.choices[0]
         return {
@@ -96,14 +97,16 @@ class KimiProvider(BaseProvider):
         # Kimi supports OpenAI-compatible tool calling
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
-        response = await client.chat.completions.create(
+        request = dict(
             model=self._normalize_model(kwargs.get("model", self.model)),
             messages=full_messages,
             tools=tools if tools else None,
             temperature=self._resolve_temperature(**kwargs),
-            max_tokens=kwargs.get("max_tokens", 8192),
             tool_choice=kwargs.get("tool_choice", "auto") if tools else None,
         )
+        if kwargs.get("max_tokens") is not None:
+            request["max_tokens"] = kwargs["max_tokens"]
+        response = await client.chat.completions.create(**request)
 
         choice = response.choices[0]
         msg = choice.message
