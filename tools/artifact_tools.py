@@ -23,11 +23,15 @@ class ArtifactTools:
         return resolved
 
     def _result(self, path: Path, status: str = "written", **extra) -> dict:
+        stat = path.stat() if path.exists() else None
         return {
             "status": status,
             "path": self.files._relative_path(path),
             "absolute_path": str(path),
-            "size": path.stat().st_size if path.exists() else 0,
+            "size": stat.st_size if stat else 0,
+            "source_version": (
+                f"{stat.st_mtime_ns}:{stat.st_size}" if stat else "missing"
+            ),
             **extra,
         }
 

@@ -1,5 +1,6 @@
 """DeepSeek Worker Agent — executes individual tasks via tool calls."""
 
+import hashlib
 import json
 import logging
 import math
@@ -41,6 +42,7 @@ MAX_TOOL_CONTENT_CHARS = 12_000
 CODING_OUTPUT_TOKENS = 12_288
 FOLLOWUP_OUTPUT_TOKENS = 8_192
 REPORT_OUTPUT_TOKENS = 6_144
+UNINFORMATIVE_READ_WARNING = 8
 
 WORKER_SYSTEM_PROMPT = """You are a code executor, not an investigator.
 
@@ -235,7 +237,9 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         no_changes_declared = False
         exploration_calls = 0
         has_written = False
-        exploration_call_counts: dict[tuple[str, str, bool], int] = {}
+        exploration_observations: dict[tuple[str, str], tuple[str, str]] = {}
+        consecutive_uninformative_reads = 0
+        uninformative_read_warning_sent = False
         progress_warning_sent = False
         finish_warning_sent = False
         token_compaction_sent = False
@@ -676,7 +680,6 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     exploration_signature = (
                         func_name,
                         json.dumps(args, sort_keys=True, ensure_ascii=False, default=str),
-                        has_written,
                     )
                     is_read_only_mcp = bool(getattr(
                         self.tool_broker, "is_read_only_mcp_tool",
@@ -694,17 +697,6 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         json.dumps(
                             args, sort_keys=True, ensure_ascii=False, default=str
                         ),
-                    )
-                    prior_exploration_calls = exploration_call_counts.get(
-                        exploration_signature, 0
-                    )
-                    repeated_exploration = (
-                        task.task_type in {"coding", "analysis", "review", "action"}
-                        and is_exploration
-                        # Re-reading a file can be legitimate after truncated
-                        # output or a concurrent edit. Treat it as a strategy
-                        # smell first and reject only after a generous allowance.
-                        and prior_exploration_calls >= 6
                     )
                     artifact_manifest = dict(
                         getattr(task, "_rockcore_artifact_manifest", None) or {}
@@ -755,15 +747,6 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             ),
                         }
                         exploration_blocked = True
-                    elif repeated_exploration:
-                        result = {
-                            "status": "rejected",
-                            "error": (
-                                "This exact read/search has already been completed "
-                                "six times in the current phase. Reuse the existing "
-                                "results or change the read range/search strategy."
-                            ),
-                        }
                     elif (
                         is_mutating_mcp
                         and external_signature in external_action_signatures
@@ -859,20 +842,48 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 total_input,
                                 total_output,
                             )
-                        if is_exploration:
+                        uninformative_exploration = False
+                        if (
+                            is_exploration
+                            and result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
                             exploration_calls += 1
-                            exploration_call_counts[exploration_signature] = (
-                                prior_exploration_calls + 1
+                            observation = self._exploration_observation(result)
+                            previous_observation = exploration_observations.get(
+                                exploration_signature
                             )
-                            meaningful_progress = True
-                            if prior_exploration_calls + 1 == 4:
+                            result_truncated = self._exploration_result_is_truncated(
+                                result, func_name
+                            )
+                            uninformative_exploration = bool(
+                                previous_observation == observation
+                                and not result_truncated
+                            )
+                            exploration_observations[
+                                exploration_signature
+                            ] = observation
+                            if uninformative_exploration:
+                                consecutive_uninformative_reads += 1
+                            else:
+                                consecutive_uninformative_reads = 0
+                                uninformative_read_warning_sent = False
+                                meaningful_progress = True
+                            if (
+                                consecutive_uninformative_reads
+                                >= UNINFORMATIVE_READ_WARNING
+                                and not uninformative_read_warning_sent
+                            ):
                                 batch_notices.append(
-                                    "The same read/search has now been executed four "
-                                    "times. This is still allowed, but reuse the "
-                                    "existing result unless a changed file, different "
-                                    "range, or truncated output makes another read "
-                                    "necessary."
+                                    f"The last {UNINFORMATIVE_READ_WARNING} "
+                                    "reads/searches repeated previously used "
+                                    "parameters against unchanged source state and "
+                                    "returned identical, non-truncated results. The "
+                                    "calls remain allowed and this is not a provider "
+                                    "failure, but they produced no new information. "
+                                    "Reuse the existing evidence and change strategy."
                                 )
+                                uninformative_read_warning_sent = True
                             if (
                                 exploration_calls >= self.max_exploration_turns
                                 and not exploration_warning_sent
@@ -894,6 +905,8 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             external_action_completed = True
                             external_action_signatures.add(external_signature)
                             force_tool_call = False
+                            consecutive_uninformative_reads = 0
+                            uninformative_read_warning_sent = False
                         if (
                             func_name in WRITE_TOOLS
                             and not result.get("redirected_to_runtime")
@@ -903,6 +916,8 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             has_written = True
                             force_tool_call = False
                             meaningful_progress = True
+                            consecutive_uninformative_reads = 0
+                            uninformative_read_warning_sent = False
                         elif (
                             (
                                 func_name in TEMP_WRITE_TOOLS
@@ -912,13 +927,16 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             and not result.get("error")
                         ):
                             meaningful_progress = True
+                            consecutive_uninformative_reads = 0
+                            uninformative_read_warning_sent = False
                         if (
                             func_name in STATE_VERIFICATION_TOOLS
                             and result.get("status") not in {"error", "rejected"}
                             and not result.get("error")
                         ):
                             verified_existing_state = True
-                            meaningful_progress = True
+                            if not uninformative_exploration:
+                                meaningful_progress = True
                     tool_calls_made.append({
                         "tool": func_name,
                         "args": args,
@@ -1017,6 +1035,23 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         })
                         stall_warning_sent = True
                     if no_progress_turns >= 8:
+                        if (
+                            consecutive_uninformative_reads
+                            >= UNINFORMATIVE_READ_WARNING
+                        ):
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Repeated unchanged reads are a strategy issue, "
+                                    "not a task or provider failure. Stop repeating "
+                                    "them now; use the evidence already present and "
+                                    "edit, verify, or finish the report."
+                                ),
+                            })
+                            # Keep the task alive for a strategy correction instead
+                            # of converting harmless reads into task failure.
+                            no_progress_turns = 4
+                            continue
                         return self._failure(
                             "NO_PROGRESS: eight consecutive turns produced no "
                             "new evidence, file change, or artifact progress",
@@ -1068,6 +1103,43 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
             }
+
+    @staticmethod
+    def _exploration_observation(result: dict) -> tuple[str, str]:
+        """Return stable source/result fingerprints for a read or search.
+
+        Tool timing and routing metadata are intentionally excluded. A changed
+        source version or changed result digest makes the observation new.
+        """
+        source_version = str(result.get("source_version") or "")
+        stable_result = {
+            key: value for key, value in result.items()
+            if key not in {
+                "duration_ms", "tool", "absolute_path", "ignored_arguments",
+            }
+        }
+        payload = json.dumps(
+            stable_result, ensure_ascii=False, sort_keys=True, default=str
+        ).encode("utf-8")
+        return source_version, hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _exploration_result_is_truncated(
+        result: dict, func_name: str = "",
+    ) -> bool:
+        """Return whether another read may be needed to obtain the full result."""
+        if bool(result.get("truncated") or result.get("has_more")):
+            return True
+        if any(result.get(key) not in {None, "", 0, False} for key in (
+            "next_start", "next_page", "next_block", "next_slide",
+        )):
+            return True
+        note = str(result.get("_note") or result.get("note") or "").lower()
+        if any(marker in note for marker in ("truncat", "read more", "continue")):
+            return True
+        serialized = json.dumps(result, ensure_ascii=False, default=str)
+        result_limit = 18_000 if func_name == "read_pdf" else 1_800
+        return len(serialized) > result_limit
 
     @staticmethod
     def _tool_message_integrity_errors(messages: list[dict]) -> list[str]:

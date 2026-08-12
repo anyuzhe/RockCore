@@ -1,5 +1,6 @@
 """Code search tools for the AI worker."""
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -33,6 +34,7 @@ class SearchTools:
 
         results = []
         count = 0
+        source_state: list[str] = []
         for root, dirs, files in os.walk(resolved):
             # Skip hidden dirs and common non-source dirs
             dirs[:] = [d for d in dirs if not d.startswith(".")
@@ -45,6 +47,11 @@ class SearchTools:
                         continue
                 fpath = Path(root) / fname
                 try:
+                    stat = fpath.stat()
+                    source_state.append(
+                        f"{fpath.relative_to(self.project_root).as_posix()}:"
+                        f"{stat.st_mtime_ns}:{stat.st_size}"
+                    )
                     content, _ = read_text_compatible(fpath)
                     for line_no, line in enumerate(content.splitlines(), 1):
                         if pattern in line or re.search(pattern, line):
@@ -56,11 +63,25 @@ class SearchTools:
                             })
                             count += 1
                             if count >= max_results:
-                                return {"results": results, "count": count}
+                                return {
+                                    "results": results,
+                                    "count": count,
+                                    "truncated": True,
+                                    "source_version": hashlib.sha256(
+                                        "\n".join(source_state).encode("utf-8")
+                                    ).hexdigest(),
+                                }
                 except (IOError, UnicodeDecodeError):
                     continue
 
-        return {"results": results, "count": count}
+        return {
+            "results": results,
+            "count": count,
+            "truncated": False,
+            "source_version": hashlib.sha256(
+                "\n".join(source_state).encode("utf-8")
+            ).hexdigest(),
+        }
 
     async def read_log(self, path: str, tail: int = 50) -> dict:
         """Read the last N lines of a file."""
@@ -69,6 +90,7 @@ class SearchTools:
             return {"error": f"File not found: {path}"}
 
         content, file_encoding = read_text_compatible(resolved)
+        stat = resolved.stat()
         lines = content.splitlines()
 
         tail_lines = lines[-tail:]
@@ -78,4 +100,5 @@ class SearchTools:
             "total_lines": len(lines),
             "showing": min(tail, len(lines)),
             "encoding": file_encoding,
+            "source_version": f"{stat.st_mtime_ns}:{stat.st_size}",
         }

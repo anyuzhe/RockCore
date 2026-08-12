@@ -57,18 +57,29 @@ class FileTools:
             return {"error": f"Not a directory: {path}", "files": []}
 
         files = []
+        source_entries: list[str] = []
         for f in resolved.iterdir():
             if pattern and not f.match(pattern):
                 continue
+            stat = f.stat()
+            relative_path = self._relative_path(f)
+            item_type = "directory" if f.is_dir() else "file"
             files.append({
                 "name": f.name,
-                "path": self._relative_path(f),
-                "type": "directory" if f.is_dir() else "file",
-                "size": f.stat().st_size if f.is_file() else 0,
+                "path": relative_path,
+                "type": item_type,
+                "size": stat.st_size if f.is_file() else 0,
             })
+            source_entries.append(
+                f"{relative_path}:{item_type}:{stat.st_mtime_ns}:{stat.st_size}"
+            )
 
         files.sort(key=lambda x: (x["type"] != "directory", x["name"]))
-        return {"files": files, "count": len(files)}
+        directory_version = "|".join(sorted(source_entries))
+        return {
+            "files": files, "count": len(files),
+            "source_version": directory_version,
+        }
 
     async def read_file(self, path: str, start: int = 0, end: int = 0,
                           max_size: int = 1024 * 1024, **kwargs) -> dict:
@@ -80,7 +91,8 @@ class FileTools:
         if not resolved.is_file():
             return {"error": f"Not a file: {path}"}
 
-        size = resolved.stat().st_size
+        stat = resolved.stat()
+        size = stat.st_size
         if size > max_size:
             return {"error": f"File too large ({size} bytes, max {max_size})"}
 
@@ -102,6 +114,7 @@ class FileTools:
             "size": size,
             "total_lines": total_lines,
             "encoding": file_encoding,
+            "source_version": f"{stat.st_mtime_ns}:{stat.st_size}",
         }
 
         # Add pagination metadata
@@ -147,6 +160,9 @@ class FileTools:
                 "status": "error", "error_code": "not_a_pdf",
                 "error": f"Not a PDF file: {path}", "path": relative_path,
             }
+
+        stat = resolved.stat()
+        source_version = f"{stat.st_mtime_ns}:{stat.st_size}"
 
         try:
             from pypdf import PdfReader
@@ -277,6 +293,7 @@ class FileTools:
                     "has_more": has_more,
                     "next_page": next_page,
                     "encrypted": encrypted,
+                    "source_version": source_version,
                 }
             return {
                 "status": "no_extractable_text",
@@ -292,6 +309,7 @@ class FileTools:
                 "has_more": has_more,
                 "next_page": next_page,
                 "encrypted": encrypted,
+                "source_version": source_version,
             }
 
         return {
@@ -306,6 +324,7 @@ class FileTools:
             "truncated": truncated,
             "extracted_chars": extracted_chars,
             "encrypted": encrypted,
+            "source_version": source_version,
         }
 
     async def write_file(self, path: str, content: str,
@@ -351,6 +370,7 @@ class FileTools:
             return {"error": f"Not a file: {path}", "matches": []}
 
         content, file_encoding = read_text_compatible(resolved)
+        stat = resolved.stat()
         lines = content.split("\n")
         matches = []
         text_lower = text.lower()
@@ -375,6 +395,7 @@ class FileTools:
             "count": len(matches),
             "total_lines": len(lines),
             "encoding": file_encoding,
+            "source_version": f"{stat.st_mtime_ns}:{stat.st_size}",
         }
 
     async def apply_patch(self, path: str, search: str, replace: str) -> dict:

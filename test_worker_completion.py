@@ -509,13 +509,16 @@ def test_pdf_worker_rejects_custom_generator_and_stops_repeated_strategy():
     asyncio.run(scenario())
 
 
-def test_identical_reads_are_allowed_six_times_before_strategy_rejection():
+def test_identical_unchanged_reads_only_trigger_a_strategy_warning():
     class Router:
-        calls = 0
+        def __init__(self):
+            self.calls = 0
+            self.received_messages = []
 
         async def chat_with_tools(self, *_args, **_kwargs):
             self.calls += 1
-            if self.calls <= 6:
+            self.received_messages.append(list(_args[2]))
+            if self.calls <= 10:
                 return {
                     "content": "Re-reading a previously truncated file.",
                     "tool_calls": [{
@@ -534,15 +537,54 @@ def test_identical_reads_are_allowed_six_times_before_strategy_rejection():
             }
 
     async def scenario():
+        router = Router()
         broker = _RecordingBroker()
         result = await WorkerAgent(
-            Router(), broker, max_turns=8, max_exploration_turns=48
+            router, broker, max_turns=12, max_exploration_turns=48
         ).run(_task("analysis"), project_root=".")
 
         assert result["status"] == "completed"
-        assert broker.executed == ["read_file"] * 6
+        assert broker.executed == ["read_file"] * 10
+        assert any(
+            "against unchanged source state" in str(
+                message.get("content", "")
+            )
+            for messages in router.received_messages
+            for message in messages
+        )
 
     asyncio.run(scenario())
+
+
+def test_changed_source_or_result_is_not_an_uninformative_repeat():
+    first = {
+        "status": "success", "content": "same", "source_version": "v1",
+    }
+    changed_source = {
+        "status": "success", "content": "same", "source_version": "v2",
+    }
+    changed_result = {
+        "status": "success", "content": "changed", "source_version": "v2",
+    }
+
+    assert WorkerAgent._exploration_observation(first) != (
+        WorkerAgent._exploration_observation(changed_source)
+    )
+    assert WorkerAgent._exploration_observation(changed_source) != (
+        WorkerAgent._exploration_observation(changed_result)
+    )
+
+
+def test_paginated_or_truncated_results_are_allowed_to_continue():
+    assert WorkerAgent._exploration_result_is_truncated({
+        "status": "success", "has_more": True, "next_start": 81,
+    }, "read_file")
+    assert WorkerAgent._exploration_result_is_truncated({
+        "status": "success", "truncated": True,
+    }, "search_code")
+    assert not WorkerAgent._exploration_result_is_truncated({
+        "status": "success", "content": "complete", "has_more": False,
+    }, "read_file")
 
 
 def test_worker_continues_after_a_tool_exception():
