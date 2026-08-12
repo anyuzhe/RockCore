@@ -27,6 +27,7 @@ ROUTING_STRATEGY = {
 # Keep the RMB cost ceiling as the hard protection and avoid terminating useful
 # provider work merely because the former three-minute client timer elapsed.
 DEFAULT_REQUEST_TIMEOUT = 540
+SAME_PROVIDER_RETRIES = 2
 
 
 class ModelRouter:
@@ -49,8 +50,10 @@ class ModelRouter:
         self._job_provider_maps: dict[str, dict[str, str]] = {}
         self._job_model_maps: dict[str, dict[str, str]] = {}
         self._job_reasoning_maps: dict[str, dict[str, str]] = {}
-        self._provider_health: dict[str, dict[str, Any]] = {}
-        self._unavailable_models: dict[tuple[str, str], str] = {}
+        # Availability is task/job-local. One project's provider incident must
+        # never silently reroute another concurrently running project.
+        self._provider_health: dict[tuple[str, str], dict[str, Any]] = {}
+        self._unavailable_models: dict[tuple[str, str, str], str] = {}
         self.event_bus = event_bus
         self._job_context: ContextVar[str] = ContextVar(
             "rockcore_model_job_id", default=""
@@ -195,10 +198,19 @@ class ModelRouter:
         self._providers[agent_type] = provider
         # Reconfiguring credentials/binaries must immediately close any
         # authentication circuit opened by the previous provider instance.
-        self._provider_health.pop(agent_type, None)
+        self._provider_health = {
+            key: value for key, value in self._provider_health.items()
+            if not (
+                (isinstance(key, tuple) and len(key) > 1 and key[1] == agent_type)
+                or key == agent_type
+            )
+        }
         self._unavailable_models = {
             key: reason for key, reason in self._unavailable_models.items()
-            if key[0] != agent_type
+            if not (
+                (isinstance(key, tuple) and len(key) > 1 and key[1] == agent_type)
+                or (isinstance(key, tuple) and key and key[0] == agent_type)
+            )
         }
 
     def get_provider(self, agent_type: str) -> Any:
@@ -220,9 +232,48 @@ class ModelRouter:
     def _configured_reasoning(self, job_id: str, agent_type: str) -> str:
         return self._job_reasoning_maps.get(job_id, {}).get(agent_type, "")
 
-    def _circuit_is_open(self, provider: str) -> bool:
-        health = self._provider_health.get(provider) or {}
-        return float(health.get("open_until", 0)) > time.monotonic()
+    def _availability_scope(
+        self, job_id: str = "", task_id: str = "",
+    ) -> str:
+        job = str(job_id or self._current_job_id or "unknown")
+        return f"{job}:{str(task_id or '*')}"
+
+    def _health_key(
+        self, provider: str, job_id: str = "", task_id: str = "",
+    ) -> tuple[str, str]:
+        return (self._availability_scope(job_id, task_id), provider)
+
+    def _model_key(
+        self, provider: str, model_name: str, job_id: str = "",
+        task_id: str = "",
+    ) -> tuple[str, str, str]:
+        return (
+            self._availability_scope(job_id, task_id), provider, model_name
+        )
+
+    def _circuit_is_open(
+        self, provider: str, job_id: str = "", task_id: str = "",
+    ) -> bool:
+        if task_id:
+            health_records = [self._provider_health.get(
+                self._health_key(provider, job_id, task_id)
+            ) or {}]
+        else:
+            job_prefix = self._availability_scope(job_id).split(":", 1)[0] + ":"
+            health_records = [
+                health for key, health in self._provider_health.items()
+                if isinstance(key, tuple)
+                and len(key) == 2
+                and key[1] == provider
+                and str(key[0]).startswith(job_prefix)
+            ]
+            legacy = self._provider_health.get(provider)
+            if isinstance(legacy, dict):
+                health_records.append(legacy)
+        return any(
+            float(health.get("open_until", 0)) > time.monotonic()
+            for health in health_records
+        )
 
     @staticmethod
     def _is_model_unavailable_error(error: Exception | str) -> bool:
@@ -234,16 +285,26 @@ class ModelRouter:
             "unknown model",
             "model does not exist",
             "model is not available",
-            "permission denied",
         )
-        return any(marker in message for marker in markers)
+        return any(marker in message for marker in markers) or (
+            "permission denied" in message
+            and any(marker in message for marker in (
+                "model", "404", "resource_not_found_error"
+            ))
+        )
 
     def _mark_model_unavailable(
         self, provider: str, model_name: str, error: Exception | str,
+        job_id: str = "", task_id: str = "",
     ) -> None:
-        self._unavailable_models[(provider, model_name)] = str(error)[:300]
+        self._unavailable_models[
+            self._model_key(provider, model_name, job_id, task_id)
+        ] = str(error)[:300]
 
-    def _model_fallback(self, provider_name: str, model_name: str) -> str:
+    def _model_fallback(
+        self, provider_name: str, model_name: str, job_id: str = "",
+        task_id: str = "",
+    ) -> str:
         """Return a provider-supported alternative not known to be unavailable."""
         provider = self.get_provider(provider_name)
         resolver = getattr(provider, "fallback_models", None)
@@ -253,7 +314,9 @@ class ModelRouter:
             if (
                 candidate
                 and candidate != model_name
-                and (provider_name, candidate) not in self._unavailable_models
+                and self._model_key(
+                    provider_name, candidate, job_id, task_id
+                ) not in self._unavailable_models
             ):
                 return candidate
         return ""
@@ -272,15 +335,25 @@ class ModelRouter:
             "does not support this tool_choice", "unsupported tool_choice",
             "thinking mode", "unsupported parameter", "invalid parameter",
         )
-        permanent = (
-            "insufficient balance", "insufficient_balance", "invalid api key",
-            "authentication", "missing credentials", "credentials were not found",
-            "quota exceeded", "billing", "error code: 401", "status code: 401",
-            "error code: 402", "status code: 402", "error code: 403",
-            "status code: 403",
+        user_action = (
+            "insufficient balance", "insufficient_balance", "quota exceeded",
+            "insufficient_quota", "billing", "error code: 402",
+            "status code: 402", "credit_balance_exhausted",
         )
-        transient = (
+        authentication = (
+            "invalid api key", "authentication", "authorization",
+            "missing credentials", "credentials were not found",
+            "credentials unavailable", "error code: 401", "status code: 401",
+            "error code: 403", "status code: 403", "permission denied",
+        )
+        unavailable = (
             "timed out", "timeout", "rate limit", "too many requests",
+            "error code: 429", "status code: 429", "overloaded",
+            "not found the model", "model not found", "unknown model",
+            "model does not exist", "model is not available",
+            "resource_not_found_error", "error code: 404", "status code: 404",
+        )
+        retryable = (
             "connection error", "connection reset", "network error",
             "temporarily unavailable", "service unavailable", "server error",
             "status code: 500", "status code: 502", "status code: 503",
@@ -290,30 +363,42 @@ class ModelRouter:
         )
         if any(marker in message for marker in capability):
             return "capability"
-        if any(marker in message for marker in permanent):
-            return "permanent"
-        if any(marker in message for marker in transient):
-            return "transient"
+        if any(marker in message for marker in user_action):
+            return "user_action"
+        if any(marker in message for marker in authentication):
+            return "authentication"
+        if any(marker in message for marker in unavailable):
+            return "unavailable"
+        if any(marker in message for marker in retryable):
+            return "retryable"
         return "other"
 
-    def _record_provider_success(self, provider: str):
-        self._provider_health.pop(provider, None)
+    def _record_provider_success(
+        self, provider: str, job_id: str = "", task_id: str = "",
+    ):
+        self._provider_health.pop(
+            self._health_key(provider, job_id, task_id), None
+        )
 
     def _record_provider_failure(self, provider: str,
-                                 error: Exception | str) -> str:
+                                 error: Exception | str,
+                                 job_id: str = "",
+                                 task_id: str = "") -> str:
         kind = self._failure_kind(error)
+        key = self._health_key(provider, job_id, task_id)
         health = self._provider_health.setdefault(
-            provider, {"failures": 0, "open_until": 0, "reason": ""}
+            key, {"failures": 0, "open_until": 0, "reason": ""}
         )
         health["failures"] = int(health.get("failures", 0)) + 1
         health["reason"] = str(error)[:300]
-        if kind in {"capability", "permanent"}:
+        if kind in {"capability", "authentication", "unavailable"}:
             health["open_until"] = time.monotonic() + 30 * 60
-        elif kind == "transient" and health["failures"] >= 2:
-            health["open_until"] = time.monotonic() + 60
         return kind
 
-    def _fallback_provider(self, current: str, *, needs_tools: bool) -> str:
+    def _fallback_provider(
+        self, current: str, *, needs_tools: bool, job_id: str = "",
+        task_id: str = "",
+    ) -> str:
         candidates = ("kimi", "deepseek") if needs_tools else (
             "codex", "kimi", "deepseek"
         )
@@ -321,7 +406,7 @@ class ModelRouter:
             if (
                 candidate != current
                 and self.has_provider(candidate)
-                and not self._circuit_is_open(candidate)
+                and not self._circuit_is_open(candidate, job_id, task_id)
             ):
                 return candidate
         return ""
@@ -464,14 +549,24 @@ class ModelRouter:
         allow_provider_fallback = bool(
             kwargs.pop("allow_provider_fallback", True)
         )
+        allow_model_fallback = bool(kwargs.pop("allow_model_fallback", True))
+        same_provider_retry_count = max(
+            0, int(kwargs.pop("_same_provider_retry_count", 0) or 0)
+        )
 
         # Route to best provider
         route = kwargs.pop("provider_override", None) or self.get_route(agent_type, task)
-        if allow_provider_fallback and self._circuit_is_open(route):
-            fallback = self._fallback_provider(route, needs_tools=False)
+        if allow_provider_fallback and self._circuit_is_open(
+            route, job_id, task_id
+        ):
+            fallback = self._fallback_provider(
+                route, needs_tools=False, job_id=job_id, task_id=task_id
+            )
             if fallback:
                 provider_fallback_from = route
-                reason = (self._provider_health.get(route) or {}).get(
+                reason = (self._provider_health.get(
+                    self._health_key(route, job_id, task_id)
+                ) or {}).get(
                     "reason", "provider circuit is open"
                 )
                 await self._publish_fallback(
@@ -504,9 +599,13 @@ class ModelRouter:
                 else getattr(provider, "model", "") or route
             )
         )
-        unavailable_reason = self._unavailable_models.get((route, model_name), "")
-        if unavailable_reason:
-            fallback_model = self._model_fallback(route, model_name)
+        unavailable_reason = self._unavailable_models.get(
+            self._model_key(route, model_name, job_id, task_id), ""
+        )
+        if unavailable_reason and allow_model_fallback:
+            fallback_model = self._model_fallback(
+                route, model_name, job_id, task_id
+            )
             if fallback_model:
                 fallback_origin = model_name
                 await self._publish_model_fallback(
@@ -546,7 +645,7 @@ class ModelRouter:
             )
             response = await self._resolve_request(request, request_timeout)
             response = self._normalize_response(response, route)
-            self._record_provider_success(route)
+            self._record_provider_success(route, job_id, task_id)
             if model_fallback_from:
                 await self._publish_fallback_success(
                     agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -649,9 +748,16 @@ class ModelRouter:
                 )
             model_unavailable = self._is_model_unavailable_error(normalized_error)
             if model_unavailable:
-                self._mark_model_unavailable(route, model_name, normalized_error)
+                self._mark_model_unavailable(
+                    route, model_name, normalized_error, job_id, task_id
+                )
                 failure_kind = "capability"
-                fallback_model = self._model_fallback(route, model_name)
+                fallback_model = (
+                    self._model_fallback(
+                        route, model_name, job_id, task_id
+                    )
+                    if allow_model_fallback else ""
+                )
                 if fallback_model:
                     await self._publish_model_fallback(
                         agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -667,19 +773,41 @@ class ModelRouter:
                         provider_override=route,
                         _fallback_attempted=fallback_attempted,
                         allow_provider_fallback=allow_provider_fallback,
+                        allow_model_fallback=allow_model_fallback,
                         request_timeout=request_timeout,
                         **retry_kwargs,
                     )
             else:
                 failure_kind = self._record_provider_failure(
-                    route, normalized_error
+                    route, normalized_error, job_id, task_id
+                )
+            if (
+                failure_kind == "retryable"
+                and same_provider_retry_count < SAME_PROVIDER_RETRIES
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["_same_provider_retry_count"] = (
+                    same_provider_retry_count + 1
+                )
+                return await self.chat(
+                    agent_type, system_prompt, messages,
+                    provider_override=route,
+                    _fallback_attempted=fallback_attempted,
+                    allow_provider_fallback=allow_provider_fallback,
+                    allow_model_fallback=allow_model_fallback,
+                    request_timeout=request_timeout,
+                    **retry_kwargs,
                 )
             if (
                 not fallback_attempted
                 and allow_provider_fallback
-                and failure_kind in {"capability", "permanent", "transient"}
+                and failure_kind in {
+                    "capability", "authentication", "unavailable"
+                }
             ):
-                fallback = self._fallback_provider(route, needs_tools=False)
+                fallback = self._fallback_provider(
+                    route, needs_tools=False, job_id=job_id, task_id=task_id
+                )
                 if fallback:
                     await self._publish_fallback(
                         agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -695,6 +823,7 @@ class ModelRouter:
                         _fallback_attempted=True,
                         _provider_fallback_from=route,
                         allow_provider_fallback=allow_provider_fallback,
+                        allow_model_fallback=allow_model_fallback,
                         request_timeout=request_timeout,
                         **retry_kwargs,
                     )
@@ -718,13 +847,23 @@ class ModelRouter:
         allow_provider_fallback = bool(
             kwargs.pop("allow_provider_fallback", True)
         )
+        allow_model_fallback = bool(kwargs.pop("allow_model_fallback", True))
+        same_provider_retry_count = max(
+            0, int(kwargs.pop("_same_provider_retry_count", 0) or 0)
+        )
 
         route = kwargs.pop("provider_override", None) or self.get_route(agent_type, task)
-        if allow_provider_fallback and self._circuit_is_open(route):
-            fallback = self._fallback_provider(route, needs_tools=True)
+        if allow_provider_fallback and self._circuit_is_open(
+            route, job_id, task_id
+        ):
+            fallback = self._fallback_provider(
+                route, needs_tools=True, job_id=job_id, task_id=task_id
+            )
             if fallback:
                 provider_fallback_from = route
-                reason = (self._provider_health.get(route) or {}).get(
+                reason = (self._provider_health.get(
+                    self._health_key(route, job_id, task_id)
+                ) or {}).get(
                     "reason", "provider circuit is open"
                 )
                 await self._publish_fallback(
@@ -757,9 +896,13 @@ class ModelRouter:
                 else getattr(provider, "model", "") or route
             )
         )
-        unavailable_reason = self._unavailable_models.get((route, model_name), "")
-        if unavailable_reason:
-            fallback_model = self._model_fallback(route, model_name)
+        unavailable_reason = self._unavailable_models.get(
+            self._model_key(route, model_name, job_id, task_id), ""
+        )
+        if unavailable_reason and allow_model_fallback:
+            fallback_model = self._model_fallback(
+                route, model_name, job_id, task_id
+            )
             if fallback_model:
                 fallback_origin = model_name
                 await self._publish_model_fallback(
@@ -798,7 +941,7 @@ class ModelRouter:
             )
             response = await self._resolve_request(request, request_timeout)
             response = self._normalize_response(response, route)
-            self._record_provider_success(route)
+            self._record_provider_success(route, job_id, task_id)
             if model_fallback_from:
                 await self._publish_fallback_success(
                     agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -899,9 +1042,16 @@ class ModelRouter:
                 )
             model_unavailable = self._is_model_unavailable_error(normalized_error)
             if model_unavailable:
-                self._mark_model_unavailable(route, model_name, normalized_error)
+                self._mark_model_unavailable(
+                    route, model_name, normalized_error, job_id, task_id
+                )
                 failure_kind = "capability"
-                fallback_model = self._model_fallback(route, model_name)
+                fallback_model = (
+                    self._model_fallback(
+                        route, model_name, job_id, task_id
+                    )
+                    if allow_model_fallback else ""
+                )
                 if fallback_model:
                     await self._publish_model_fallback(
                         agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -917,19 +1067,41 @@ class ModelRouter:
                         provider_override=route,
                         _fallback_attempted=fallback_attempted,
                         allow_provider_fallback=allow_provider_fallback,
+                        allow_model_fallback=allow_model_fallback,
                         request_timeout=request_timeout,
                         **retry_kwargs,
                     )
             else:
                 failure_kind = self._record_provider_failure(
-                    route, normalized_error
+                    route, normalized_error, job_id, task_id
+                )
+            if (
+                failure_kind == "retryable"
+                and same_provider_retry_count < SAME_PROVIDER_RETRIES
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["_same_provider_retry_count"] = (
+                    same_provider_retry_count + 1
+                )
+                return await self.chat_with_tools(
+                    agent_type, system_prompt, messages, tools,
+                    provider_override=route,
+                    _fallback_attempted=fallback_attempted,
+                    allow_provider_fallback=allow_provider_fallback,
+                    allow_model_fallback=allow_model_fallback,
+                    request_timeout=request_timeout,
+                    **retry_kwargs,
                 )
             if (
                 not fallback_attempted
                 and allow_provider_fallback
-                and failure_kind in {"capability", "permanent", "transient"}
+                and failure_kind in {
+                    "capability", "authentication", "unavailable"
+                }
             ):
-                fallback = self._fallback_provider(route, needs_tools=True)
+                fallback = self._fallback_provider(
+                    route, needs_tools=True, job_id=job_id, task_id=task_id
+                )
                 if fallback:
                     await self._publish_fallback(
                         agent_type=agent_type, job_id=job_id, task_id=task_id,
@@ -945,6 +1117,7 @@ class ModelRouter:
                         _fallback_attempted=True,
                         _provider_fallback_from=route,
                         allow_provider_fallback=allow_provider_fallback,
+                        allow_model_fallback=allow_model_fallback,
                         request_timeout=request_timeout,
                         **retry_kwargs,
                     )

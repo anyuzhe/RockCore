@@ -412,6 +412,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     messages,
                     tools=tool_definitions,
                     provider_override=provider_override,
+                    # Provider/model switching is owned by Engine so existing
+                    # artifacts can be validated before any fallback. Keeping it
+                    # disabled here prevents two independent fallback layers.
+                    allow_provider_fallback=False,
+                    allow_model_fallback=False,
                     task=task,
                     attachments=(
                         getattr(getattr(task, "job", None), "attachments", None)
