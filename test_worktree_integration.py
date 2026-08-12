@@ -127,6 +127,55 @@ def test_untracked_runtime_report_is_removed_from_task_worktree(tmp_path):
     assert report.read_text(encoding="utf-8") == "main report\n"
 
 
+def test_continuation_neutralizes_reports_committed_by_old_branch(tmp_path):
+    project = _initialize_project(tmp_path)
+    event_report = project / ".ai" / "reports" / "OLD.events.jsonl"
+    event_report.parent.mkdir(parents=True)
+    event_report.write_text("baseline\n", encoding="utf-8")
+    assert _git(project, "add", str(event_report.relative_to(project))).returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "tracked report baseline",
+    ).returncode == 0
+    manager = MergeManager(str(project), worktrees_dir=str(tmp_path / "worktrees"))
+
+    async def scenario():
+        source = await manager.create_task_worktree("T001", "JOB-SOURCE")
+        source_root = Path(source["path"])
+        (source_root / "checkpoint.txt").write_text("old output\n", encoding="utf-8")
+        source_event = source_root / ".ai" / "reports" / event_report.name
+        source_event.write_text("old branch report\n", encoding="utf-8")
+        source_pdf = source_root / ".ai" / "reports" / "OLD.pdf"
+        source_pdf.write_bytes(b"old branch pdf")
+        assert _git(source_root, "add", "-A").returncode == 0
+        assert _git(
+            source_root, "-c", "user.name=Test", "-c",
+            "user.email=test@example.com", "commit", "-m", "old checkpoint",
+        ).returncode == 0
+        manager.preserve_worktree("T001")
+
+        # The report writer continues changing the main working directory.
+        event_report.write_text("live main report\n", encoding="utf-8")
+        live_pdf = project / ".ai" / "reports" / "OLD.pdf"
+        live_pdf.write_bytes(b"live main pdf")
+
+        resumed = await manager.create_task_worktree(
+            "T001", "JOB-CONTINUE", source_job_id="JOB-SOURCE"
+        )
+        resumed_root = Path(resumed["path"])
+        (resumed_root / "final.txt").write_text("finished\n", encoding="utf-8")
+        result = await manager.commit_and_merge("T001", "finish continuation")
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "merged"
+    assert (project / "checkpoint.txt").read_text(encoding="utf-8") == "old output\n"
+    assert (project / "final.txt").read_text(encoding="utf-8") == "finished\n"
+    assert event_report.read_text(encoding="utf-8") == "live main report\n"
+    assert (project / ".ai" / "reports" / "OLD.pdf").read_bytes() == b"live main pdf"
+
+
 def test_job_rollback_reverts_only_that_job_and_preserves_later_commit(tmp_path):
     project = _initialize_project(tmp_path)
     (project / "feature.txt").write_text("job output\n", encoding="utf-8")

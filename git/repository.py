@@ -54,6 +54,15 @@ ROCKCORE_IGNORE_LINES = (
     ".ai/runtime/",
     ".ai/recovery/",
     ".ai/reports/",
+    ".ai/repository_map.json",
+    ".ai/agents.json",
+    ".ai/project.md",
+    ".ai/architecture.md",
+    ".ai/decisions.md",
+    ".ai/coding_rules.md",
+    ".ai/protected_paths.md",
+    ".ai/known_issues.md",
+    ".ai/glossary.md",
 )
 
 

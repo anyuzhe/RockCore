@@ -26,7 +26,17 @@ class MergeManager:
         ".xls", ".xlsx", ".jpg", ".jpeg", ".png", ".gif", ".webp",
         ".mp3", ".wav", ".mp4", ".mov", ".zip", ".7z", ".rar",
     }
-    RUNTIME_PATH_PREFIXES = (".ai/reports/",)
+    # RockCore-owned state must never be published as user output, including
+    # when continuing an old, polluted branch. Project extensions such as
+    # `.ai/skills/` deliberately remain eligible for version control.
+    RUNTIME_PATH_PREFIXES = (
+        ".ai/reports/", ".ai/runtime/", ".ai/recovery/", ".ai/worktrees/",
+    )
+    RUNTIME_EXACT_PATHS = {
+        ".ai/repository_map.json", ".ai/agents.json", ".ai/project.md",
+        ".ai/architecture.md", ".ai/decisions.md", ".ai/coding_rules.md",
+        ".ai/protected_paths.md", ".ai/known_issues.md", ".ai/glossary.md",
+    }
 
     def __init__(self, project_root: str, worktrees_dir: str | None = None):
         self.project_root = Path(project_root).resolve()
@@ -257,13 +267,13 @@ class MergeManager:
         normalized = str(relative or "").replace("\\", "/")
         while normalized.startswith("./"):
             normalized = normalized[2:]
-        return any(
+        return normalized in cls.RUNTIME_EXACT_PATHS or any(
             normalized == prefix.rstrip("/") or normalized.startswith(prefix)
             for prefix in cls.RUNTIME_PATH_PREFIXES
         )
 
     def _exclude_runtime_paths(self, worktree_path: str) -> tuple[bool, str]:
-        """Remove generated RockCore reports from the task index before commit."""
+        """Remove generated RockCore state from the task index before commit."""
         result = run_process(
             ["git", "diff", "--cached", "--name-only", "-z"],
             capture_output=True, text=True, cwd=worktree_path,
@@ -313,6 +323,55 @@ class MergeManager:
                 return False, str(error)
         logger.info("Excluded RockCore runtime files from task commit: %s", runtime_paths)
         return True, ""
+
+    def _neutralize_inherited_runtime_paths(
+        self, worktree_path: str,
+    ) -> tuple[bool, str, list[str]]:
+        """Make inherited `.ai` history match the target before branch merge."""
+        result = run_process(
+            [
+                "git", "diff", "--name-only", "-z",
+                self.target_branch, "HEAD",
+            ],
+            capture_output=True, text=True, cwd=worktree_path,
+        )
+        if result.returncode != 0:
+            return False, self._process_output(result), []
+        inherited = [
+            item for item in result.stdout.split("\0")
+            if item and self._is_runtime_path(item)
+        ]
+        if not inherited:
+            return True, "", []
+
+        target_paths = []
+        branch_only_paths = []
+        for relative in inherited:
+            exists = run_process(
+                ["git", "cat-file", "-e", f"{self.target_branch}:{relative}"],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            (target_paths if exists.returncode == 0 else branch_only_paths).append(
+                relative
+            )
+        if target_paths:
+            restore = run_process(
+                [
+                    "git", "restore", "--source", self.target_branch,
+                    "--staged", "--worktree", "--", *target_paths,
+                ],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            if restore.returncode != 0:
+                return False, self._process_output(restore), inherited
+        if branch_only_paths:
+            remove = run_process(
+                ["git", "rm", "-r", "-f", "--ignore-unmatch", "--", *branch_only_paths],
+                capture_output=True, text=True, cwd=worktree_path,
+            )
+            if remove.returncode != 0:
+                return False, self._process_output(remove), inherited
+        return True, "", inherited
 
     async def create_task_worktree(self, task_id: str, job_id: str,
                                    source_job_id: str = "") -> dict:
@@ -543,6 +602,32 @@ class MergeManager:
                 if commit_result.returncode != 0:
                     return self._integration_failure(
                         task_id, "commit", self._process_output(commit_result)
+                    )
+
+            neutralized, neutralize_error, inherited_runtime_paths = (
+                self._neutralize_inherited_runtime_paths(wt_path)
+            )
+            if not neutralized:
+                return self._integration_failure(
+                    task_id, "neutralize_runtime_history", neutralize_error
+                )
+            if inherited_runtime_paths:
+                identity_error = self._ensure_git_identity(wt_path)
+                if identity_error:
+                    return self._integration_failure(
+                        task_id, "git_identity", identity_error
+                    )
+                cleanup_commit = run_process(
+                    [
+                        "git", "commit", "-m",
+                        f"RockCore: exclude internal state from {task_id}",
+                    ],
+                    capture_output=True, text=True, cwd=wt_path,
+                )
+                if cleanup_commit.returncode != 0:
+                    return self._integration_failure(
+                        task_id, "commit_runtime_cleanup",
+                        self._process_output(cleanup_commit),
                     )
 
             commit_hash_result = run_process(
