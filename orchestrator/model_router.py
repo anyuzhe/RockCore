@@ -109,8 +109,7 @@ class ModelRouter:
         max_output = max(
             256,
             int(
-                kwargs.get("max_tokens")
-                or kwargs.get("max_output_tokens")
+                kwargs.get("estimated_output_tokens")
                 or 4_096
             ),
         )
@@ -322,11 +321,10 @@ class ModelRouter:
         return ""
 
     @staticmethod
-    def _clamp_output_tokens(provider: Any, kwargs: dict) -> None:
-        limit = int(getattr(provider, "MAX_OUTPUT_TOKENS", 0) or 0)
-        requested = int(kwargs.get("max_tokens", 0) or 0)
-        if limit and requested > limit:
-            kwargs["max_tokens"] = limit
+    def _remove_output_limit(kwargs: dict) -> None:
+        """Keep RockCore from imposing a generation cap on provider APIs."""
+        kwargs.pop("max_tokens", None)
+        kwargs.pop("max_output_tokens", None)
 
     @staticmethod
     def _failure_kind(error: Exception | str) -> str:
@@ -575,7 +573,6 @@ class ModelRouter:
                 )
                 route = fallback
         provider = self.get_provider(route)
-        self._clamp_output_tokens(provider, kwargs)
         billing_mode = self._billing_mode(provider)
         configured_model = self._configured_model(job_id, agent_type)
         configured_reasoning = self._configured_reasoning(job_id, agent_type)
@@ -631,6 +628,8 @@ class ModelRouter:
             tools=None,
             kwargs=kwargs,
         )
+        self._remove_output_limit(kwargs)
+        kwargs.pop("estimated_output_tokens", None)
         reservation_id = str(admission.get("reservation_id") or "")
 
         # Snapshot messages for chat log before the call
@@ -872,7 +871,6 @@ class ModelRouter:
                 )
                 route = fallback
         provider = self.get_provider(route)
-        self._clamp_output_tokens(provider, kwargs)
         billing_mode = self._billing_mode(provider)
         configured_model = self._configured_model(job_id, agent_type)
         configured_reasoning = self._configured_reasoning(job_id, agent_type)
@@ -928,6 +926,8 @@ class ModelRouter:
             tools=tools,
             kwargs=kwargs,
         )
+        self._remove_output_limit(kwargs)
+        kwargs.pop("estimated_output_tokens", None)
         reservation_id = str(admission.get("reservation_id") or "")
 
         chat_prompt = system_prompt

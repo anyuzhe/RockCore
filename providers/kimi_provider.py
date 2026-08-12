@@ -78,8 +78,6 @@ class KimiProvider(BaseProvider):
             messages=full_messages,
             temperature=self._resolve_temperature(**kwargs),
         )
-        if kwargs.get("max_tokens") is not None:
-            request["max_tokens"] = kwargs["max_tokens"]
         response = await client.chat.completions.create(**request)
 
         choice = response.choices[0]
@@ -104,8 +102,6 @@ class KimiProvider(BaseProvider):
             temperature=self._resolve_temperature(**kwargs),
             tool_choice=kwargs.get("tool_choice", "auto") if tools else None,
         )
-        if kwargs.get("max_tokens") is not None:
-            request["max_tokens"] = kwargs["max_tokens"]
         response = await client.chat.completions.create(**request)
 
         choice = response.choices[0]

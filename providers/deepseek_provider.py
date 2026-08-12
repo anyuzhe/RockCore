@@ -14,7 +14,6 @@ class DeepSeekProvider(BaseProvider):
 
     DEFAULT_MODEL = "deepseek-v4-pro"
     BASE_URL = "https://api.deepseek.com/v1"
-    MAX_OUTPUT_TOKENS = 16_384
 
     def __init__(self, config: dict | None = None):
         super().__init__(config)
@@ -60,7 +59,6 @@ class DeepSeekProvider(BaseProvider):
             model=kwargs.get("model", self.model),
             messages=full_messages,
             temperature=kwargs.get("temperature", 0.3),
-            max_tokens=kwargs.get("max_tokens", 8192),
             response_format=kwargs.get("response_format"),
         )
 
@@ -85,7 +83,6 @@ class DeepSeekProvider(BaseProvider):
             messages=full_messages,
             tools=tools if tools else None,
             temperature=kwargs.get("temperature", 0.3),
-            max_tokens=kwargs.get("max_tokens", 16384),
             parallel_tool_calls=kwargs.get("parallel_tool_calls", True),
             tool_choice=tool_choice,
         )

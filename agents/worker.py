@@ -446,13 +446,13 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     {"model": model_override} if model_override else {}
                 )
                 if task.task_type in {"coding", "action", "testing"}:
-                    max_output_tokens = (
+                    estimated_output_tokens = (
                         CODING_OUTPUT_TOKENS
                         if not (has_written or external_action_completed)
                         else FOLLOWUP_OUTPUT_TOKENS
                     )
                 else:
-                    max_output_tokens = REPORT_OUTPUT_TOKENS
+                    estimated_output_tokens = REPORT_OUTPUT_TOKENS
                 response = await self.model_router.chat_with_tools(
                     self.agent_type,
                     system_prompt,
@@ -469,7 +469,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         getattr(getattr(task, "job", None), "attachments", None)
                         or []
                     ),
-                    max_tokens=max_output_tokens,
+                    estimated_output_tokens=estimated_output_tokens,
                     tool_choice=(
                         "required"
                         if (

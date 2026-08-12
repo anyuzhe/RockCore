@@ -449,7 +449,7 @@ def test_worker_recovers_from_truncated_large_write_with_smaller_payload():
 
         assert result["status"] == "completed"
         assert broker.executed == ["write_file"]
-        assert router.max_tokens[0] == 12_288
+        assert router.max_tokens[0] is None
         assert any(
             "under 12000 characters" in str(message.get("content", ""))
             for message in router.second_messages

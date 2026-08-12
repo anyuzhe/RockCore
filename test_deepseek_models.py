@@ -56,3 +56,33 @@ def test_deepseek_downgrades_required_tool_choice_to_auto():
 def test_deepseek_preserves_supported_tool_choice():
     assert DeepSeekProvider._resolve_tool_choice([{"type": "function"}], "auto") == "auto"
     assert DeepSeekProvider._resolve_tool_choice([], "required") is None
+
+
+def test_deepseek_never_sends_an_output_limit():
+    class _Completions:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            message = SimpleNamespace(content="ok", tool_calls=[])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message, finish_reason="stop")],
+                usage=None,
+            )
+
+    completions = _Completions()
+    provider = DeepSeekProvider({"api_key": "test"})
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+
+    asyncio.run(provider.chat(
+        "system", [{"role": "user", "content": "hi"}], max_tokens=1234
+    ))
+    asyncio.run(provider.chat_with_tools(
+        "system", [{"role": "user", "content": "edit"}], [],
+        max_tokens=5678,
+    ))
+
+    assert all("max_tokens" not in call for call in completions.calls)

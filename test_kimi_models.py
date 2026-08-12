@@ -89,7 +89,7 @@ def test_kimi_forwards_required_tool_choice_only_for_tool_chat():
     assert completions.calls[1]["tool_choice"] == "required"
 
 
-def test_kimi_does_not_impose_a_default_output_limit():
+def test_kimi_never_imposes_an_output_limit():
     class _Completions:
         def __init__(self):
             self.calls = []
@@ -118,15 +118,13 @@ def test_kimi_does_not_impose_a_default_output_limit():
 
     assert "max_tokens" not in completions.calls[0]
     assert "max_tokens" not in completions.calls[1]
-    assert completions.calls[2]["max_tokens"] == 1234
+    assert "max_tokens" not in completions.calls[2]
 
 
 def test_router_downgrades_unavailable_kimi_model_and_caches_result():
     class Provider:
         model = "kimi-k2.7-code"
         authentication_mode = "api"
-        MAX_OUTPUT_TOKENS = 8_192
-
         def __init__(self):
             self.calls = []
 
@@ -179,7 +177,7 @@ def test_router_downgrades_unavailable_kimi_model_and_caches_result():
         assert [call["model"] for call in provider.calls] == [
             "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.6",
         ]
-        assert all(call["max_tokens"] == 8_192 for call in provider.calls)
+        assert all(call["max_tokens"] is None for call in provider.calls)
         fallback_events = events.get_history("task_model_fallback")
         assert len(fallback_events) == 2
         assert fallback_events[0]["data"]["from_model"] == "kimi-k2.7-code"
@@ -195,8 +193,6 @@ def test_router_tries_every_kimi_candidate_before_reporting_unavailable():
     class Provider:
         model = "kimi-k2.7-code"
         authentication_mode = "api"
-        MAX_OUTPUT_TOKENS = 8_192
-
         def __init__(self):
             self.calls = []
 

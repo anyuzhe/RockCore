@@ -1028,7 +1028,6 @@ class CodexProvider(BaseProvider):
                 "input": self._messages_with_images(
                     messages, image_paths, responses_api=True
                 ),
-                "max_output_tokens": kwargs.get("max_tokens", 4096),
             }
             if reasoning_effort:
                 request_options["reasoning"] = {"effort": reasoning_effort}
@@ -1054,13 +1053,8 @@ class CodexProvider(BaseProvider):
             "model": model,
             "messages": full_messages,
         }
-        if str(model).startswith("gpt-5.6"):
-            request_options["max_completion_tokens"] = kwargs.get(
-                "max_tokens", 4096
-            )
-        else:
+        if not str(model).startswith("gpt-5.6"):
             request_options["temperature"] = kwargs.get("temperature", 0.2)
-            request_options["max_tokens"] = kwargs.get("max_tokens", 4096)
         if reasoning_effort:
             request_options["reasoning_effort"] = reasoning_effort
         response = await client.chat.completions.create(**request_options)
