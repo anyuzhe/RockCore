@@ -587,6 +587,49 @@ def test_paginated_or_truncated_results_are_allowed_to_continue():
     }, "read_file")
 
 
+def test_worker_reports_successful_tool_progress():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "content": "Applying change.",
+                    "tool_calls": [{
+                        "id": "write-1",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": "game.js", "content": "updated",
+                            }),
+                        },
+                    }],
+                    "usage": {},
+                }
+            return {"content": "Done", "tool_calls": [], "usage": {}}
+
+    async def scenario():
+        updates = []
+        task = _task()
+        task._rockcore_progress_callback = updates.append
+        result = await WorkerAgent(
+            Router(), _RecordingBroker(), max_turns=3
+        ).run(task, project_root=".")
+
+        assert result["status"] == "completed"
+        assert updates == [{
+            "phase": "正在修改文件",
+            "tool": "write_file",
+            "path": "game.js",
+            "turn": 1,
+            "max_turns": 3,
+        }]
+
+    asyncio.run(scenario())
+
+
 def test_worker_continues_after_a_tool_exception():
     async def scenario():
         router = _ToolExceptionRouter()

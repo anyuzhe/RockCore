@@ -2439,6 +2439,10 @@ class Engine:
                 "_db_task": t,
             })
         task_data_by_id = {item["task_id"]: item for item in task_dicts}
+        task_position_by_id = {
+            item["task_id"]: index
+            for index, item in enumerate(task_dicts, 1)
+        }
         completed_task_results: dict[str, dict] = {}
 
         # Define runner for each task (with worktree isolation)
@@ -2566,6 +2570,33 @@ class Engine:
             for resumed_path in resumed_paths:
                 task_baseline.pop(str(resumed_path).replace("\\", "/"), None)
             task_worker = worker.scoped_to(task_worktree_root)
+            live_change_summary = {
+                "changed": [], "files_changed": 0,
+                "additions": 0, "deletions": 0,
+            }
+
+            async def publish_worker_progress(progress: dict):
+                nonlocal live_change_summary
+                phase = str(progress.get("phase") or "正在执行")
+                if phase in {"正在修改文件", "正在执行验证"}:
+                    live_change_summary = self.test_manager.change_summary(
+                        task_worktree_root, task_baseline
+                    )
+                await self.event_bus.publish(
+                    "task_progress",
+                    job_id=job.job_id,
+                    task_id=task_id,
+                    task_index=task_position_by_id.get(task_id, 1),
+                    task_total=len(task_dicts),
+                    phase=phase,
+                    tool=progress.get("tool", ""),
+                    path=progress.get("path", ""),
+                    turn=progress.get("turn", 0),
+                    max_turns=progress.get("max_turns", 0),
+                    changes=live_change_summary,
+                )
+
+            t._rockcore_progress_callback = publish_worker_progress
             base_exploration = (
                 proj_config.get_exploration_turns(complexity)
                 if proj_config else getattr(task_worker, "max_exploration_turns", 12)
@@ -2698,6 +2729,8 @@ class Engine:
             await self.event_bus.publish(
                 "task_running", job_id=job.job_id,
                 task_id=task_id, title=t.title,
+                task_index=task_position_by_id.get(task_id, 1),
+                task_total=len(task_dicts),
                 max_turns=task_worker.max_turns,
                 exploration_limit=task_worker.max_exploration_turns,
                 input_token_budget=t._rockcore_input_budget,

@@ -1107,6 +1107,13 @@ class MainWindow(QMainWindow):
             if not self.task_panel.has_task(data.get("task_id", "")):
                 self._reload_selected_workflow()
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
+            self.task_panel.set_worker_progress(
+                data.get("task_id", ""),
+                task_index=int(data.get("task_index", 0) or 0),
+                task_total=int(data.get("task_total", 0) or 0),
+                phase="正在执行",
+                max_turns=int(data.get("max_turns", 0) or 0),
+            )
             skills = data.get("skills") or []
             if skills:
                 self.task_panel.append_stage_output(
@@ -1115,6 +1122,17 @@ class MainWindow(QMainWindow):
                     + "、".join(map(str, skills)),
                     repair_round=task_repair_round,
                 )
+        elif event_type == "task_progress" and is_selected:
+            self.task_panel.set_worker_progress(
+                data.get("task_id", ""),
+                task_index=int(data.get("task_index", 0) or 0),
+                task_total=int(data.get("task_total", 0) or 0),
+                phase=str(data.get("phase") or "正在执行"),
+                path=str(data.get("path") or ""),
+                changes=data.get("changes") or {},
+                turn=int(data.get("turn", 0) or 0),
+                max_turns=int(data.get("max_turns", 0) or 0),
+            )
         elif event_type == "task_done" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "done")
             result = data.get("result") or {}
@@ -1317,12 +1335,16 @@ class MainWindow(QMainWindow):
         elif event_type == "review_repair_failed" and is_selected:
             self._reload_selected_workflow()
         elif event_type == "test_running" and is_selected:
+            self.task_panel.set_worker_progress(
+                data.get("task_id", ""), phase="正在执行验证"
+            )
             self.task_panel.append_stage_output(
                 "worker",
                 f"正在验收：{data.get('command', '')}",
                 repair_round=task_repair_round,
             )
         elif event_type == "job_reviewing" and is_selected:
+            self.task_panel.clear_worker_progress()
             self._reload_selected_workflow()
             self.task_panel.update_stage(
                 "reviewer", "running", "正在审核执行结果",

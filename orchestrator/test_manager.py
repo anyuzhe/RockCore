@@ -55,10 +55,12 @@ class TestManager:
             return False
 
     @classmethod
-    def capture_snapshot(cls, root: str | Path) -> dict[str, tuple[int, int, str]]:
+    def capture_snapshot(
+        cls, root: str | Path,
+    ) -> dict[str, tuple[int, int, str, int | None]]:
         """Capture a lightweight content snapshot for non-Git change detection."""
         root_path = Path(root).resolve()
-        snapshot: dict[str, tuple[int, int, str]] = {}
+        snapshot: dict[str, tuple[int, int, str, int | None]] = {}
         if not root_path.is_dir():
             return snapshot
         for path in root_path.rglob("*"):
@@ -71,16 +73,26 @@ class TestManager:
             try:
                 stat = path.stat()
                 digest = ""
+                line_count = None
                 if stat.st_size <= 5 * 1024 * 1024:
-                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-                snapshot[relative] = (stat.st_size, stat.st_mtime_ns, digest)
+                    payload = path.read_bytes()
+                    digest = hashlib.sha256(payload).hexdigest()
+                    if b"\x00" not in payload:
+                        try:
+                            text, _ = read_text_compatible(path)
+                            line_count = len(text.splitlines())
+                        except (OSError, UnicodeError):
+                            line_count = None
+                snapshot[relative] = (
+                    stat.st_size, stat.st_mtime_ns, digest, line_count,
+                )
             except OSError:
                 continue
         return snapshot
 
     @classmethod
     def snapshot_diff(cls, root: str | Path,
-                      before: dict[str, tuple[int, int, str]] | None) -> dict:
+                      before: dict | None) -> dict:
         after = cls.capture_snapshot(root)
         before = before or {}
         added = sorted(after.keys() - before.keys())
@@ -90,6 +102,81 @@ class TestManager:
         )
         return {"added": added, "modified": modified, "deleted": deleted,
                 "changed": added + modified + deleted}
+
+    @classmethod
+    def change_summary(cls, root: str | Path,
+                       before: dict | None) -> dict:
+        """Return live file and text-line changes relative to a task snapshot.
+
+        Git provides exact numstat values for tracked files. Newly created files
+        and non-Git projects fall back to bounded text line counts captured in
+        the task snapshot. Binary files still contribute to ``files_changed``.
+        """
+        root_path = Path(root).resolve()
+        before = before or {}
+        diff = cls.snapshot_diff(root_path, before)
+        additions = 0
+        deletions = 0
+        counted: set[str] = set()
+        changed_paths = set(diff["changed"])
+
+        if cls.is_git_repo(root_path):
+            try:
+                result = run_process(
+                    [
+                        "git", "-C", str(root_path), "diff", "--numstat",
+                        "--no-renames", "HEAD", "--",
+                    ],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        parts = line.split("\t", 2)
+                        if len(parts) != 3:
+                            continue
+                        added, removed, relative = parts
+                        relative = relative.replace("\\", "/")
+                        if relative not in changed_paths:
+                            continue
+                        counted.add(relative)
+                        if added.isdigit():
+                            additions += int(added)
+                        if removed.isdigit():
+                            deletions += int(removed)
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+
+        after = cls.capture_snapshot(root_path)
+        for relative in diff["added"]:
+            if relative not in counted:
+                additions += cls._snapshot_line_count(after.get(relative))
+        for relative in diff["deleted"]:
+            if relative not in counted:
+                deletions += cls._snapshot_line_count(before.get(relative))
+        for relative in diff["modified"]:
+            if relative in counted:
+                continue
+            old_lines = cls._snapshot_line_count(before.get(relative))
+            new_lines = cls._snapshot_line_count(after.get(relative))
+            if new_lines >= old_lines:
+                additions += new_lines - old_lines
+            else:
+                deletions += old_lines - new_lines
+
+        return {
+            **diff,
+            "files_changed": len(diff["changed"]),
+            "additions": additions,
+            "deletions": deletions,
+        }
+
+    @staticmethod
+    def _snapshot_line_count(value) -> int:
+        if isinstance(value, (tuple, list)) and len(value) >= 4:
+            count = value[3]
+            if isinstance(count, int) and count >= 0:
+                return count
+        return 0
 
     @staticmethod
     def _uses_git(command: str) -> bool:

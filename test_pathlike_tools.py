@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from orchestrator.policy_engine import PolicyEngine
+from orchestrator.test_manager import TestManager
 from tools.file_tools import FileTools
 from tools.search_tools import SearchTools
 from tools.shell_tools import ShellTools
@@ -73,3 +74,19 @@ def test_search_marks_capped_results_as_truncated(tmp_path):
     assert result["count"] == 1
     assert result["truncated"] is True
     assert result["source_version"]
+
+
+def test_change_summary_reports_live_file_and_line_counts(tmp_path):
+    source = tmp_path / "main.py"
+    source.write_text("one\ntwo\n", encoding="utf-8")
+    baseline = TestManager.capture_snapshot(tmp_path)
+
+    source.write_text("one\nchanged\nthree\n", encoding="utf-8")
+    (tmp_path / "new.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    summary = TestManager.change_summary(tmp_path, baseline)
+
+    assert summary["files_changed"] == 2
+    assert set(summary["changed"]) == {"main.py", "new.txt"}
+    assert summary["additions"] == 3
+    assert summary["deletions"] == 0

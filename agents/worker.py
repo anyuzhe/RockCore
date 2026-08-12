@@ -1,6 +1,7 @@
 """DeepSeek Worker Agent — executes individual tasks via tool calls."""
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -143,6 +144,27 @@ class WorkerAgent:
                   recovery_context: str = "") -> dict:
         """Execute a single task using the tool-calling loop."""
         logger.info(f"Worker: executing task {task.task_id}: {task.title}")
+
+        progress_callback = getattr(task, "_rockcore_progress_callback", None)
+
+        async def report_progress(
+            phase: str, *, tool: str = "", path: str = "", turn: int = 0,
+        ):
+            if not callable(progress_callback):
+                return
+            payload = {
+                "phase": phase,
+                "tool": tool,
+                "path": path,
+                "turn": turn,
+                "max_turns": self.max_turns,
+            }
+            try:
+                outcome = progress_callback(payload)
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except Exception as error:
+                logger.debug("Worker progress callback failed: %s", error)
 
         project_root = project_root or (project.root_path if project else ".")
 
@@ -789,6 +811,25 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 ),
                             }
                         if (
+                            result.get("status") not in {"error", "rejected"}
+                            and not result.get("error")
+                        ):
+                            await report_progress(
+                                (
+                                    "正在整理中间产物"
+                                    if result.get("redirected_to_runtime")
+                                    else self._progress_phase(func_name)
+                                ),
+                                tool=func_name,
+                                path=str(
+                                    result.get("path")
+                                    or args.get("path")
+                                    or args.get("target_path")
+                                    or ""
+                                ),
+                                turn=turn + 1,
+                            )
+                        if (
                             func_name == "read_pdf"
                             and result.get("status") in {
                                 "success", "empty_page_range",
@@ -1103,6 +1144,18 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
             }
+
+    @staticmethod
+    def _progress_phase(tool_name: str) -> str:
+        if tool_name in WRITE_TOOLS:
+            return "正在修改文件"
+        if tool_name in TEMP_WRITE_TOOLS:
+            return "正在整理中间产物"
+        if tool_name in {"run_tests", "run_command"}:
+            return "正在执行验证"
+        if tool_name in EXPLORATION_TOOLS:
+            return "正在读取并分析"
+        return "正在执行工具操作"
 
     @staticmethod
     def _exploration_observation(result: dict) -> tuple[str, str]:

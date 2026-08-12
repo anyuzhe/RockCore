@@ -255,6 +255,8 @@ class TaskPanel(QWidget):
         self._repair_rounds: list[dict] = []
         self._reviews: list[dict] = []
         self._active_repair_round = 0
+        self._task_progress: dict[str, dict] = {}
+        self._progress_sequence = 0
         self._usage = self._empty_usage()
         self._setup_ui()
 
@@ -453,6 +455,31 @@ class TaskPanel(QWidget):
         self.feed_layout.addStretch()
         self.scroll.setWidget(content)
         root.addWidget(self.scroll, 1)
+
+        self.worker_progress_wrap = QWidget()
+        self.worker_progress_wrap.setObjectName("workerProgressWrap")
+        progress_layout = QHBoxLayout(self.worker_progress_wrap)
+        progress_layout.setContentsMargins(40, 6, 40, 2)
+        progress_layout.addStretch(1)
+        self.worker_progress_card = QFrame()
+        self.worker_progress_card.setObjectName("workerProgressCard")
+        self.worker_progress_card.setMaximumWidth(900)
+        worker_progress_layout = QHBoxLayout(self.worker_progress_card)
+        worker_progress_layout.setContentsMargins(13, 7, 13, 7)
+        worker_progress_layout.setSpacing(8)
+        self.worker_progress_indicator = StatusIndicator()
+        self.worker_progress_indicator.set_status(
+            "running", STATUS_STYLE["running"]
+        )
+        worker_progress_layout.addWidget(self.worker_progress_indicator)
+        self.worker_progress_label = QLabel("")
+        self.worker_progress_label.setObjectName("workerProgressLabel")
+        self.worker_progress_label.setWordWrap(True)
+        worker_progress_layout.addWidget(self.worker_progress_label, 1)
+        progress_layout.addWidget(self.worker_progress_card, 8)
+        progress_layout.addStretch(1)
+        self.worker_progress_wrap.hide()
+        root.addWidget(self.worker_progress_wrap)
 
     def _original_request_text(self) -> str:
         """Return the complete submitted request, independent of UI rendering."""
@@ -774,6 +801,8 @@ class TaskPanel(QWidget):
         same_job = bool(self._current_job and self._current_job.get("job_id") == job.get("job_id"))
         worker_outputs = list(self._worker_outputs) if same_job else []
         if not same_job:
+            self._task_progress = {}
+            self._progress_sequence = 0
             for disclosure in (self.run_details, self.diff_details, self.test_details):
                 disclosure.clear()
         self._current_job = job
@@ -854,6 +883,7 @@ class TaskPanel(QWidget):
             self.stages["planner"].set_status("running")
 
         self._refresh_worker_stage()
+        self._refresh_worker_progress()
         self._populate_test_details()
 
         if reviews:
@@ -919,6 +949,9 @@ class TaskPanel(QWidget):
         self._repair_rounds = []
         self._reviews = []
         self._active_repair_round = 0
+        self._task_progress = {}
+        self._progress_sequence = 0
+        self.worker_progress_wrap.hide()
         self._clear_repair_stages()
         self._set_usage(self._empty_usage())
         self.workflow_title.setText("新需求")
@@ -1064,6 +1097,96 @@ class TaskPanel(QWidget):
                 self._set_repair_worker_stage(stage, repair)
         else:
             self._refresh_worker_stage()
+        self._refresh_worker_progress()
+
+    def set_worker_progress(
+        self, task_id: str, *, task_index: int = 0, task_total: int = 0,
+        phase: str = "正在执行", path: str = "", changes: dict | None = None,
+        turn: int = 0, max_turns: int = 0,
+    ):
+        """Show a compact live Worker explanation above the input composer."""
+        if not task_id:
+            return
+        self._progress_sequence += 1
+        previous = dict(self._task_progress.get(task_id) or {})
+        task = next(
+            (item for item in self._tasks if item.get("task_id") == task_id),
+            None,
+        )
+        if not task_index and task is not None:
+            task_index = self._tasks.index(task) + 1
+        payload = {
+            **previous,
+            "task_id": task_id,
+            "task_index": task_index or previous.get("task_index", 1),
+            "task_total": task_total or previous.get(
+                "task_total", max(1, len(self._tasks))
+            ),
+            "phase": phase or previous.get("phase", "正在执行"),
+            "path": path or previous.get("path", ""),
+            "turn": turn or previous.get("turn", 0),
+            "max_turns": max_turns or previous.get("max_turns", 0),
+            "changes": dict(changes or previous.get("changes") or {}),
+            "sequence": self._progress_sequence,
+        }
+        self._task_progress[task_id] = payload
+        self._refresh_worker_progress(preferred_task_id=task_id)
+
+    def clear_worker_progress(self):
+        self.worker_progress_wrap.hide()
+
+    def _refresh_worker_progress(self, preferred_task_id: str = ""):
+        running_ids = {
+            str(task.get("task_id") or "") for task in self._tasks
+            if task.get("status") in {"running", "executing"}
+        }
+        if not running_ids:
+            self.worker_progress_wrap.hide()
+            return
+        selected = self._task_progress.get(preferred_task_id)
+        if not selected or preferred_task_id not in running_ids:
+            candidates = [
+                value for key, value in self._task_progress.items()
+                if key in running_ids
+            ]
+            selected = max(
+                candidates, key=lambda item: item.get("sequence", 0),
+                default=None,
+            )
+        if selected is None:
+            task_id = next(iter(running_ids))
+            task = next(
+                item for item in self._tasks
+                if str(item.get("task_id") or "") == task_id
+            )
+            selected = {
+                "task_id": task_id,
+                "task_index": self._tasks.index(task) + 1,
+                "task_total": max(1, len(self._tasks)),
+                "phase": "正在执行",
+                "changes": {},
+            }
+        index = int(selected.get("task_index", 1) or 1)
+        total = max(index, int(selected.get("task_total", 1) or 1))
+        parts = [f"第 {index}/{total} 步", str(selected.get("phase") or "正在执行")]
+        path = str(selected.get("path") or "").strip()
+        if path:
+            parts.append(path)
+        changes = selected.get("changes") or {}
+        changed_files = int(changes.get("files_changed", 0) or 0)
+        additions = int(changes.get("additions", 0) or 0)
+        deletions = int(changes.get("deletions", 0) or 0)
+        if changed_files or additions or deletions:
+            parts.append(
+                f"{changed_files} 个文件已更改 "
+                f"<span style='color:#1a9b50'>+{additions}</span> "
+                f"<span style='color:#c94343'>-{deletions}</span>"
+            )
+        self.worker_progress_label.setText(" · ".join(parts))
+        self.worker_progress_label.setToolTip(
+            f"{selected.get('task_id', '')} 的实时执行进度；文件统计相对本步骤开始状态"
+        )
+        self.worker_progress_wrap.show()
 
     def has_task(self, task_id: str) -> bool:
         return any(task.get("task_id") == task_id for task in self._tasks)

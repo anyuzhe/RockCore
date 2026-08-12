@@ -379,6 +379,39 @@ def test_job_finished_keeps_sidebar_and_header_on_same_terminal_status():
     window.close()
 
 
+def test_worker_progress_card_explains_live_step_and_changes():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-PROGRESS",
+        "user_request": "修改页面",
+        "status": "executing",
+        "created_at": "2026-08-12T10:00:00Z",
+    }, tasks=[
+        {"task_id": "T001", "title": "创建页面", "status": "done"},
+        {"task_id": "T002", "title": "实现交互", "status": "running"},
+        {"task_id": "T003", "title": "验收", "status": "pending"},
+    ])
+
+    panel.set_worker_progress(
+        "T002", task_index=2, task_total=3,
+        phase="正在修改文件", path="src/main.js",
+        changes={"files_changed": 2, "additions": 30, "deletions": 3},
+    )
+
+    text = panel.worker_progress_label.text()
+    assert not panel.worker_progress_wrap.isHidden()
+    assert "第 2/3 步" in text
+    assert "正在修改文件" in text
+    assert "src/main.js" in text
+    assert "2 个文件已更改" in text
+    assert "+30" in text and "-3" in text
+
+    panel.update_task_status("T002", "done")
+    assert panel.worker_progress_wrap.isHidden()
+    panel.close()
+
+
 def test_successful_model_fallback_and_terminal_statuses_are_explicit():
     _app()
     window = MainWindow(None)

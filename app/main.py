@@ -221,6 +221,11 @@ async def main():
         QFrame#workflowStage {
             background: transparent; border-bottom: 1px solid #e2ded7;
         }
+        QWidget#workerProgressWrap { background: #fbfaf8; }
+        QFrame#workerProgressCard {
+            background: #ffffff; border: 1px solid #dedad3; border-radius: 14px;
+        }
+        QLabel#workerProgressLabel { color: #5e5952; font-size: 12px; }
         QLabel#stageTitle { font-size: 12px; font-weight: 600; }
         QPlainTextEdit#stageOutput, QPlainTextEdit#detailOutput {
             background: #ffffff; color: #34312d; border: 1px solid #dedad3;
