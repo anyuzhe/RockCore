@@ -13,6 +13,16 @@ class GitTools:
     def __init__(self, project_root: str):
         self.project_root = Path(project_root).resolve()
 
+    @staticmethod
+    def _merge_environment() -> dict[str, str]:
+        """Provide process-local identity for merge commits on clean machines."""
+        environment = dict(os.environ)
+        environment.setdefault("GIT_AUTHOR_NAME", "RockCore")
+        environment.setdefault("GIT_AUTHOR_EMAIL", "rockcore@localhost")
+        environment.setdefault("GIT_COMMITTER_NAME", "RockCore")
+        environment.setdefault("GIT_COMMITTER_EMAIL", "rockcore@localhost")
+        return environment
+
     async def git_status(self) -> dict:
         """Get current git status."""
         try:
@@ -168,7 +178,8 @@ class GitTools:
                 }
             result = run_process(
                 ["git", "merge", source_branch, "--no-edit"],
-                capture_output=True, text=True, cwd=self.project_root
+                capture_output=True, text=True, cwd=self.project_root,
+                env=self._merge_environment(),
             )
             if result.returncode != 0:
                 conflicts = self._detect_conflicts()
@@ -190,6 +201,7 @@ class GitTools:
                             "-X", "theirs",
                         ],
                         capture_output=True, text=True, cwd=self.project_root,
+                        env=self._merge_environment(),
                     )
                     if retry.returncode == 0:
                         return {

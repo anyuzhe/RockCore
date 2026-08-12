@@ -587,6 +587,12 @@ def test_branch_content_conflict_is_resolved_without_user_git_action(tmp_path):
         "user.email=test@example.com", "commit", "-m", "task change",
     ).returncode == 0
     assert _git(project, "checkout", "main").returncode == 0
+    assert _git(
+        project, "config", "--local", "--get", "user.name"
+    ).returncode != 0
+    assert _git(
+        project, "config", "--local", "--get", "user.email"
+    ).returncode != 0
 
     result = asyncio.run(GitTools(str(project)).merge_branch("ai/task", "main"))
 
@@ -594,6 +600,12 @@ def test_branch_content_conflict_is_resolved_without_user_git_action(tmp_path):
     assert result["auto_resolved"] is True
     assert result["resolved_conflicts"] == ["shared.txt"]
     assert shared.read_text(encoding="utf-8") == "task version\n"
+    assert _git(
+        project, "config", "--local", "--get", "user.name"
+    ).returncode != 0
+    assert _git(
+        project, "config", "--local", "--get", "user.email"
+    ).returncode != 0
 
 
 def test_engine_treats_git_integration_as_internal_failure(tmp_path):
