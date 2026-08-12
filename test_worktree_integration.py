@@ -209,7 +209,7 @@ def test_continuation_can_integrate_already_committed_source_output(tmp_path):
     assert (project / "completed.md").read_text(encoding="utf-8") == "done\n"
 
 
-def test_different_untracked_target_collision_becomes_pending_merge(tmp_path):
+def test_different_untracked_target_collision_is_backed_up_and_merged(tmp_path):
     project = _initialize_project(tmp_path)
     (project / "output.txt").write_text("user version\n", encoding="utf-8")
     manager = MergeManager(
@@ -223,13 +223,45 @@ def test_different_untracked_target_collision_becomes_pending_merge(tmp_path):
         return await manager.commit_and_merge("T001", "produce output")
 
     result = asyncio.run(scenario())
-    assert result["status"] == "pending_merge"
-    assert result["preserved"] is True
-    assert result["conflicts"] == ["output.txt"]
+    assert result["status"] == "merged"
+    assert result["preflight"]["different"] == ["output.txt"]
+    assert result["preflight"]["strategy"] == (
+        "backup_target_then_apply_task_output"
+    )
+    assert (project / "output.txt").read_text(encoding="utf-8") == "worker version\n"
+    backup = Path(result["preflight"]["backups"][0]["backup"])
+    assert backup.read_text(encoding="utf-8") == "user version\n"
+
+
+def test_untracked_collision_backup_is_restored_if_merge_fails(
+    tmp_path, monkeypatch,
+):
+    project = _initialize_project(tmp_path)
+    (project / "output.txt").write_text("user version\n", encoding="utf-8")
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def fail_merge(*_args, **_kwargs):
+        return {
+            "status": "failed",
+            "phase": "merge",
+            "error": "simulated internal merge failure",
+        }
+
+    monkeypatch.setattr(manager.git_tools, "merge_branch", fail_merge)
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-RESTORE")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text(
+            "worker version\n", encoding="utf-8"
+        )
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+    assert result["status"] == "failed"
     assert (project / "output.txt").read_text(encoding="utf-8") == "user version\n"
-    assert (Path(result["worktree_path"]) / "output.txt").read_text(
-        encoding="utf-8"
-    ) == "worker version\n"
 
 
 def test_identical_untracked_target_collision_is_resolved_and_merged(tmp_path):
@@ -355,7 +387,42 @@ def test_existing_user_merge_is_never_aborted(tmp_path, monkeypatch):
     assert ["git", "merge", "--abort"] not in calls
 
 
-def test_engine_reports_git_stage_and_does_not_delete_failed_worktree(tmp_path):
+def test_branch_content_conflict_is_resolved_without_user_git_action(tmp_path):
+    project = _initialize_project(tmp_path)
+    shared = project / "shared.txt"
+    shared.write_text("baseline\n", encoding="utf-8")
+    assert _git(project, "add", "shared.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c",
+        "user.email=test@example.com", "commit", "-m", "shared baseline",
+    ).returncode == 0
+    assert _git(project, "branch", "ai/task").returncode == 0
+
+    shared.write_text("target version\n", encoding="utf-8")
+    assert _git(project, "add", "shared.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c",
+        "user.email=test@example.com", "commit", "-m", "target change",
+    ).returncode == 0
+
+    assert _git(project, "checkout", "ai/task").returncode == 0
+    shared.write_text("task version\n", encoding="utf-8")
+    assert _git(project, "add", "shared.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c",
+        "user.email=test@example.com", "commit", "-m", "task change",
+    ).returncode == 0
+    assert _git(project, "checkout", "main").returncode == 0
+
+    result = asyncio.run(GitTools(str(project)).merge_branch("ai/task", "main"))
+
+    assert result["status"] == "merged"
+    assert result["auto_resolved"] is True
+    assert result["resolved_conflicts"] == ["shared.txt"]
+    assert shared.read_text(encoding="utf-8") == "task version\n"
+
+
+def test_engine_treats_git_integration_as_internal_failure(tmp_path):
     project = tmp_path / "engine-project"
     project.mkdir()
 
@@ -413,16 +480,24 @@ def test_engine_reports_git_stage_and_does_not_delete_failed_worktree(tmp_path):
             )
 
             repos["_session"].refresh(task)
-            user_action = engine.event_bus.get_history(
-                "task_needs_user_action"
-            )[-1]["data"]
-            assert task.status == "needs_attention"
-            assert user_action["failure_stage"] == "git_integration"
-            assert "during commit" in user_action["reason"]
-            assert "worktree preserved" in user_action["reason"]
+            failure = engine.event_bus.get_history("task_failed")[-1]["data"]
+            assert task.status == "failed"
+            assert failure["failure_stage"] == "git_integration"
+            assert "during commit" in failure["error"]
+            assert "worktree preserved" in failure["error"]
             assert integration.abort_calls == 0
             assert (project / "result.txt").read_text(encoding="utf-8") == "valuable\n"
         finally:
             repos["_session"].close()
 
     asyncio.run(scenario())
+
+
+def test_git_errors_never_require_user_action():
+    for error in (
+        "Merge conflict: src/main.py",
+        "Project has unresolved Git conflict",
+        "fatal: Unable to create .git/index.lock",
+        "repository lock is held",
+    ):
+        assert Engine._is_user_action_required(error) is False

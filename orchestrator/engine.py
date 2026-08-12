@@ -900,15 +900,15 @@ class Engine:
             unmerged_files = repository.unmerged_files()
             if unmerged_files:
                 error = (
-                    "Project has unresolved Git conflicts: "
+                    "RockCore detected an unrecoverable internal Git state: "
                     + ", ".join(unmerged_files[:8])
                 )
-                repos["job"].update_status(job.job_id, "needs_attention")
+                repos["job"].update_status(job.job_id, "failed")
                 self._store_job_failure(repos, job.job_id, error)
                 self.state_machine.transition(job.job_id, JobState.GOVERNING)
-                self.state_machine.transition(job.job_id, JobState.WAITING_USER)
+                self.state_machine.transition(job.job_id, JobState.FAILED)
                 await self.event_bus.publish(
-                    "job_needs_attention", job_id=job.job_id, reason=error,
+                    "job_failed", job_id=job.job_id, error=error,
                     failure_stage="git_conflict",
                 )
                 return
@@ -2708,8 +2708,8 @@ class Engine:
                                 merge_result.get("error")
                                 or "目标目录存在同名文件，等待显式合并"
                             )
-                            user_action = {
-                                "status": "needs_user_action",
+                            internal_failure = {
+                                "status": "failed",
                                 "error": detail,
                                 "failure_stage": "merge_preflight",
                                 "checkpoint": {
@@ -2717,18 +2717,16 @@ class Engine:
                                     "integration": merge_result,
                                 },
                             }
-                            repos["task"].update_status_by_pk(
-                                t.id, "needs_attention"
-                            )
+                            repos["task"].update_status_by_pk(t.id, "failed")
                             self._checkpoint_task(
-                                repos, job, t, status="needs_attention",
-                                result=user_action, error=detail,
+                                repos, job, t, status="failed",
+                                result=internal_failure, error=detail,
                             )
                             await self.event_bus.publish(
-                                "task_needs_user_action",
+                                "task_failed",
                                 job_id=job.job_id, task_id=task_id,
-                                reason=detail, failure_stage="merge_preflight",
-                                checkpoint=user_action["checkpoint"],
+                                error=detail, failure_stage="merge_preflight",
+                                checkpoint=internal_failure["checkpoint"],
                                 worktree_path=merge_result.get("worktree_path", ""),
                             )
                             preserve = getattr(
@@ -2736,7 +2734,7 @@ class Engine:
                             )
                             if callable(preserve):
                                 preserve(task_id)
-                            return user_action
+                            return internal_failure
                         if merge_result.get("status") != "merged":
                             conflicts = merge_result.get("conflicts") or []
                             phase = str(merge_result.get("phase") or "merge")
@@ -2753,8 +2751,8 @@ class Engine:
                             error = f"Git integration failed during {phase}: {detail}"
                             if merge_result.get("preserved") and preserved_path:
                                 error += f"; worktree preserved at {preserved_path}"
-                                user_action = {
-                                    "status": "needs_user_action",
+                                internal_failure = {
+                                    "status": "failed",
                                     "error": error,
                                     "failure_stage": "git_integration",
                                     "checkpoint": {
@@ -2762,19 +2760,17 @@ class Engine:
                                         "integration": merge_result,
                                     },
                                 }
-                                repos["task"].update_status_by_pk(
-                                    t.id, "needs_attention"
-                                )
+                                repos["task"].update_status_by_pk(t.id, "failed")
                                 self._checkpoint_task(
-                                    repos, job, t, status="needs_attention",
-                                    result=user_action, error=error,
+                                    repos, job, t, status="failed",
+                                    result=internal_failure, error=error,
                                 )
                                 await self.event_bus.publish(
-                                    "task_needs_user_action",
+                                    "task_failed",
                                     job_id=job.job_id, task_id=task_id,
-                                    reason=error,
+                                    error=error,
                                     failure_stage="git_integration",
-                                    checkpoint=user_action["checkpoint"],
+                                    checkpoint=internal_failure["checkpoint"],
                                     worktree_path=preserved_path,
                                 )
                                 preserve = getattr(
@@ -2782,7 +2778,7 @@ class Engine:
                                 )
                                 if callable(preserve):
                                     preserve(task_id)
-                                return user_action
+                                return internal_failure
                             repos["task"].update_status_by_pk(t.id, "failed")
                             self._checkpoint_task(
                                 repos, job, t, status="failed",
@@ -3828,6 +3824,16 @@ class Engine:
         normalized = str(error or "").lower()
         if cls._is_model_configuration_error(error):
             return False
+        # Git/worktree mechanics are RockCore implementation details. They may
+        # fail the run and preserve a checkpoint, but must never require a user
+        # who does not know Git to repair repository internals.
+        git_markers = (
+            "git isolation failed", "git integration", "merge conflict",
+            "unresolved git", "internal git", ".git/index.lock",
+            "index.lock", "repository lock", "worktree",
+        )
+        if any(marker in normalized for marker in git_markers):
+            return False
         if cls._is_user_input_required(error):
             return True
         markers = (
@@ -3837,8 +3843,7 @@ class Engine:
             "approval required", "insufficient balance", "insufficient_balance",
             "insufficient_quota", "quota exceeded", "billing",
             "billable api hard cost", "cost limit would be exceeded",
-            "merge conflict", "unresolved git conflict", "permission denied",
-            "access denied", "repository lock", "index.lock",
+            "permission denied", "access denied",
             "需要用户", "只能由用户", "用户提供", "需要授权",
         )
         return any(marker in normalized for marker in markers)
@@ -4595,7 +4600,8 @@ class Engine:
         if "merge conflict" in normalized:
             return (
                 "merge_conflict",
-                "先解决列出的冲突文件，再从失败步骤继续。",
+                "RockCore 已保留任务产物和恢复副本；这是内部集成失败，"
+                "不会要求你执行 Git 命令。",
             )
         if "without editing" in normalized or "no file changes" in normalized:
             return (

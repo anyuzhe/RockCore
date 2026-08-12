@@ -183,6 +183,44 @@ class GitTools:
                         capture_output=True, text=True, cwd=self.project_root,
                     )
                     merge_aborted = abort_result.returncode == 0
+                if conflicts and merge_aborted:
+                    retry = run_process(
+                        [
+                            "git", "merge", source_branch, "--no-edit",
+                            "-X", "theirs",
+                        ],
+                        capture_output=True, text=True, cwd=self.project_root,
+                    )
+                    if retry.returncode == 0:
+                        return {
+                            "status": "merged",
+                            "branch": source_branch,
+                            "into": target_branch,
+                            "output": self._process_error(retry),
+                            "auto_resolved": True,
+                            "resolved_conflicts": conflicts,
+                            "strategy": "prefer_task_changes_for_conflicting_hunks",
+                        }
+                    retry_merge = run_process(
+                        ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                        capture_output=True, text=True, cwd=self.project_root,
+                    )
+                    if retry_merge.returncode == 0:
+                        run_process(
+                            ["git", "merge", "--abort"],
+                            capture_output=True, text=True,
+                            cwd=self.project_root,
+                        )
+                    return {
+                        "status": "failed",
+                        "phase": "automatic_conflict_resolution",
+                        "error": self._process_error(retry),
+                        "conflicts": conflicts,
+                        "branch": source_branch,
+                        "into": target_branch,
+                        "target_merge_aborted": True,
+                        "preserved": True,
+                    }
                 return {
                     "status": "conflict" if conflicts else "failed",
                     "phase": "merge",

@@ -52,6 +52,7 @@ ROCKCORE_IGNORE_LINES = (
     "# RockCore runtime isolation",
     ".ai/worktrees/",
     ".ai/runtime/",
+    ".ai/recovery/",
 )
 
 

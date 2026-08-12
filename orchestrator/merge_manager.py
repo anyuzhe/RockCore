@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import shutil
+import uuid
 from pathlib import Path
 
 from app.subprocess_utils import run_process
@@ -498,8 +499,10 @@ class MergeManager:
 
             merge_result = await self.git_tools.merge_branch(branch, self.target_branch)
             if merge_result.get("status") == "conflict":
+                self._restore_preflight_backups(preflight)
                 return await self._handle_conflict(task_id, merge_result)
             if merge_result.get("status") != "merged":
+                self._restore_preflight_backups(preflight)
                 return self._integration_failure(
                     task_id,
                     str(merge_result.get("phase") or "merge"),
@@ -555,12 +558,14 @@ class MergeManager:
 
         except Exception as e:
             logger.error(f"Merge failed for {task_id}: {e}")
+            if "preflight" in locals():
+                self._restore_preflight_backups(preflight)
             return self._integration_failure(task_id, "unexpected", str(e))
 
     def _preflight_untracked_collisions(self, task_id: str,
                                         staged_paths: list[str],
                                         worktree_path: str) -> dict:
-        """Resolve identical target files and preserve differing collisions."""
+        """Resolve target collisions without asking the user to operate Git."""
         result = run_process(
             ["git", "ls-files", "--others", "--exclude-standard", "-z"],
             capture_output=True, text=True, cwd=self.project_root,
@@ -586,41 +591,124 @@ class MergeManager:
                     different.append(relative)
             except OSError:
                 different.append(relative)
+        backups = []
         if different:
+            backup_result = self._backup_and_clear_untracked_collisions(
+                task_id, different
+            )
+            if backup_result.get("status") != "resolved":
+                return backup_result
+            backups = list(backup_result.get("backups") or [])
+        if identical:
+            identity_error = self._ensure_git_identity(str(self.project_root))
+            if identity_error:
+                self._restore_preflight_backups({"backups": backups})
+                return {"status": "failed", "error": identity_error}
+            stage = run_process(
+                ["git", "add", "--", *identical],
+                capture_output=True, text=True, cwd=self.project_root,
+            )
+            if stage.returncode != 0:
+                self._restore_preflight_backups({"backups": backups})
+                return {
+                    "status": "failed", "error": self._process_output(stage)
+                }
+            commit = run_process(
+                [
+                    "git", "commit", "--only", "-m",
+                    f"RockCore preflight: adopt identical outputs for {task_id}",
+                    "--", *identical,
+                ],
+                capture_output=True, text=True, cwd=self.project_root,
+            )
+            if commit.returncode != 0:
+                self._restore_preflight_backups({"backups": backups})
+                return {
+                    "status": "failed", "error": self._process_output(commit)
+                }
+        return {
+            "status": "resolved",
+            "identical": identical,
+            "different": different,
+            "backups": backups,
+            "strategy": "backup_target_then_apply_task_output",
+        }
+
+    def _backup_and_clear_untracked_collisions(
+        self, task_id: str, relative_paths: list[str]
+    ) -> dict:
+        """Back up user-visible files before task output takes their place."""
+        safe_task_id = "".join(
+            char if char.isalnum() or char in "-_" else "_"
+            for char in str(task_id or "task")
+        )
+        recovery_root = (
+            self.worktrees_base.parent / "recovery" / safe_task_id
+            / uuid.uuid4().hex
+        ).resolve()
+        backups = []
+        try:
+            for relative in relative_paths:
+                source = (self.project_root / relative).resolve()
+                backup = (recovery_root / relative).resolve()
+                source.relative_to(self.project_root)
+                backup.relative_to(recovery_root)
+                if not source.is_file() or source.is_symlink():
+                    raise OSError(
+                        f"Cannot safely preserve target collision: {relative}"
+                    )
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, backup)
+                if self._file_digest(source) != self._file_digest(backup):
+                    raise OSError(f"Backup verification failed: {relative}")
+                source.unlink()
+                backups.append({
+                    "path": relative,
+                    "backup": str(backup),
+                })
+        except (OSError, ValueError) as error:
+            self._restore_preflight_backups({"backups": backups})
             return {
-                "status": "pending_merge", "phase": "merge_preflight",
+                "status": "failed",
+                "phase": "merge_preflight_backup",
                 "task_id": task_id,
-                "branch": self._active_worktrees.get(task_id, {}).get("branch", ""),
-                "worktree_path": worktree_path, "preserved": True,
-                "conflicts": different, "identical": identical,
-                "error": (
-                    "Target contains untracked files with different content; "
-                    "both copies were preserved for explicit merge resolution"
-                ),
+                "worktree_path": self._active_worktrees.get(
+                    task_id, {}
+                ).get("path", ""),
+                "preserved": True,
+                "conflicts": relative_paths,
+                "error": str(error),
+                "backups": backups,
             }
-        identity_error = self._ensure_git_identity(str(self.project_root))
-        if identity_error:
-            return {"status": "failed", "error": identity_error}
-        stage = run_process(
-            ["git", "add", "--", *identical],
-            capture_output=True, text=True, cwd=self.project_root,
-        )
-        if stage.returncode != 0:
-            return {"status": "failed", "error": self._process_output(stage)}
-        commit = run_process(
-            [
-                "git", "commit", "--only", "-m",
-                f"RockCore preflight: adopt identical outputs for {task_id}",
-                "--", *identical,
-            ],
-            capture_output=True, text=True, cwd=self.project_root,
-        )
-        if commit.returncode != 0:
-            return {"status": "failed", "error": self._process_output(commit)}
-        return {"status": "resolved", "identical": identical, "different": []}
+        return {
+            "status": "resolved",
+            "backups": backups,
+            "recovery_root": str(recovery_root),
+        }
+
+    def _restore_preflight_backups(self, preflight: dict) -> list[str]:
+        """Restore originals when integration stopped before producing a file."""
+        restored = []
+        for record in preflight.get("backups") or []:
+            relative = str(record.get("path") or "")
+            backup_value = str(record.get("backup") or "")
+            if not relative or not backup_value:
+                continue
+            target = (self.project_root / relative).resolve()
+            backup = Path(backup_value).resolve()
+            try:
+                target.relative_to(self.project_root)
+                if target.exists() or not backup.is_file():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup, target)
+                restored.append(relative)
+            except (OSError, ValueError):
+                logger.exception("Could not restore Git preflight backup: %s", relative)
+        return restored
 
     async def _handle_conflict(self, task_id: str, merge_result: dict) -> dict:
-        """Handle merge conflicts — flag for user resolution."""
+        """Report an internal merge failure while preserving task output."""
         wt_info = self._active_worktrees.get(task_id, {})
         conflicts = merge_result.get("conflicts", [])
         logger.warning(f"Merge conflict in task {task_id}: {conflicts}")
@@ -636,7 +724,10 @@ class MergeManager:
             "error": merge_result.get("error", ""),
             "target_merge_aborted": merge_result.get("target_merge_aborted", False),
             "preserved": True,
-            "message": "Merge conflicts detected — manual resolution required",
+            "message": (
+                "RockCore could not automatically integrate concurrent changes; "
+                "task output was preserved for internal recovery"
+            ),
         }
 
     def _ensure_git_identity(self, worktree_path: str) -> str:
