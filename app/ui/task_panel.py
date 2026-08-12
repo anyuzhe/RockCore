@@ -238,6 +238,7 @@ class TaskPanel(QWidget):
 
     followup_requested = pyqtSignal(dict)
     attention_resume_requested = pyqtSignal(dict)
+    report_requested = pyqtSignal(dict)
 
     STAGES = (
         ("user", "已接收需求", "用户输入"),
@@ -297,6 +298,12 @@ class TaskPanel(QWidget):
         self.followup_btn.setEnabled(False)
         self.followup_btn.clicked.connect(self._request_followup)
         header_layout.addWidget(self.followup_btn)
+        self.report_btn = QPushButton("查看报告")
+        self.report_btn.setObjectName("quietButton")
+        self.report_btn.setToolTip("打开包含完整执行过程的 PDF 任务报告")
+        self.report_btn.setVisible(False)
+        self.report_btn.clicked.connect(self._request_report)
+        header_layout.addWidget(self.report_btn)
         root.addWidget(header)
 
         self.scroll = QScrollArea()
@@ -829,6 +836,13 @@ class TaskPanel(QWidget):
         self.job_meta_label.setText(meta)
         self._set_header_status(status)
         self._set_terminal_actions(status, job)
+        self.set_report_state(
+            path=str(job.get("report_path") or ""),
+            generating=bool(job.get("report_generating")),
+            available=status in {
+                "done", "failed", "cancelled", "interrupted", "needs_attention",
+            },
+        )
         self.user_output.setText(request)
         self._set_user_attachments(job.get("attachments") or [])
         self.user_source_label.setText(f"继续自 {source}" if source else "")
@@ -963,6 +977,8 @@ class TaskPanel(QWidget):
         self.attention_resume_btn.setEnabled(True)
         self.followup_btn.show()
         self.followup_btn.setEnabled(False)
+        self.report_btn.hide()
+        self.report_btn.setEnabled(False)
         self.user_row_widget.hide()
         self.agent_frame.hide()
         self.empty_state.show()
@@ -1197,6 +1213,13 @@ class TaskPanel(QWidget):
         self._current_job["status"] = status
         self._set_header_status(status)
         self._set_terminal_actions(status, self._current_job)
+        if status in {
+            "done", "failed", "cancelled", "interrupted", "needs_attention",
+        }:
+            self.set_report_state(
+                path=str(self._current_job.get("report_path") or ""),
+                available=True,
+            )
 
     def log(self, message: str, tab: str = "log"):
         if tab.lower() == "test":
@@ -1246,6 +1269,23 @@ class TaskPanel(QWidget):
     def _request_followup(self):
         if self._current_job:
             self.followup_requested.emit(self._current_job)
+
+    def _request_report(self):
+        if self._current_job:
+            self.report_btn.setEnabled(False)
+            self.report_btn.setText("正在生成…")
+            self.report_requested.emit(self._current_job)
+
+    def set_report_state(self, *, path: str = "", generating: bool = False,
+                         available: bool = True):
+        """Expose an existing report or an on-demand generator for old Jobs."""
+        if not self._current_job:
+            self.report_btn.hide()
+            return
+        self._current_job["report_path"] = path
+        self.report_btn.setVisible(bool(available or path or generating))
+        self.report_btn.setText("正在生成…" if generating else "查看报告")
+        self.report_btn.setEnabled(bool(available or path) and not generating)
 
     def _request_attention_resume(self):
         if (

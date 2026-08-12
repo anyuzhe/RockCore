@@ -43,6 +43,14 @@ class EventBus:
             self._subscribers[event_type].remove(handler)
 
     async def publish(self, event_type: str, **data):
+        await self._publish(event_type, data, include_wildcards=True)
+
+    async def publish_transient(self, event_type: str, **data):
+        """Notify normal subscribers/UI without writing to wildcard audit sinks."""
+        await self._publish(event_type, data, include_wildcards=False)
+
+    async def _publish(self, event_type: str, data: dict,
+                       *, include_wildcards: bool):
         if "job_id" not in data:
             job_id = self._job_context.get()
             if job_id:
@@ -51,8 +59,19 @@ class EventBus:
         self._history.append(event)
         if len(self._history) > self._max_history:
             self._history.pop(0)
-        logger.debug(f"Event: {event_type} -> {len(self._subscribers[event_type])} handlers")
-        for handler in self._subscribers[event_type]:
+        handlers = (
+            list(self._subscribers.get("*", ())) if include_wildcards else []
+        )
+        handlers.extend(self._subscribers.get(event_type, ()))
+        # Wildcard subscribers run first so durable audit sinks have accepted
+        # the event before a terminal handler generates a report from it.
+        logger.debug(f"Event: {event_type} -> {len(handlers)} handlers")
+        seen: set[int] = set()
+        for handler in handlers:
+            marker = id(handler)
+            if marker in seen:
+                continue
+            seen.add(marker)
             try:
                 await handler(event_type, **data)
             except Exception as e:

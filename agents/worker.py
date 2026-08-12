@@ -149,6 +149,9 @@ class WorkerAgent:
 
         async def report_progress(
             phase: str, *, tool: str = "", path: str = "", turn: int = 0,
+            event_kind: str = "progress", status: str = "",
+            arguments: dict | None = None, result: dict | None = None,
+            duration_ms: int = 0,
         ):
             if not callable(progress_callback):
                 return
@@ -158,6 +161,11 @@ class WorkerAgent:
                 "path": path,
                 "turn": turn,
                 "max_turns": self.max_turns,
+                "event_kind": event_kind,
+                "status": status,
+                "arguments": dict(arguments or {}),
+                "result": dict(result or {}),
+                "duration_ms": max(0, int(duration_ms or 0)),
             }
             try:
                 outcome = progress_callback(payload)
@@ -802,186 +810,190 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 "status": "error",
                                 "error": f"Tool {func_name} failed: {error}",
                             }
-                        if not isinstance(result, dict):
-                            result = {
-                                "status": "error",
-                                "error": (
-                                    f"Tool {func_name} returned an invalid result; "
-                                    "expected a JSON object"
-                                ),
-                            }
-                        if (
-                            result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
-                        ):
-                            await report_progress(
-                                (
-                                    "正在整理中间产物"
-                                    if result.get("redirected_to_runtime")
-                                    else self._progress_phase(func_name)
-                                ),
-                                tool=func_name,
-                                path=str(
-                                    result.get("path")
-                                    or args.get("path")
-                                    or args.get("target_path")
-                                    or ""
-                                ),
-                                turn=turn + 1,
-                            )
-                        if (
-                            func_name == "read_pdf"
-                            and result.get("status") in {
-                                "success", "empty_page_range",
-                            }
-                        ):
-                            source_path = str(
-                                result.get("path")
-                                or args.get("path")
-                                or "PDF"
-                            )
-                            next_page = int(result.get("next_page") or 0)
-                            if result.get("has_more") and next_page > 0:
-                                pending_document_pages[source_path] = next_page
-                            else:
-                                pending_document_pages.pop(source_path, None)
-                        if result.get("status") in {
-                            "password_required", "no_extractable_text",
-                        }:
-                            tool_calls_made.append({
-                                "tool": func_name,
-                                "args": args,
-                                "result_status": result.get("status"),
-                            })
-                            reason = str(result.get("error") or "PDF cannot be read")
-                            source_path = str(result.get("path") or args.get("path") or "PDF")
-                            return self._failure(
-                                f"USER_INPUT_REQUIRED: {source_path}: {reason}",
-                                tool_calls_made,
-                                total_input,
-                                total_output,
-                            )
-                        if (
-                            task.task_type == "coding"
-                            and func_name in WRITE_TOOLS
-                            and result.get("status") == "rejected"
-                            and (
-                                "[allowed_path]" in str(result.get("error", ""))
-                                or "path not in allowed set" in str(
-                                    result.get("error", "")
-                                ).lower()
-                            )
-                        ):
-                            tool_calls_made.append({
-                                "tool": func_name,
-                                "args": args,
-                                "result_status": "rejected",
-                            })
-                            return self._failure(
-                                str(result.get("error") or "Path not in allowed set"),
-                                tool_calls_made,
-                                total_input,
-                                total_output,
-                            )
-                        uninformative_exploration = False
-                        if (
-                            is_exploration
-                            and result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
-                        ):
-                            exploration_calls += 1
-                            observation = self._exploration_observation(result)
-                            previous_observation = exploration_observations.get(
-                                exploration_signature
-                            )
-                            result_truncated = self._exploration_result_is_truncated(
-                                result, func_name
-                            )
-                            uninformative_exploration = bool(
-                                previous_observation == observation
-                                and not result_truncated
-                            )
-                            exploration_observations[
-                                exploration_signature
-                            ] = observation
-                            if uninformative_exploration:
-                                consecutive_uninformative_reads += 1
-                            else:
-                                consecutive_uninformative_reads = 0
-                                uninformative_read_warning_sent = False
-                                meaningful_progress = True
-                            if (
-                                consecutive_uninformative_reads
-                                >= UNINFORMATIVE_READ_WARNING
-                                and not uninformative_read_warning_sent
-                            ):
-                                batch_notices.append(
-                                    f"The last {UNINFORMATIVE_READ_WARNING} "
-                                    "reads/searches repeated previously used "
-                                    "parameters against unchanged source state and "
-                                    "returned identical, non-truncated results. The "
-                                    "calls remain allowed and this is not a provider "
-                                    "failure, but they produced no new information. "
-                                    "Reuse the existing evidence and change strategy."
-                                )
-                                uninformative_read_warning_sent = True
-                            if (
-                                exploration_calls >= self.max_exploration_turns
-                                and not exploration_warning_sent
-                            ):
-                                batch_notices.append(
-                                    "The suggested exploration allowance has been "
-                                    f"reached ({exploration_calls} operations). It is "
-                                    "a soft threshold, not a ban: continue any new, "
-                                    "necessary paginated read, but avoid repeating "
-                                    "searches and move to the concrete edit or report "
-                                    "when the evidence is sufficient."
-                                )
-                                exploration_warning_sent = True
-                        if (
-                            is_mutating_mcp
-                            and result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
-                        ):
-                            external_action_completed = True
-                            external_action_signatures.add(external_signature)
-                            force_tool_call = False
+                    if not isinstance(result, dict):
+                        result = {
+                            "status": "error",
+                            "error": (
+                                f"Tool {func_name} returned an invalid result; "
+                                "expected a JSON object"
+                            ),
+                        }
+                    tool_succeeded = (
+                        result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    )
+                    await report_progress(
+                        (
+                            "正在整理中间产物"
+                            if result.get("redirected_to_runtime")
+                            else self._progress_phase(func_name)
+                            if tool_succeeded
+                            else "工具执行未成功"
+                        ),
+                        tool=func_name,
+                        path=str(
+                            result.get("path")
+                            or args.get("path")
+                            or args.get("target_path")
+                            or ""
+                        ),
+                        turn=turn + 1,
+                        event_kind="tool_completed",
+                        status=str(result.get("status") or (
+                            "error" if result.get("error") else "success"
+                        )),
+                        arguments=args,
+                        result=result,
+                        duration_ms=int(result.get("duration_ms") or 0),
+                    )
+                    if (
+                        func_name == "read_pdf"
+                        and result.get("status") in {
+                            "success", "empty_page_range",
+                        }
+                    ):
+                        source_path = str(
+                            result.get("path") or args.get("path") or "PDF"
+                        )
+                        next_page = int(result.get("next_page") or 0)
+                        if result.get("has_more") and next_page > 0:
+                            pending_document_pages[source_path] = next_page
+                        else:
+                            pending_document_pages.pop(source_path, None)
+                    if result.get("status") in {
+                        "password_required", "no_extractable_text",
+                    }:
+                        tool_calls_made.append({
+                            "tool": func_name,
+                            "args": args,
+                            "result_status": result.get("status"),
+                        })
+                        reason = str(result.get("error") or "PDF cannot be read")
+                        source_path = str(
+                            result.get("path") or args.get("path") or "PDF"
+                        )
+                        return self._failure(
+                            f"USER_INPUT_REQUIRED: {source_path}: {reason}",
+                            tool_calls_made, total_input, total_output,
+                        )
+                    if (
+                        task.task_type == "coding"
+                        and func_name in WRITE_TOOLS
+                        and result.get("status") == "rejected"
+                        and (
+                            "[allowed_path]" in str(result.get("error", ""))
+                            or "path not in allowed set" in str(
+                                result.get("error", "")
+                            ).lower()
+                        )
+                    ):
+                        tool_calls_made.append({
+                            "tool": func_name,
+                            "args": args,
+                            "result_status": "rejected",
+                        })
+                        return self._failure(
+                            str(result.get("error") or "Path not in allowed set"),
+                            tool_calls_made, total_input, total_output,
+                        )
+                    uninformative_exploration = False
+                    if (
+                        is_exploration
+                        and result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    ):
+                        exploration_calls += 1
+                        observation = self._exploration_observation(result)
+                        previous_observation = exploration_observations.get(
+                            exploration_signature
+                        )
+                        result_truncated = self._exploration_result_is_truncated(
+                            result, func_name
+                        )
+                        uninformative_exploration = bool(
+                            previous_observation == observation
+                            and not result_truncated
+                        )
+                        exploration_observations[exploration_signature] = observation
+                        if uninformative_exploration:
+                            consecutive_uninformative_reads += 1
+                        else:
                             consecutive_uninformative_reads = 0
                             uninformative_read_warning_sent = False
-                        if (
-                            func_name in WRITE_TOOLS
-                            and not result.get("redirected_to_runtime")
-                            and result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
-                        ):
-                            has_written = True
-                            force_tool_call = False
                             meaningful_progress = True
-                            consecutive_uninformative_reads = 0
-                            uninformative_read_warning_sent = False
-                        elif (
-                            (
-                                func_name in TEMP_WRITE_TOOLS
-                                or result.get("redirected_to_runtime")
-                            )
-                            and result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
-                        ):
-                            meaningful_progress = True
-                            consecutive_uninformative_reads = 0
-                            uninformative_read_warning_sent = False
                         if (
-                            func_name in STATE_VERIFICATION_TOOLS
-                            and result.get("status") not in {"error", "rejected"}
-                            and not result.get("error")
+                            consecutive_uninformative_reads
+                            >= UNINFORMATIVE_READ_WARNING
+                            and not uninformative_read_warning_sent
                         ):
-                            verified_existing_state = True
-                            if not uninformative_exploration:
-                                meaningful_progress = True
+                            batch_notices.append(
+                                f"The last {UNINFORMATIVE_READ_WARNING} "
+                                "reads/searches repeated previously used "
+                                "parameters against unchanged source state and "
+                                "returned identical, non-truncated results. The "
+                                "calls remain allowed and this is not a provider "
+                                "failure, but they produced no new information. "
+                                "Reuse the existing evidence and change strategy."
+                            )
+                            uninformative_read_warning_sent = True
+                        if (
+                            exploration_calls >= self.max_exploration_turns
+                            and not exploration_warning_sent
+                        ):
+                            batch_notices.append(
+                                "The suggested exploration allowance has been "
+                                f"reached ({exploration_calls} operations). It is "
+                                "a soft threshold, not a ban: continue any new, "
+                                "necessary paginated read, but avoid repeating "
+                                "searches and move to the concrete edit or report "
+                                "when the evidence is sufficient."
+                            )
+                            exploration_warning_sent = True
+                    if (
+                        is_mutating_mcp
+                        and result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    ):
+                        external_action_completed = True
+                        external_action_signatures.add(external_signature)
+                        force_tool_call = False
+                        consecutive_uninformative_reads = 0
+                        uninformative_read_warning_sent = False
+                    if (
+                        func_name in WRITE_TOOLS
+                        and not result.get("redirected_to_runtime")
+                        and result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    ):
+                        has_written = True
+                        force_tool_call = False
+                        meaningful_progress = True
+                        consecutive_uninformative_reads = 0
+                        uninformative_read_warning_sent = False
+                    elif (
+                        (
+                            func_name in TEMP_WRITE_TOOLS
+                            or result.get("redirected_to_runtime")
+                        )
+                        and result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    ):
+                        meaningful_progress = True
+                        consecutive_uninformative_reads = 0
+                        uninformative_read_warning_sent = False
+                    if (
+                        func_name in STATE_VERIFICATION_TOOLS
+                        and result.get("status") not in {"error", "rejected"}
+                        and not result.get("error")
+                    ):
+                        verified_existing_state = True
+                        if not uninformative_exploration:
+                            meaningful_progress = True
                     tool_calls_made.append({
                         "tool": func_name,
                         "args": args,
                         "result_status": result.get("status", "error"),
+                        "duration_ms": int(result.get("duration_ms") or 0),
                     })
 
                     # Format result for the model

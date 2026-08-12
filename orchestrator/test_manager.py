@@ -36,7 +36,7 @@ class TestManager:
 
     DEFAULT_TIMEOUT = 300
     SNAPSHOT_IGNORES = {
-        ".git", ".ai/worktrees", ".ai/runtime", "node_modules",
+        ".git", ".ai", "node_modules",
         ".venv", "venv", "__pycache__",
     }
 

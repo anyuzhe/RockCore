@@ -625,6 +625,14 @@ def test_worker_reports_successful_tool_progress():
             "path": "game.js",
             "turn": 1,
             "max_turns": 3,
+            "event_kind": "tool_completed",
+            "status": "success",
+            "arguments": {"path": "game.js", "content": "updated"},
+            "result": {
+                "status": "success",
+                "content": "ok",
+            },
+            "duration_ms": 0,
         }]
 
     asyncio.run(scenario())

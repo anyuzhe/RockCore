@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.subprocess_utils import run_process
+from app.job_report import JobReportService
 MAX_FLASH_RETRY = 2
 MAX_REPLAN_RETRY = 1
 MAX_REVIEW_REPAIR_ROUNDS = 2
@@ -85,10 +86,16 @@ class Engine:
         self._session_factory = create_session_factory(self._engine)
 
         self.event_bus = EventBus()
+        self.job_reports = JobReportService(self._session_factory)
+        self.event_bus.subscribe("*", self.job_reports.record_event)
         self.event_bus.subscribe("model_chat", self._record_model_usage)
+        self.event_bus.subscribe(
+            "worker_tool_completed", self._record_worker_tool_call
+        )
         self.event_bus.subscribe(
             "task_budget_checkpoint", self._record_budget_checkpoint
         )
+        self.event_bus.subscribe("job_finished", self._generate_job_report)
         self.state_machine = StateMachine()
         self._default_scheduler = Scheduler(
             max_concurrent=max(1, int(max_concurrent_workers or 1))
@@ -313,6 +320,70 @@ class Engine:
             repos["job"].update_checkpoint(job_id, checkpoint)
         finally:
             self._close_repos(repos)
+
+    async def _record_worker_tool_call(self, _event_type: str, **data):
+        """Attach each Worker tool result to the latest persisted model turn."""
+        job_id = str(data.get("job_id") or "")
+        task_id = str(data.get("task_id") or "")
+        if not job_id or not task_id:
+            return
+        repos = self._get_repos()
+        try:
+            job = repos["job"].get_by_id(job_id)
+            if not job:
+                return
+            task = repos["task"].get_by_job_and_id(job.id, task_id)
+            if not task:
+                return
+            runs = repos["agent_run"].list_by_task(task.id)
+            worker_runs = [run for run in runs if run.agent_type == "worker"]
+            if not worker_runs:
+                return
+            result = data.get("result") or {}
+            summary = json.dumps(
+                result, ensure_ascii=False, default=str,
+            )[:1000]
+            repos["tool_call"].create(
+                worker_runs[-1].id,
+                str(data.get("tool") or "unknown"),
+                arguments=dict(data.get("arguments") or {}),
+                result_summary=summary,
+                status=str(data.get("status") or "success"),
+                duration_ms=max(0, int(data.get("duration_ms") or 0)),
+            )
+        except Exception as error:
+            logger.warning(
+                "Could not persist Worker tool call for %s/%s: %s",
+                job_id, task_id, error,
+            )
+        finally:
+            self._close_repos(repos)
+
+    async def _generate_job_report(self, _event_type: str, **data):
+        """Build the terminal diagnostic report without blocking the UI loop."""
+        job_id = str(data.get("job_id") or "")
+        if not job_id:
+            return
+        try:
+            path = await asyncio.to_thread(self.job_reports.generate, job_id)
+            # Do not publish another durable event after the report was built:
+            # that would make the freshly generated timeline immediately stale.
+            await self.event_bus.publish_transient(
+                "job_report_ready", job_id=job_id, path=str(path),
+            )
+        except Exception as error:
+            logger.warning("Could not generate Job report for %s: %s", job_id, error)
+            await self.event_bus.publish_transient(
+                "job_report_failed", job_id=job_id, error=str(error),
+            )
+
+    async def generate_job_report(self, job_id: str) -> str:
+        """Regenerate one report on demand, including historical Jobs."""
+        path = await asyncio.to_thread(self.job_reports.generate, job_id)
+        await self.event_bus.publish_transient(
+            "job_report_ready", job_id=job_id, path=str(path),
+        )
+        return str(path)
 
     def get_agent(self, agent_type: str):
         runtime = self._active_runtime()
@@ -2595,6 +2666,23 @@ class Engine:
                     max_turns=progress.get("max_turns", 0),
                     changes=live_change_summary,
                 )
+                if progress.get("event_kind") == "tool_completed":
+                    await self.event_bus.publish(
+                        "worker_tool_completed",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        task_index=task_position_by_id.get(task_id, 1),
+                        task_total=len(task_dicts),
+                        phase=phase,
+                        tool=progress.get("tool", ""),
+                        path=progress.get("path", ""),
+                        turn=progress.get("turn", 0),
+                        max_turns=progress.get("max_turns", 0),
+                        status=progress.get("status", ""),
+                        arguments=progress.get("arguments") or {},
+                        result=progress.get("result") or {},
+                        duration_ms=progress.get("duration_ms", 0),
+                    )
 
             t._rockcore_progress_callback = publish_worker_progress
             base_exploration = (

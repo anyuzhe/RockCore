@@ -13,9 +13,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QMessageBox, QFrame, QFileDialog,
     QScrollArea,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QByteArray, QBuffer, QIODevice
+from PyQt6.QtCore import (
+    Qt, QTimer, pyqtSignal, QObject, QByteArray, QBuffer, QIODevice, QUrl,
+)
 from PyQt6.QtGui import (
-    QAction, QFont, QKeySequence, QShortcut, QImage, QImageReader, QPixmap,
+    QAction, QDesktopServices, QFont, QKeySequence, QShortcut, QImage,
+    QImageReader, QPixmap,
 )
 
 from app.image_attachments import (
@@ -349,6 +352,7 @@ class MainWindow(QMainWindow):
         self.task_panel.attention_resume_requested.connect(
             self._on_attention_resume_requested
         )
+        self.task_panel.report_requested.connect(self._on_report_requested)
 
         self.project_panel.project_selected.connect(self._on_project_selected)
         self.project_panel.project_deleted.connect(self._on_project_deleted)
@@ -427,6 +431,11 @@ class MainWindow(QMainWindow):
                         "recovery_hint": getattr(job, "recovery_hint", "") or "",
                         "created_at": as_utc_isoformat(job.created_at),
                         "usage": self._job_usage(job),
+                        "report_path": str(
+                            self.engine.job_reports.report_path(
+                                job.job_id, existing_only=True,
+                            ) or ""
+                        ),
                     }
                     constitution_dict = None
                     if constitution:
@@ -542,6 +551,45 @@ class MainWindow(QMainWindow):
                 self.project_panel.select_job(job_id)
                 self._sync_project_runtime_state()
                 self._update_send_state()
+
+    def _on_report_requested(self, data: dict):
+        """Open an existing report or generate one for a historical Job."""
+        job_id = str(data.get("job_id") or "")
+        if not job_id or not self.engine:
+            self.task_panel.set_report_state(available=True)
+            return
+        existing = self.engine.job_reports.report_path(
+            job_id, existing_only=True,
+        )
+        if existing:
+            self._open_job_report(str(existing))
+            return
+        self.task_panel.set_report_state(generating=True, available=True)
+        asyncio.ensure_future(self._generate_and_open_job_report(job_id))
+
+    async def _generate_and_open_job_report(self, job_id: str):
+        try:
+            path = await self.engine.generate_job_report(job_id)
+        except Exception as error:
+            self.task_panel.set_report_state(available=True)
+            QMessageBox.warning(
+                self, "报告生成失败", f"无法生成 {job_id} 的 PDF 报告：\n{error}",
+            )
+            return
+        self._open_job_report(path)
+
+    def _open_job_report(self, path: str):
+        report = Path(path)
+        self.task_panel.set_report_state(
+            path=str(report), available=report.is_file(),
+        )
+        if not report.is_file():
+            QMessageBox.warning(self, "报告不可用", "PDF 报告文件尚未生成。")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(report))):
+            QMessageBox.information(
+                self, "任务报告", f"报告已生成，请从以下位置打开：\n{report}",
+            )
 
     def _clear_followup_source(self):
         self._followup_source_job_id = None
@@ -1388,6 +1436,17 @@ class MainWindow(QMainWindow):
             self._capture_diff()
             if is_selected:
                 self._reload_selected_workflow()
+        elif event_type == "job_report_ready":
+            if is_selected:
+                self.task_panel.set_report_state(
+                    path=str(data.get("path") or ""), available=True,
+                )
+        elif event_type == "job_report_failed":
+            if is_selected:
+                self.task_panel.set_report_state(available=True)
+                self.task_panel.log(
+                    f"任务报告生成失败：{data.get('error', '未知错误')}", "log",
+                )
         elif event_type == "job_needs_attention":
             self.status_label.setText("任务需要你的处理")
             if is_selected:

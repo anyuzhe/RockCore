@@ -90,3 +90,15 @@ def test_change_summary_reports_live_file_and_line_counts(tmp_path):
     assert set(summary["changed"]) == {"main.py", "new.txt"}
     assert summary["additions"] == 3
     assert summary["deletions"] == 0
+
+
+def test_change_detection_ignores_all_rockcore_project_state(tmp_path):
+    baseline = TestManager.capture_snapshot(tmp_path)
+    report_dir = tmp_path / ".ai" / "reports"
+    report_dir.mkdir(parents=True)
+    (report_dir / "JOB-1.events.jsonl").write_text(
+        '{"event":"task_running"}\n', encoding="utf-8",
+    )
+    (report_dir / "JOB-1.pdf").write_bytes(b"%PDF-1.4\n")
+
+    assert TestManager.snapshot_diff(tmp_path, baseline)["changed"] == []
