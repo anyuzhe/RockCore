@@ -485,6 +485,7 @@ class TaskPanel(QWidget):
             self._copy_original_request()
 
     def set_project_context(self, name: str = "", root_path: str = ""):
+        self.workflow_title.show()
         if name and not self._current_job:
             self.workflow_title.setText("新需求")
             self.job_meta_label.setText(f"{name}  ·  {root_path}")
@@ -789,7 +790,10 @@ class TaskPanel(QWidget):
         status = job.get("status", "created")
         source = job.get("source_job_id")
         request = job.get("user_request", "")
-        self.workflow_title.setText(request.replace("\n", " ")[:72] or "未命名需求")
+        # The complete requirement is already shown in the conversation and
+        # summarized in the sidebar. Repeating it as a header wastes horizontal
+        # space needed by usage and status information.
+        self.workflow_title.hide()
         meta = f"{job.get('job_id', '')}  ·  {self._format_time(job.get('created_at', ''))}"
         if source:
             meta += f"  ·  承接 {source}"
@@ -918,6 +922,7 @@ class TaskPanel(QWidget):
         self._clear_repair_stages()
         self._set_usage(self._empty_usage())
         self.workflow_title.setText("新需求")
+        self.workflow_title.show()
         self.job_meta_label.setText("选择项目后即可开始")
         self.job_status_indicator.clear()
         self.job_status_label.clear()

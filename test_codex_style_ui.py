@@ -150,6 +150,26 @@ def test_live_stage_updates_expand_inside_the_conversation():
     panel.close()
 
 
+def test_job_detail_header_does_not_repeat_the_submitted_request():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-NO-DUPLICATE-TITLE",
+        "user_request": "这段需求只需要在对话气泡和左侧列表中显示",
+        "status": "executing",
+        "created_at": "2026-08-12T02:00:00Z",
+    })
+
+    assert panel.workflow_title.isHidden()
+    assert "JOB-NO-DUPLICATE-TITLE" in panel.job_meta_label.text()
+    assert "这段需求" in panel.user_output.text()
+
+    panel.begin_new_request("Demo", "/tmp/demo")
+    assert not panel.workflow_title.isHidden()
+    assert panel.workflow_title.text() == "新需求"
+    panel.close()
+
+
 def test_submitted_request_can_copy_the_complete_original_text():
     app = _app()
     panel = TaskPanel()
