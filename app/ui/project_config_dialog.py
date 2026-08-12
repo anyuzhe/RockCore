@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QPalette
 
 from orchestrator.agent_config import (
     ProjectAgentConfig, load_project_config, save_project_config,
@@ -28,6 +29,34 @@ MODES = [
     ("strict", "严格（完整流程 + 自动修复）"),
     ("custom", "自定义（手动选择阶段）"),
 ]
+
+
+PROJECT_COMBO_STYLE = """
+QComboBox {
+    background-color: #ffffff;
+    color: #25231f;
+    border: 1px solid #d6d1c9;
+    border-radius: 5px;
+    padding: 4px 28px 4px 8px;
+    min-height: 22px;
+}
+QComboBox:focus { border-color: #b85a20; }
+QComboBox:disabled { color: #8c867e; background-color: #f2f0ec; }
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 24px;
+    border-left: 1px solid #e0dcd5;
+}
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #25231f;
+    border: 1px solid #d6d1c9;
+    selection-background-color: #e6dfd5;
+    selection-color: #25231f;
+    outline: none;
+}
+"""
 
 
 class ProjectConfigDialog(QDialog):
@@ -392,6 +421,34 @@ class ProjectConfigDialog(QDialog):
         btn_layout.addWidget(self.save_btn)
         btn_layout.addWidget(self.cancel_btn)
         layout.addLayout(btn_layout)
+
+        # macOS can retain a dark native QComboBox text palette after the app
+        # applies a light stylesheet.  The result is a populated combo whose
+        # current value and popup entries appear blank on a white background.
+        # Apply both QSS and palette roles so native and Qt-drawn paths agree.
+        for combo in self.findChildren(QComboBox):
+            self._ensure_combo_text_visible(combo)
+
+    @staticmethod
+    def _ensure_combo_text_visible(combo: QComboBox):
+        combo.setMinimumHeight(32)
+        combo.setStyleSheet(PROJECT_COMBO_STYLE)
+
+        palette = combo.palette()
+        for role in (
+            QPalette.ColorRole.Text,
+            QPalette.ColorRole.ButtonText,
+            QPalette.ColorRole.WindowText,
+        ):
+            palette.setColor(role, QColor("#25231f"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor("#e6dfd5"))
+        palette.setColor(
+            QPalette.ColorRole.HighlightedText, QColor("#25231f")
+        )
+        combo.setPalette(palette)
+        combo.view().setPalette(palette)
 
     def _on_mode_changed(self, _idx):
         mode = self.mode_combo.currentData()

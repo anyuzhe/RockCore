@@ -7,7 +7,10 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit, QMessageBox
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QLabel, QLineEdit, QMessageBox,
+)
 
 from app.ui import main_window as main_window_module
 from app.ui import settings_dialog as settings_dialog_module
@@ -560,6 +563,25 @@ def test_new_kimi_and_deepseek_models_appear_in_global_and_project_settings(tmp_
     assert project.worker_emergency_after.value() == 3
     assert project.worker_fallback_model.currentData() == "kimi-k2.7-code"
     settings.close()
+    project.close()
+
+
+def test_project_agent_combos_keep_visible_text_on_native_dark_palette(tmp_path):
+    _app()
+    project = ProjectConfigDialog(str(tmp_path))
+
+    combos = project.findChildren(QComboBox)
+    assert combos
+    for combo in combos:
+        assert combo.count() > 0
+        assert combo.currentText()
+        assert combo.minimumHeight() >= 32
+        assert combo.palette().color(QPalette.ColorRole.ButtonText) == QColor(
+            "#25231f"
+        )
+        assert combo.palette().color(QPalette.ColorRole.Base) == QColor("#ffffff")
+        assert "color: #25231f" in combo.styleSheet()
+
     project.close()
 
 
