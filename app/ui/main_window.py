@@ -1159,7 +1159,11 @@ class MainWindow(QMainWindow):
                 data.get("task_id", ""),
                 task_index=int(data.get("task_index", 0) or 0),
                 task_total=int(data.get("task_total", 0) or 0),
-                phase="正在执行",
+                phase=(
+                    "正在读取并分析"
+                    if data.get("task_type") in {"analysis", "review"}
+                    else "正在执行"
+                ),
                 max_turns=int(data.get("max_turns", 0) or 0),
             )
             skills = data.get("skills") or []
@@ -1190,6 +1194,13 @@ class MainWindow(QMainWindow):
                     repair_round=task_repair_round,
                 )
             self._capture_diff(data.get("result"))
+        elif event_type == "task_reclassified" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker",
+                "已自动纠正为只读分析任务：已有分析报告作为交付物，"
+                "无需修改项目文件。",
+                repair_round=task_repair_round,
+            )
         elif event_type == "task_pending_validation" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
             self.task_panel.append_stage_output(

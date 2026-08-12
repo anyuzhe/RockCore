@@ -55,6 +55,11 @@ Rules:
     merged, or renumbered task by its old ID.
 21. Select zero to three Skills from the supplied Skill Catalog for each task.
     Do not invent skill names. Skills describe the execution SOP, not dependencies.
+22. When the user's requested deliverable is only to inspect, read, explain, list,
+    summarize, or diagnose existing project content, use one or more analysis tasks.
+    Do not label such work coding and do not require a file change. If the user also
+    requests a repair, implementation, or saved report artifact, keep the relevant
+    task as coding (or split analysis then coding when that is genuinely useful).
 
 Output ONLY valid JSON with this structure:
 {

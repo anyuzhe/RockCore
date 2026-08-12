@@ -43,6 +43,34 @@ class _AnalysisWorker:
         }
 
 
+class _ReadOnlyTraceWorker:
+    def scoped_to(self, _project_root):
+        return self
+
+    async def run(self, _task, **_kwargs):
+        return {
+            "status": "completed",
+            "content": "项目包含 src 与 tests；src 是主代码，tests 是测试目录。",
+            "tool_calls": [{
+                "tool": "list_files", "args": {}, "result_status": "success",
+            }],
+            "turns": 1,
+        }
+
+
+class _TextOnlyWorker:
+    def scoped_to(self, _project_root):
+        return self
+
+    async def run(self, _task, **_kwargs):
+        return {
+            "status": "completed",
+            "content": "I did not implement the requested change.",
+            "tool_calls": [],
+            "turns": 1,
+        }
+
+
 class _NoChangeCodingWorker:
     def scoped_to(self, _project_root):
         return self
@@ -95,6 +123,149 @@ def test_analysis_report_succeeds_without_file_changes(tmp_path):
             assert done_events[-1]["data"]["result"]["output"].startswith(
                 "The project is empty"
             )
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_read_only_request_intent_is_distinct_from_mutating_requests():
+    assert Engine._request_task_type(
+        "帮我看下项目下面所有的文件夹和文件，详细说明它们的作用"
+    ) == "analysis"
+    assert Engine._request_task_type(
+        "查看这次修改为什么失败"
+    ) == "analysis"
+    assert Engine._request_task_type(
+        "告诉我这个问题应该怎么修改"
+    ) == "analysis"
+    assert Engine._request_task_type(
+        "检查代码有没有明显问题"
+    ) == "analysis"
+    assert Engine._request_task_type(
+        "分析项目结构，然后修复入口文件"
+    ) == "coding"
+    assert Engine._request_task_type(
+        "帮我查看目录并修改错误的文件名"
+    ) == "coding"
+    assert Engine._request_task_type(
+        "检查代码，如果有问题就修复"
+    ) == "coding"
+    assert Engine._request_task_type(
+        "告诉我为什么失败，然后直接修复"
+    ) == "coding"
+    assert Engine._request_task_type(
+        "分析项目并生成 PDF 报告文件"
+    ) == "coding"
+    assert Engine._request_task_type("实现文件列表页面") == "coding"
+    assert Engine._request_task_type(
+        "Inspect the project and modify the configuration"
+    ) == "coding"
+
+
+def test_direct_plan_uses_analysis_for_read_only_request(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        job = repos["job"].create(
+            "JOB-DIRECT-ANALYSIS", project.id,
+            "查看项目所有文件并解释各自用途",
+        )
+
+        plan = engine._direct_plan_data(job, repos)
+
+        assert plan["tasks"][0]["type"] == "analysis"
+        assert plan["tasks"][0]["acceptance_command"] == ""
+    finally:
+        repos["_session"].close()
+
+
+def test_plan_normalizer_corrects_only_read_only_coding_defaults():
+    read_plan = {"tasks": [{
+        "id": "T001", "type": "coding",
+        "title": "查看项目目录", "description": "解释所有文件的用途",
+        "acceptance_command": "git diff --exit-code",
+    }]}
+    mixed_plan = {"tasks": [{
+        "id": "T001", "type": "coding",
+        "title": "检查并修复", "description": "先检查问题，然后修复代码",
+        "acceptance_command": "pytest",
+    }]}
+
+    assert Engine._normalize_plan_task_types(
+        read_plan, "查看项目所有文件并解释用途"
+    )
+    assert read_plan["tasks"][0]["type"] == "analysis"
+    assert read_plan["tasks"][0]["acceptance_command"] == ""
+    assert not Engine._normalize_plan_task_types(
+        mixed_plan, "检查代码，如果有问题就修复"
+    )
+    assert mixed_plan["tasks"][0]["type"] == "coding"
+
+
+def test_legacy_read_only_coding_task_is_safely_reclassified(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        try:
+            project = repos["project"].create("Legacy", str(project_root))
+            request = "查看项目文件和目录，说明它们都是干什么的"
+            job = repos["job"].create("JOB-LEGACY-READ", project.id, request)
+            task = repos["task"].create(
+                "T001", job.id, request, description=request,
+                task_type="coding", allowed_paths=["*"],
+            )
+            engine.register_agent("worker", _ReadOnlyTraceWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            assert task.status == "done"
+            assert task.task_type == "analysis"
+            done_result = engine.event_bus.get_history("task_done")[-1]["data"]["result"]
+            assert done_result["reclassified_from"] == "coding"
+            assert engine.event_bus.get_history("task_reclassified")
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_coding_task_text_alone_is_not_reclassified(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        try:
+            project = repos["project"].create("Coding", str(project_root))
+            job = repos["job"].create(
+                "JOB-CODING-GUARD", project.id, "实现文件列表页面"
+            )
+            task = repos["task"].create(
+                "T001", job.id, "实现文件列表页面",
+                description="创建页面并列出所有文件", task_type="coding",
+                allowed_paths=["index.html"],
+            )
+            engine.register_agent("worker", _TextOnlyWorker())
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            assert task.status == "failed"
+            assert task.task_type == "coding"
+            assert not engine.event_bus.get_history("task_reclassified")
         finally:
             repos["_session"].close()
 

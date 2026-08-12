@@ -244,7 +244,7 @@ class TaskPanel(QWidget):
         ("user", "已接收需求", "用户输入"),
         ("governor", "裁决者", "目标、风险与边界"),
         ("planner", "策划者", "步骤与验收条件"),
-        ("worker", "执行者", "文件修改与验证"),
+        ("worker", "执行者", "读取分析 / 文件修改与验证"),
         ("reviewer", "审核者", "结果检查"),
     )
 
@@ -984,6 +984,9 @@ class TaskPanel(QWidget):
         self.empty_state.show()
         for stage in self.stages.values():
             stage.reset()
+        self.stages["worker"].subtitle_label.setText(
+            "读取分析 / 文件修改与验证"
+        )
         for disclosure in (self.run_details, self.diff_details, self.test_details):
             disclosure.clear()
 
@@ -1334,6 +1337,15 @@ class TaskPanel(QWidget):
             if self._worker_outputs:
                 stage.set_output("\n\n".join(self._worker_outputs[-10:]), expand=True)
             return
+        task_types = {
+            str(task.get("task_type") or "coding") for task in base_tasks
+        }
+        if task_types and task_types <= {"analysis", "review"}:
+            stage.subtitle_label.setText("项目读取与分析报告")
+        elif task_types & {"analysis", "review"}:
+            stage.subtitle_label.setText("项目分析、文件修改与验证")
+        else:
+            stage.subtitle_label.setText("文件修改与验证")
         statuses = [task.get("status", "pending") for task in base_tasks]
         if any(status == "failed" for status in statuses):
             overall = "failed"

@@ -40,6 +40,41 @@ LONG_DOCUMENT_KEYWORDS = (
     "整本", "全书", "书籍", "长文档", "电子书", "整份文档",
     "entire book", "full book", "long document", "ebook",
 )
+
+# Request intent is independent from risk/complexity.  In particular, a small
+# request to inspect or explain a repository is not a coding task merely because
+# its subject is source code.  Keep the mutation list deliberately action-led;
+# nouns such as "configuration" or "changes" commonly appear in read-only
+# questions and must not force a write workflow on their own.
+READ_ONLY_INTENT_MARKERS = (
+    "只读", "仅查看", "只查看", "看一下", "看下", "看看", "查看",
+    "读取", "检查", "查找", "搜索", "定位", "分析", "解释", "说明",
+    "介绍", "了解", "盘点", "梳理",
+    "列出", "总结", "归纳", "提炼", "审查", "评估", "告诉我",
+    "是什么", "为什么", "什么原因", "作用", "干什么", "有哪些",
+    "是否", "inspect", "read", "analyze", "analyse", "explain",
+    "describe", "review", "summarize", "list", "what is", "why",
+)
+MUTATING_INTENT_MARKERS = (
+    "改一下", "修改", "修复", "优化", "实现", "创建", "新建", "增加", "添加", "删除",
+    "移除", "剔除", "调整", "替换", "改成", "改为", "写入", "编辑",
+    "更新", "重构", "安装", "合并", "打包", "构建", "开发", "制作",
+    "搭建", "提交", "推送", "fix", "optimize", "optimise", "implement",
+    "create", "add", "delete", "remove", "adjust", "replace", "edit",
+    "modify", "change",
+    "update", "refactor", "install", "merge", "package", "build",
+    "develop", "commit", "push",
+)
+EXPLICIT_READ_ONLY_PATTERNS = (
+    r"(?:不|无需|不要|不会)(?:创建|修改|改动|编辑|写入|删除)(?:任何)?(?:项目)?(?:文件|代码)?",
+    r"(?:do not|don't|without)\s+(?:create|modify|edit|write|change|delete)",
+)
+REPORT_ARTIFACT_PATTERN = re.compile(
+    r"(?:生成|创建|新建|导出|保存|写入|整理成|制作|generate|create|export|save|write)"
+    r".{0,24}(?:\.pdf|\.docx|\.pptx?|\.md\b|pdf\s*文件|word\s*文件|"
+    r"markdown\s*文件|报告文件|文档文件)",
+    re.IGNORECASE,
+)
 from .event_bus import EventBus
 from .state_machine import StateMachine, JobState
 from .scheduler import Scheduler
@@ -584,6 +619,136 @@ class Engine:
         if has_simple and len(user_request) < 200:
             return "simple"
         return "normal"
+
+    @classmethod
+    def _request_task_type(cls, user_request: str) -> str:
+        """Return the required deliverable type for a direct user request.
+
+        This intentionally answers a different question from complexity and
+        risk classification: whether success is a written report or a changed
+        workspace.  Ambiguous requests remain coding tasks so the no-edit guard
+        is never weakened for a real implementation request.
+        """
+        text = " ".join(str(user_request or "").lower().split())
+        if not text:
+            return "coding"
+        if REPORT_ARTIFACT_PATTERN.search(text):
+            return "coding"
+
+        explicit_read_only = any(
+            re.search(pattern, text, re.IGNORECASE)
+            for pattern in EXPLICIT_READ_ONLY_PATTERNS
+        )
+        positive_text = text
+        for pattern in EXPLICIT_READ_ONLY_PATTERNS:
+            positive_text = re.sub(
+                pattern, " ", positive_text, flags=re.IGNORECASE
+            )
+
+        def marker_pattern(markers: tuple[str, ...]) -> str:
+            patterns = []
+            for marker in sorted(markers, key=len, reverse=True):
+                escaped = re.escape(marker)
+                patterns.append(
+                    rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
+                    if marker.isascii() else escaped
+                )
+            return "|".join(patterns)
+
+        read_pattern = marker_pattern(READ_ONLY_INTENT_MARKERS)
+        mutation_pattern = marker_pattern(MUTATING_INTENT_MARKERS)
+        has_read_intent = explicit_read_only or bool(re.search(
+            read_pattern, text, re.IGNORECASE
+        ))
+        if not has_read_intent:
+            return "coding"
+
+        has_mutation_term = bool(re.search(mutation_pattern, positive_text))
+        if not has_mutation_term:
+            return "analysis"
+        if explicit_read_only:
+            return "analysis"
+
+        question_intent = re.search(
+            r"为什么|什么原因|是什么|怎么回事|怎么|如何|是否|"
+            r"how\s+does|how\s+to|what\s+is|why\b",
+            positive_text,
+            re.IGNORECASE,
+        )
+        if question_intent:
+            post_question = positive_text[question_intent.end():]
+            explicit_action_after_question = re.search(
+                rf"(?:并且|并|然后|随后|同时|再|接着|之后|，|,|；|;)"
+                rf".{{0,12}}(?:帮我|请|直接|需要|务必|必须)?"
+                rf".{{0,8}}(?:{mutation_pattern})",
+                post_question,
+                re.IGNORECASE,
+            )
+            if not explicit_action_after_question:
+                return "analysis"
+
+        # A read followed by an explicit edit step is a mixed implementation
+        # request.  A mutation word used as the subject of a question (for
+        # example, "查看这次修改为什么失败") remains read-only.
+        edit_after_read = re.search(
+            rf"(?:并且|并|然后|随后|同时|再|接着|之后|后再|，|,|；|;|"
+            rf"and then|then|and)"
+            rf".{{0,16}}(?:{mutation_pattern})",
+            positive_text,
+            re.IGNORECASE,
+        )
+        conditional_edit = re.search(
+            rf"(?:发现|如果|若|如有|存在|有).{{0,20}}(?:问题|错误|缺陷|不一致)?"
+            rf".{{0,12}}(?:就|则|请|需要|要)?\s*(?:{mutation_pattern})",
+            positive_text,
+            re.IGNORECASE,
+        )
+        if edit_after_read or conditional_edit:
+            return "coding"
+
+        imperative_edit = re.search(
+            rf"(?:帮我|请|直接|需要|务必|必须|please)"
+            rf".{{0,12}}(?:{mutation_pattern})",
+            positive_text,
+            re.IGNORECASE,
+        )
+        if imperative_edit:
+            return "coding"
+
+        first_read_match = re.search(read_pattern, positive_text, re.IGNORECASE)
+        first_read = first_read_match.start() if first_read_match else -1
+        first_mutation = min(
+            (match.start() for match in re.finditer(
+                mutation_pattern, positive_text, re.IGNORECASE
+            )),
+            default=-1,
+        )
+        if first_mutation >= 0 and (first_read < 0 or first_mutation < first_read):
+            return "coding"
+        return "analysis"
+
+    @classmethod
+    def _normalize_plan_task_types(
+        cls, plan_data: dict, user_request: str,
+    ) -> bool:
+        """Correct coding defaults for an unambiguously read-only request."""
+        if cls._request_task_type(user_request) != "analysis":
+            return False
+        changed = False
+        for task in plan_data.get("tasks", []):
+            task_type = str(task.get("type") or "coding").lower()
+            if task_type != "coding":
+                continue
+            task_text = " ".join((
+                str(task.get("title") or ""),
+                str(task.get("description") or ""),
+            ))
+            if cls._request_task_type(task_text) != "analysis":
+                continue
+            task["type"] = "analysis"
+            task["acceptance_command"] = ""
+            changed = True
+        return changed
 
     @staticmethod
     def _is_document_request(text: str) -> bool:
@@ -1690,6 +1855,17 @@ class Engine:
             used_fallback = True
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
+        task_types_corrected = self._normalize_plan_task_types(
+            plan_data, job.user_request
+        )
+        if task_types_corrected:
+            await self.event_bus.publish(
+                "plan_task_types_corrected",
+                job_id=job.job_id,
+                task_type="analysis",
+                reason="纯查看需求以分析报告作为交付物，不要求修改项目文件",
+            )
+
         initial_complexity = getattr(job, "_rockcore_complexity", "normal")
         effective_complexity = self._promote_complexity_from_plan(
             initial_complexity, plan_data
@@ -1826,6 +2002,7 @@ class Engine:
     def _direct_plan_data(self, job, repos, proj_config=None) -> dict:
         """Build one executable task when planning is explicitly unavailable."""
         description = self._request_with_context(job, repos, proj_config)
+        task_type = self._request_task_type(job.user_request)
         title = self._effective_task_title(job, repos)
         allowed_paths = ["*"]
         if getattr(job, "source_job_id", None):
@@ -1865,7 +2042,7 @@ class Engine:
             "tasks": [{
                 "id": "T001",
                 "title": title,
-                "type": "coding",
+                "type": task_type,
                 "description": description,
                 "dependencies": [],
                 "allowed_paths": allowed_paths,
@@ -2576,9 +2753,13 @@ class Engine:
                 completed_task_results[task_id] = result
                 return result
 
-            # Create worktree for this task
+            # Read-only tasks already receive a non-mutating tool schema. Avoid
+            # paying for Git worktree creation/snapshot integration when their
+            # required deliverable is an in-app report rather than repository
+            # changes.
+            is_read_only_task = t.task_type in {"analysis", "review"}
             has_worktree = False
-            if self.merge_manager:
+            if self.merge_manager and not is_read_only_task:
                 try:
                     wt_result = await self.merge_manager.create_task_worktree(
                         task_id, job.job_id,
@@ -2819,6 +3000,7 @@ class Engine:
                 task_id=task_id, title=t.title,
                 task_index=task_position_by_id.get(task_id, 1),
                 task_total=len(task_dicts),
+                task_type=t.task_type,
                 max_turns=task_worker.max_turns,
                 exploration_limit=task_worker.max_exploration_turns,
                 input_token_budget=t._rockcore_input_budget,
@@ -2932,6 +3114,38 @@ class Engine:
                     or ""
                 ).strip()
                 declared_no_changes = bool(worker_result.get("no_changes"))
+                reclassified_read_only = False
+                if (
+                    t.task_type == "coding"
+                    and not has_file_changes
+                    and not declared_no_changes
+                    and task_output
+                    and self._request_task_type(job.user_request) == "analysis"
+                    and self._request_task_type(
+                        f"{t.title} {t.description}"
+                    ) == "analysis"
+                    and self._read_only_tool_trace(worker_result)
+                ):
+                    # Last-resort protection for old plans/checkpoints created
+                    # before intent classification existed.  This remains
+                    # deliberately strict: a non-empty answer alone cannot turn
+                    # an unfinished coding task into a success.
+                    t.task_type = "analysis"
+                    task_data["type"] = "analysis"
+                    repos["task"].update_definition(
+                        t.id, task_type="analysis", acceptance_command=""
+                    )
+                    reclassified_read_only = True
+                    await self.event_bus.publish(
+                        "task_reclassified",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        previous_type="coding",
+                        task_type="analysis",
+                        reason=(
+                            "原始需求为纯查看，且执行过程只有读取操作并已形成报告"
+                        ),
+                    )
                 missing_required_output = (
                     t.task_type == "coding"
                     and not has_file_changes
@@ -3258,6 +3472,8 @@ class Engine:
                         result_payload["integration"] = integration_result
                     if declared_no_changes:
                         result_payload["no_changes"] = True
+                    if reclassified_read_only:
+                        result_payload["reclassified_from"] = "coding"
                     if task_output:
                         result_payload["output"] = task_output
                     self._checkpoint_task(
@@ -4261,6 +4477,28 @@ class Engine:
             or "repeated_tool_failure:" in normalized
             or "tool_payload_truncated:" in normalized
         )
+
+    @staticmethod
+    def _read_only_tool_trace(worker_result: dict) -> bool:
+        """Return whether a Worker result contains evidence but no mutation."""
+        calls = list(worker_result.get("tool_calls") or [])
+        if not calls:
+            return False
+        write_tools = {
+            "write_file", "apply_patch", "insert_before", "insert_after",
+            "write_docx", "write_pptx", "write_pdf", "promote_artifact",
+            "write_temp_file",
+        }
+        read_tools = {
+            "list_files", "read_file", "read_pdf", "read_docx", "read_pptx",
+            "search_in_file", "search_code", "git_status", "git_diff",
+            "read_log",
+        }
+        names = {
+            str(call.get("tool") or call.get("name") or "")
+            for call in calls if isinstance(call, dict)
+        }
+        return bool(names & read_tools) and not bool(names & write_tools)
 
     @staticmethod
     def _is_provider_capability_error(error: str) -> bool:
@@ -5437,6 +5675,7 @@ Prefer these existing files when relevant:
             self._continuation_context(job, repos, proj_config)
         )
         description = self._request_with_context(job, repos, proj_config)
+        task_type = self._request_task_type(job.user_request)
 
         normalized_risk = (
             "high" if job.risk_level == "critical" else job.risk_level
@@ -5452,7 +5691,7 @@ Prefer these existing files when relevant:
         direct_task = {
             "title": self._effective_task_title(job, repos),
             "description": description,
-            "type": "coding",
+            "type": task_type,
             "allowed_paths": ["*"],
             "skills": [],
         }
@@ -5468,7 +5707,7 @@ Prefer these existing files when relevant:
         )
         repos["task"].create(
             task_id="T001", job_id=job.id, title=direct_task["title"],
-            task_type="coding", description=description, allowed_paths=["*"],
+            task_type=task_type, description=description, allowed_paths=["*"],
             dependencies=[], acceptance_command="", order=0,
             skills=selected_skills,
         )

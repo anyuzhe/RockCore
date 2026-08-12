@@ -384,8 +384,14 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         "role": "user",
                         "content": (
                             "You have used 85% of the task budget. Stop broad work, "
-                            "complete the required edits, run one focused verification, "
-                            "and return the final completion response."
+                            + (
+                                "use the evidence already collected and return the "
+                                "complete findings report now."
+                                if task.task_type in {"analysis", "review"}
+                                else
+                                "complete the required edits, run one focused "
+                                "verification, and return the final completion response."
+                            )
                         ),
                     })
                     finish_warning_sent = True
@@ -397,8 +403,15 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     messages.append({
                         "role": "user",
                         "content": (
-                            "You have used 70% of the task budget without editing. "
-                            "Stop investigating and apply the required change now."
+                            (
+                                "You have used 70% of the report budget. Reuse the "
+                                "evidence already collected, cover the remaining "
+                                "requested points, and prepare the final report."
+                                if task.task_type in {"analysis", "review"}
+                                else
+                                "You have used 70% of the task budget without editing. "
+                                "Stop investigating and apply the required change now."
+                            )
                         ),
                     })
                     progress_warning_sent = True

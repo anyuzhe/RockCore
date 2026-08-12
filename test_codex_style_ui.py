@@ -150,6 +150,30 @@ def test_live_stage_updates_expand_inside_the_conversation():
     panel.close()
 
 
+def test_worker_stage_describes_read_only_analysis_without_file_edits():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow(
+        {
+            "job_id": "JOB-READ",
+            "user_request": "查看项目结构并说明文件用途",
+            "status": "executing",
+            "created_at": "2026-08-12T04:00:00Z",
+        },
+        tasks=[{
+            "task_id": "T001",
+            "title": "查看项目结构",
+            "description": "读取所有文件并形成说明",
+            "task_type": "analysis",
+            "status": "running",
+            "allowed_paths": ["*"],
+        }],
+    )
+
+    assert panel.stages["worker"].subtitle_label.text() == "项目读取与分析报告"
+    panel.close()
+
+
 def test_job_detail_header_does_not_repeat_the_submitted_request():
     _app()
     panel = TaskPanel()

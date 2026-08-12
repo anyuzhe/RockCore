@@ -15,6 +15,10 @@ Create a detailed task plan that respects the **Constitution** defined by the Go
 5. Dependencies between tasks form a DAG (no cycles)
 6. If task prose mentions another task ID, that ID must exist in the final plan;
    never leave references to removed, merged, or renumbered tasks
+7. A request whose deliverable is only inspection, explanation, listing,
+   summarization, or diagnosis must use an analysis task and must not require a
+   project file change. Requests that also ask for a repair, implementation, or
+   saved artifact still require a coding task for that output.
 
 ## Output
 
