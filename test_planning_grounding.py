@@ -88,6 +88,18 @@ def test_vague_continuation_plan_is_rejected_before_execution():
     assert any(error.startswith("continuation_quality:") for error in errors)
 
 
+def test_large_scene_range_requires_finer_planner_tasks():
+    errors = Engine._plan_granularity_errors({
+        "tasks": [{
+            "id": "T004", "type": "coding",
+            "title": "完成区域 1-8 和剩余系统",
+            "description": "在一次执行里完成全部系统",
+        }],
+    }, "完整游戏")
+
+    assert any(error.startswith("granularity_quality:T004") for error in errors)
+
+
 class _AnalysisAwareWorker:
     max_turns = 16
     max_exploration_turns = 4

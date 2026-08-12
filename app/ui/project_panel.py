@@ -32,6 +32,7 @@ JOB_STATUS = {
     "cancelled": ("#8f8f98", "已停止"),
     "interrupted": ("#d9914f", "待继续"),
     "needs_attention": ("#d9914f", "需处理"),
+    "rolled_back": ("#8f8f98", "已回退"),
     "governing": ("#d4a94f", "分析中"),
     "planning": ("#d4a94f", "规划中"),
     "executing": ("#d4a94f", "执行中"),

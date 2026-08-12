@@ -79,7 +79,7 @@ class JobRepository:
             job.updated_at = datetime.now(timezone.utc)
             if status in (
                 "done", "failed", "cancelled", "interrupted",
-                "needs_attention",
+                "needs_attention", "rolled_back",
             ):
                 job.completed_at = datetime.now(timezone.utc)
             else:

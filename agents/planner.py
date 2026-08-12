@@ -21,7 +21,8 @@ Rules:
 4. Each task must specify allowed file paths
 5. Do NOT suggest modifying protected paths
 6. Keep tasks small and focused — one task should do one thing
-7. Maximum 10 tasks per plan
+7. Maximum 18 tasks per plan. A complex feature should use the available task
+   count instead of hiding many subsystems inside one oversized Worker task.
 8. ALL file paths MUST be relative to project_root. NEVER output absolute paths.
    Correct: "index.html", "src/main.py"
    WRONG: "/Users/xxx/project/index.html", "C:\\Users\\xxx\\..."
@@ -60,6 +61,19 @@ Rules:
     Do not label such work coding and do not require a file change. If the user also
     requests a repair, implementation, or saved report artifact, keep the relevant
     task as coding (or split analysis then coding when that is genuinely useful).
+23. Build a coverage map before answering: every explicit user requirement and
+    acceptance criterion must belong to at least one task. Do not silently omit
+    visual, interaction, state, compatibility, error-path, or restart behavior.
+24. One coding task should normally cover one independently verifiable feature,
+    component, scene, workflow state, or repair. Split different pages/scenes,
+    game systems, persistence, UI wiring, and platform compatibility into separate
+    tasks even when they share files; add a final integration/testing task.
+25. Never use an umbrella task such as "implement the remaining systems", "finish
+    zones 1-8", or "complete A/B/C/D". A task naming three or more substantial
+    subsystems, scenes, regions, or user-visible behaviors must be decomposed.
+26. Keep prerequisite discovery focused, then let each implementation task state
+    its exact inputs, outputs, and deterministic acceptance evidence. The plan is
+    complete only when the union of tasks fully satisfies the user's request.
 
 Output ONLY valid JSON with this structure:
 {

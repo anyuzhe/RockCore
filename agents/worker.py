@@ -245,7 +245,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "\n\nThis is a focused continuation after an earlier attempt. "
                 "Keep existing useful changes, avoid repeating broad exploration, "
                 "and finish the task now.\nRecovery guidance:\n"
-                + recovery_context[:4000]
+                + recovery_context[:12000]
             )
         runtime_tools = getattr(self.tool_broker, "runtime_tools", None)
         if runtime_tools is not None:
@@ -1007,6 +1007,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         "args": args,
                         "result_status": result.get("status", "error"),
                         "duration_ms": int(result.get("duration_ms") or 0),
+                        "source_version": str(result.get("source_version") or ""),
+                        "result_summary": json.dumps(
+                            result, ensure_ascii=False, default=str
+                        )[:1200],
                     })
 
                     # Format result for the model

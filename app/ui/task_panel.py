@@ -244,6 +244,7 @@ class TaskPanel(QWidget):
 
     followup_requested = pyqtSignal(dict)
     attention_resume_requested = pyqtSignal(dict)
+    rollback_requested = pyqtSignal(dict)
     report_requested = pyqtSignal(dict)
 
     STAGES = (
@@ -304,6 +305,14 @@ class TaskPanel(QWidget):
         self.followup_btn.setEnabled(False)
         self.followup_btn.clicked.connect(self._request_followup)
         header_layout.addWidget(self.followup_btn)
+        self.rollback_btn = QPushButton("回退此需求")
+        self.rollback_btn.setObjectName("quietButton")
+        self.rollback_btn.setToolTip(
+            "安全撤销这次需求产生的代码变更，保留执行记录和后续需求"
+        )
+        self.rollback_btn.setVisible(False)
+        self.rollback_btn.clicked.connect(self._request_rollback)
+        header_layout.addWidget(self.rollback_btn)
         self.report_btn = QPushButton("查看报告")
         self.report_btn.setObjectName("quietButton")
         self.report_btn.setToolTip("打开包含完整执行过程的 PDF 任务报告")
@@ -847,6 +856,7 @@ class TaskPanel(QWidget):
             generating=bool(job.get("report_generating")),
             available=status in {
                 "done", "failed", "cancelled", "interrupted", "needs_attention",
+                "rolled_back",
             },
         )
         self.user_output.setText(request)
@@ -919,7 +929,8 @@ class TaskPanel(QWidget):
         )
 
         if fast_path or status in {
-            "done", "failed", "cancelled", "interrupted", "needs_attention"
+            "done", "failed", "cancelled", "interrupted", "needs_attention",
+            "rolled_back",
         }:
             if fast_path or not constitution:
                 self.stages["governor"].set_status("skipped")
@@ -951,6 +962,10 @@ class TaskPanel(QWidget):
             self.agent_summary.setText(f"需要你的处理：{reason}。{hint}")
         elif status == "cancelled":
             self.agent_summary.setText("执行已停止。当前结果仍然保留，可以从这里继续。")
+        elif status == "rolled_back":
+            self.agent_summary.setText(
+                "这次需求产生的代码变更已安全回退；需求记录和执行报告已保留。"
+            )
         else:
             self.agent_summary.setText("正在处理你的需求，步骤状态会在执行过程中实时更新。")
         if same_job:
@@ -1229,6 +1244,7 @@ class TaskPanel(QWidget):
         self._set_terminal_actions(status, self._current_job)
         if status in {
             "done", "failed", "cancelled", "interrupted", "needs_attention",
+            "rolled_back",
         }:
             self.set_report_state(
                 path=str(self._current_job.get("report_path") or ""),
@@ -1281,8 +1297,19 @@ class TaskPanel(QWidget):
             QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _request_followup(self):
+        if not self._current_job:
+            return
+        if self._current_job.get("status") in {
+            "interrupted", "needs_attention",
+        }:
+            self.followup_btn.setEnabled(False)
+            self.attention_resume_requested.emit(self._current_job)
+            return
+        self.followup_requested.emit(self._current_job)
+
+    def _request_rollback(self):
         if self._current_job:
-            self.followup_requested.emit(self._current_job)
+            self.rollback_requested.emit(self._current_job)
 
     def _request_report(self):
         if self._current_job:
@@ -1304,7 +1331,9 @@ class TaskPanel(QWidget):
     def _request_attention_resume(self):
         if (
             self._current_job
-            and self._current_job.get("status") == "needs_attention"
+            and self._current_job.get("status") in {
+                "needs_attention", "interrupted",
+            }
         ):
             self.attention_resume_btn.setEnabled(False)
             self.attention_resume_requested.emit(self._current_job)
@@ -1316,6 +1345,15 @@ class TaskPanel(QWidget):
         self.followup_btn.setEnabled(status in {
             "done", "failed", "cancelled", "interrupted"
         })
+        self.followup_btn.setToolTip(
+            "从保存的检查点立即继续同一个需求"
+            if status == "interrupted"
+            else "基于这次结果提出下一条需求"
+        )
+        self.rollback_btn.setVisible(status in {
+            "done", "failed", "cancelled", "interrupted", "needs_attention",
+        })
+        self.rollback_btn.setEnabled(status != "rolled_back")
         self.attention_card.setVisible(is_attention)
         self.attention_resume_btn.setEnabled(is_attention)
         if not is_attention:

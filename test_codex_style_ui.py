@@ -252,6 +252,28 @@ def test_needs_attention_has_distinct_checkpoint_resume_action():
     panel.close()
 
 
+def test_interrupted_continue_button_resumes_same_job_immediately():
+    _app()
+    panel = TaskPanel()
+    resumed = []
+    followed_up = []
+    panel.attention_resume_requested.connect(resumed.append)
+    panel.followup_requested.connect(followed_up.append)
+    panel.set_workflow({
+        "job_id": "JOB-INTERRUPTED",
+        "user_request": "完成游戏",
+        "status": "interrupted",
+        "created_at": "2026-08-12T01:00:00Z",
+    })
+
+    assert not panel.followup_btn.isHidden()
+    panel.followup_btn.click()
+
+    assert [item["job_id"] for item in resumed] == ["JOB-INTERRUPTED"]
+    assert followed_up == []
+    panel.close()
+
+
 def test_worker_stage_shows_direct_attention_reason_before_blocked_dependents():
     _app()
     panel = TaskPanel()

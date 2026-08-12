@@ -75,6 +75,9 @@ class ReviewerAgent:
         project_root = job.project.root_path if job.project else "."
         diff, changed_files = self._collect_job_changes(project_root, job.job_id)
         validation = self._validate_changed_files(project_root, changed_files)
+        workflow_context = str(
+            getattr(job, "_rockcore_review_context", "") or ""
+        )[:16000]
         chunks = self._split_diff(diff)
         reviews = []
         for index, chunk in enumerate(chunks, start=1):
@@ -89,6 +92,10 @@ Changed Files: {json.dumps(changed_files)}
 
 Deterministic validation of complete final files:
 {validation}
+
+Authoritative workflow context (constitution, plan coverage, task outcomes,
+tests, and recovery history):
+{workflow_context or "(not available)"}
 
 Git Diff Chunk: {index}/{len(chunks)}
 ```diff

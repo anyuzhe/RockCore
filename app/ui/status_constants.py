@@ -18,6 +18,7 @@ STATUS_STYLE = {
     "cancelled": {"icon": "×", "color": "#8f8f98", "text": "已停止"},
     "interrupted": {"icon": "!", "color": "#d9914f", "text": "待继续"},
     "needs_attention": {"icon": "!", "color": "#d9914f", "text": "需处理"},
+    "rolled_back": {"icon": "↩", "color": "#8f8f98", "text": "已回退"},
     "skipped": {"icon": "−", "color": "#8f8f98", "text": "已跳过"},
     "executing": {"icon": "●", "color": "#d4a94f", "text": "执行中"},
     "reviewing": {"icon": "●", "color": "#d4a94f", "text": "审核中"},

@@ -9,6 +9,7 @@ import tools.git_tools as git_module
 from orchestrator.merge_manager import MergeManager
 from orchestrator.engine import Engine
 from orchestrator.state_machine import JobState
+from git.repository import Repository
 from tools.git_tools import GitTools
 
 
@@ -66,6 +67,72 @@ def test_worktree_merge_requires_and_records_verified_commit(tmp_path):
     assert _git(project, "config", "--local", "--get", "user.name").stdout.strip()
     assert _git(project, "config", "--local", "--get", "user.email").stdout.strip()
     assert manager.active_count == 0
+
+
+def test_job_rollback_reverts_only_that_job_and_preserves_later_commit(tmp_path):
+    project = _initialize_project(tmp_path)
+    (project / "feature.txt").write_text("job output\n", encoding="utf-8")
+    assert _git(project, "add", "feature.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "AI JOB-ROLLBACK: T001 - feature",
+    ).returncode == 0
+    (project / "later.txt").write_text("keep me\n", encoding="utf-8")
+    assert _git(project, "add", "later.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "later independent work",
+    ).returncode == 0
+
+    result = Repository(str(project)).rollback_job("JOB-ROLLBACK")
+
+    assert result["status"] == "rolled_back"
+    assert not (project / "feature.txt").exists()
+    assert (project / "later.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert _git(project, "status", "--porcelain").stdout == ""
+
+
+def test_job_rollback_keeps_target_unchanged_when_later_edit_conflicts(tmp_path):
+    project = _initialize_project(tmp_path)
+    readme = project / "README.md"
+    readme.write_text("job version\n", encoding="utf-8")
+    assert _git(project, "add", "README.md").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "AI JOB-CONFLICT: T001 - change readme",
+    ).returncode == 0
+    readme.write_text("later version\n", encoding="utf-8")
+    assert _git(project, "add", "README.md").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "later overlapping work",
+    ).returncode == 0
+    before = _git(project, "rev-parse", "HEAD").stdout.strip()
+
+    result = Repository(str(project)).rollback_job("JOB-CONFLICT")
+
+    assert result["status"] == "failed"
+    assert readme.read_text(encoding="utf-8") == "later version\n"
+    assert _git(project, "rev-parse", "HEAD").stdout.strip() == before
+    assert _git(project, "status", "--porcelain").stdout == ""
+
+
+def test_job_rollback_preserves_uncommitted_unrelated_user_file(tmp_path):
+    project = _initialize_project(tmp_path)
+    (project / "feature.txt").write_text("job output\n", encoding="utf-8")
+    assert _git(project, "add", "feature.txt").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "AI JOB-DIRTY: T001 - feature",
+    ).returncode == 0
+    (project / "my-notes.txt").write_text("do not lose\n", encoding="utf-8")
+
+    result = Repository(str(project)).rollback_job("JOB-DIRTY")
+
+    assert result["status"] == "rolled_back"
+    assert not (project / "feature.txt").exists()
+    assert (project / "my-notes.txt").read_text(encoding="utf-8") == "do not lose\n"
+    assert "?? my-notes.txt" in _git(project, "status", "--porcelain").stdout
 
 
 def test_stale_task_branch_gets_a_unique_worktree_run_suffix(tmp_path):

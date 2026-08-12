@@ -352,6 +352,7 @@ class MainWindow(QMainWindow):
         self.task_panel.attention_resume_requested.connect(
             self._on_attention_resume_requested
         )
+        self.task_panel.rollback_requested.connect(self._on_rollback_requested)
         self.task_panel.report_requested.connect(self._on_report_requested)
 
         self.project_panel.project_selected.connect(self._on_project_selected)
@@ -466,14 +467,22 @@ class MainWindow(QMainWindow):
                     self.task_panel.set_workflow(
                         job_dict, constitution_dict, plan_dict, task_dicts, review_dicts
                     )
-                    if job.status == "needs_attention":
+                    if job.status in {"needs_attention", "interrupted"}:
                         self._followup_source_job_id = None
                         self.followup_source_label.setText(
-                            f"等待处理 {job.job_id}"
+                            (
+                                f"等待处理 {job.job_id}"
+                                if job.status == "needs_attention"
+                                else f"待继续 {job.job_id}"
+                            )
                         )
                         self.clear_followup_btn.setVisible(False)
                         self.input_text.setPlaceholderText(
-                            "请按上方提示处理，然后点击“已处理，继续完成任务”"
+                            (
+                                "请按上方提示处理，然后点击“已处理，继续完成任务”"
+                                if job.status == "needs_attention"
+                                else "点击右上角“继续此需求”，将从中断步骤直接继续"
+                            )
                         )
                     else:
                         self._followup_source_job_id = job.job_id
@@ -552,6 +561,58 @@ class MainWindow(QMainWindow):
                 self.project_panel.select_job(job_id)
                 self._sync_project_runtime_state()
                 self._update_send_state()
+
+    def _on_rollback_requested(self, data: dict):
+        """Confirm and reverse one Job's Git commits without exposing Git."""
+        job_id = str(data.get("job_id") or "")
+        if not job_id or not self.engine or not self._current_project:
+            return
+        project_data = dict(self._current_project)
+        project_key = self._project_key(project_data)
+        if project_key in self._running_jobs or project_key in self._starting_projects:
+            QMessageBox.information(
+                self, "项目正在执行",
+                "请等待这个项目的当前任务结束后再回退。",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "回退此需求",
+            "RockCore 将撤销这次需求产生的代码变更，但会保留"
+            "需求记录、执行报告和后续需求。\n\n确定继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.task_panel.rollback_btn.setEnabled(False)
+        self.status_label.setText(f"正在安全回退 {job_id}")
+        asyncio.ensure_future(
+            self._rollback_job_async(job_id, project_data)
+        )
+
+    async def _rollback_job_async(self, job_id: str, project_data: dict):
+        try:
+            result = await self.engine.rollback_job(
+                job_id, str(project_data.get("root_path") or "")
+            )
+            if result.get("status") != "rolled_back":
+                QMessageBox.warning(
+                    self, "无法回退",
+                    str(result.get("error") or "未能安全回退这次需求。"),
+                )
+            else:
+                QMessageBox.information(
+                    self, "已回退",
+                    "这次需求的代码变更已安全撤销，历史记录已保留。",
+                )
+        except Exception as error:
+            logger.exception("回退任务失败：%s", job_id)
+            QMessageBox.warning(self, "回退失败", str(error))
+        finally:
+            self._refresh_job_list()
+            self.project_panel.select_job(job_id)
+            self._capture_diff()
 
     def _on_report_requested(self, data: dict):
         """Open an existing report or generate one for a historical Job."""

@@ -540,7 +540,7 @@ class Engine:
         try:
             terminal = {
                 "done", "failed", "cancelled", "interrupted",
-                "needs_attention",
+                "needs_attention", "rolled_back",
             }
             for job in repos["job"].list_all():
                 if job.status in terminal:
@@ -1085,7 +1085,7 @@ class Engine:
                 await self._close_job_runtime(runtime)
 
     async def resume_attention_job(self, job_id: str, project_root: str):
-        """Resume one persisted needs-attention Job at its checkpoint."""
+        """Resume one persisted interrupted/needs-attention Job checkpoint."""
         project_key = str(Path(project_root).resolve())
         lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
         async with lock:
@@ -1106,6 +1106,52 @@ class Engine:
                     self.event_bus.reset_job(event_token)
                 self._runtime_context.reset(token)
                 await self._close_job_runtime(runtime)
+
+    async def rollback_job(self, job_id: str, project_root: str) -> dict:
+        """Reverse one terminal Job through Git without restarting its workflow."""
+        project_key = str(Path(project_root).resolve())
+        lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
+        async with lock:
+            if any(
+                runtime.project_root == project_key
+                for runtime in self._job_runtimes.values()
+            ):
+                return {
+                    "status": "failed",
+                    "error": "这个项目还有任务在运行，请等待完成后再回退。",
+                }
+            repos = self._get_repos()
+            try:
+                job = repos["job"].get_by_id(job_id)
+                if not job:
+                    return {"status": "failed", "error": f"Job not found: {job_id}"}
+                if job.status == "rolled_back":
+                    return {"status": "failed", "error": "这次需求已经回退。"}
+                await self.event_bus.publish("job_rollback_started", job_id=job_id)
+                result = await asyncio.to_thread(
+                    Repository(project_key).rollback_job, job_id
+                )
+                if result.get("status") != "rolled_back":
+                    await self.event_bus.publish(
+                        "job_rollback_failed", job_id=job_id,
+                        error=result.get("error", "Rollback failed"),
+                    )
+                    return result
+                repos["job"].update_status(job_id, "rolled_back")
+                repos["job"].clear_failure(job_id)
+                repos["job"].update_checkpoint(job_id, {
+                    **dict(job.last_checkpoint or {}),
+                    "rolled_back_at": datetime.now().astimezone().isoformat(),
+                    "rollback_commit": result.get("rollback_commit", ""),
+                })
+                await self.event_bus.publish(
+                    "job_rolled_back", job_id=job_id,
+                    rollback_commit=result.get("rollback_commit", ""),
+                    reverted_commits=result.get("commits", []),
+                )
+                return result
+            finally:
+                self._close_repos(repos)
 
     def _configure_job_runtime(self, job, project_root: str,
                                proj_config: ProjectAgentConfig) -> None:
@@ -1195,9 +1241,9 @@ class Engine:
             job = repos["job"].get_by_id(job_id)
             if not job:
                 raise ValueError(f"Job not found: {job_id}")
-            if job.status != "needs_attention":
+            if job.status not in {"needs_attention", "interrupted"}:
                 raise ValueError(
-                    f"Job {job_id} is not waiting for user action: {job.status}"
+                    f"Job {job_id} has no resumable checkpoint: {job.status}"
                 )
 
             self.state_machine.restore(job_id, JobState.WAITING_USER)
@@ -1913,14 +1959,19 @@ class Engine:
         preliminary_errors = self.policy_engine.check_task_plan(
             plan_data, {"protected_paths": protected_paths}
         )
+        preliminary_errors.extend(
+            self._plan_granularity_errors(plan_data, job.user_request)
+        )
         quality_errors = [
             error for error in preliminary_errors
-            if str(error).startswith("continuation_quality:")
+            if str(error).startswith((
+                "continuation_quality:", "granularity_quality:",
+            ))
         ]
         if planner and quality_errors:
             await self.event_bus.publish(
                 "plan_replanning", job_id=job.job_id,
-                reason="continuation_quality", errors=quality_errors,
+                reason="plan_quality", errors=quality_errors,
             )
             rejection = (
                 continuation_context
@@ -1929,6 +1980,8 @@ class Engine:
                 + "\nCreate a concrete continuation plan. Name the remaining "
                   "artifact/files, preserve completed work, and include a "
                   "deterministic acceptance command or a concrete file scope."
+                  " Split every task that combines three or more independent "
+                  "features/scenes/systems, and cover every user requirement."
             )
             revised = await planner.run(
                 job, constitution, continuation_context=rejection[:12000]
@@ -2110,6 +2163,46 @@ class Engine:
                 ):
                     selected.insert(0, "pdf")
             task_data["skills"] = selected
+
+    @staticmethod
+    def _plan_granularity_errors(plan_data: dict,
+                                 user_request: str = "") -> list[str]:
+        """Flag obvious umbrella tasks so Planner gets one focused replan."""
+        errors: list[str] = []
+        umbrella_markers = (
+            "remaining systems", "all remaining", "complete everything",
+            "implement all", "finish all", "所有剩余", "全部系统",
+            "完成全部", "实现所有", "其余全部",
+        )
+        range_pattern = re.compile(
+            r"(?:zone|level|scene|page|区域|关卡|场景|页面|阶段)\s*"
+            r"(\d{1,2})\s*[-–—~至]\s*(\d{1,2})",
+            re.IGNORECASE,
+        )
+        for task in list(plan_data.get("tasks") or []):
+            if str(task.get("type") or "coding") not in {"coding", "action"}:
+                continue
+            task_id = str(task.get("id") or "?")
+            text = " ".join((
+                str(task.get("title") or ""),
+                str(task.get("description") or ""),
+            ))
+            normalized = text.lower()
+            if any(marker in normalized for marker in umbrella_markers):
+                errors.append(
+                    f"granularity_quality:{task_id} is an umbrella task; "
+                    "split independent features into separately verifiable tasks"
+                )
+                continue
+            for match in range_pattern.finditer(text):
+                start, end = int(match.group(1)), int(match.group(2))
+                if abs(end - start) + 1 >= 3:
+                    errors.append(
+                        f"granularity_quality:{task_id} combines {match.group(0)}; "
+                        "split the regions/scenes into focused implementation tasks"
+                    )
+                    break
+        return errors
 
     @classmethod
     def _optimize_plan(cls, plan_data: dict, complexity: str = "normal"):
@@ -3040,6 +3133,20 @@ class Engine:
                 # The checkpoint was absent or incomplete. Continue this same
                 # task with focused context, rather than presenting it as a new
                 # plan step or rerunning completed upstream tasks.
+                if resumed_validation:
+                    t._rockcore_initial_recovery_context = (
+                        "A saved checkpoint artifact was validated before retry. "
+                        "Reuse the saved reads and edit only the concrete failing "
+                        "parts; do not scan the project again.\nValidation:\n"
+                        + str(
+                            resumed_validation.get("output")
+                            or resumed_validation.get("error") or ""
+                        )[:4000]
+                        + "\nSaved checkpoint evidence:\n"
+                        + self._worker_retry_evidence(
+                            dict(t.result_data or {})
+                        )
+                    )
                 result = await self._execute_single_task_with_escalation(
                     t, job, repos, task_worker, task_worktree_root,
                     baseline_snapshot=task_baseline,
@@ -3302,8 +3409,16 @@ class Engine:
                                 "failure below, preserve useful changes, and avoid "
                                 "repeating completed reads.\nValidation output:\n"
                                 + validation_detail[:2400]
+                                + "\nPrevious Worker evidence:\n"
+                                + str(getattr(
+                                    t, "_rockcore_retry_evidence", ""
+                                ))[:5000]
                             ),
                         )
+                        if isinstance(repair_result, dict):
+                            evidence = self._worker_retry_evidence(repair_result)
+                            if evidence:
+                                t._rockcore_retry_evidence = evidence
                         if (
                             not isinstance(repair_result, dict)
                             or repair_result.get("status") != "completed"
@@ -3891,7 +4006,12 @@ class Engine:
     ):
         """Retry one Worker; switch provider only for provider-level failures."""
         last_error = ""
-        repair_guidance = ""
+        repair_guidance = str(
+            getattr(task, "_rockcore_initial_recovery_context", "") or ""
+        )
+        retry_evidence = self._worker_retry_evidence(
+            dict(getattr(task, "result_data", None) or {})
+        )
         initial_turn_budget = getattr(worker, "max_turns", 16)
         document_profile = getattr(task, "_rockcore_document_profile", None)
         continuation_turn_budget = (
@@ -4015,11 +4135,24 @@ class Engine:
                         )
                     if repair_guidance:
                         recovery_context += "\nPlanner guidance:\n" + repair_guidance
+                    if retry_evidence:
+                        recovery_context += (
+                            "\nReusable evidence from the previous attempt "
+                            "(do not re-read these unchanged sources):\n"
+                            + retry_evidence
+                        )
+                elif repair_guidance:
+                    recovery_context = repair_guidance
                 result = await worker.run(
                     task,
                     project_root=worktree_root,
                     recovery_context=recovery_context,
                 )
+                if isinstance(result, dict):
+                    current_evidence = self._worker_retry_evidence(result)
+                    if current_evidence:
+                        retry_evidence = current_evidence
+                        task._rockcore_retry_evidence = current_evidence
                 if result and result.get("status") == "completed":
                     return {"status": "completed", "result": result}
 
@@ -4363,6 +4496,59 @@ class Engine:
 
         # Non-budget/model failures with no usable artifact remain failures.
         return {"status": "failed", "error": last_error}
+
+    @staticmethod
+    def _worker_retry_evidence(result: dict | None) -> str:
+        """Compact reusable file/search evidence for retries and continuations."""
+        if not isinstance(result, dict):
+            return ""
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            result = nested
+        rows: list[str] = []
+        stored_evidence = str(result.get("retry_evidence") or "").strip()
+        if stored_evidence:
+            rows.append(stored_evidence[:7000])
+        seen = set()
+        for call in list(result.get("tool_calls") or [])[-40:]:
+            if not isinstance(call, dict):
+                continue
+            name = str(call.get("tool") or call.get("name") or "")
+            args = call.get("args") or call.get("arguments") or {}
+            if not isinstance(args, dict):
+                args = {"value": str(args)}
+            signature = (
+                name,
+                json.dumps(args, ensure_ascii=False, sort_keys=True, default=str),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            if name not in {
+                "read_file", "search_code", "list_files", "read_pdf",
+                "git_diff", "git_status", "run_tests", "run_command",
+                "apply_patch", "write_file", "insert_before", "insert_after",
+            }:
+                continue
+            summary = str(call.get("result_summary") or "")[:700]
+            rows.append(
+                f"- {name}({signature[1][:800]}) -> "
+                f"{call.get('result_status', call.get('status', ''))}"
+                + (f"; {summary}" if summary else "")
+            )
+        progress = result.get("document_progress") or {}
+        if progress:
+            rows.append(
+                "- saved document progress: "
+                + json.dumps(progress, ensure_ascii=False, default=str)[:1200]
+            )
+        content = str(
+            result.get("content") or result.get("output")
+            or result.get("summary") or ""
+        ).strip()
+        if content:
+            rows.append("- previous conclusion: " + content[-1600:])
+        return "\n".join(rows[-18:])[:9000]
 
     @staticmethod
     def _is_budget_error(error: str) -> bool:
@@ -4833,6 +5019,22 @@ class Engine:
         if not emergency:
             return None
 
+        task._rockcore_recovery_context = json.dumps({
+            "job_request": getattr(job, "user_request", ""),
+            "task": {
+                "id": getattr(task, "task_id", ""),
+                "title": getattr(task, "title", ""),
+                "description": getattr(task, "description", ""),
+                "allowed_paths": getattr(task, "allowed_paths", []) or [],
+                "acceptance_command": getattr(task, "acceptance_command", ""),
+            },
+            "previous_validation_error": str(error)[:5000],
+            "saved_result": dict(getattr(task, "result_data", None) or {}),
+            "retry_evidence": str(
+                getattr(task, "_rockcore_retry_evidence", "") or ""
+            ),
+        }, ensure_ascii=False, default=str)[:16000]
+
         try:
             result = await emergency.run(
                 task,
@@ -4890,6 +5092,9 @@ class Engine:
                 }
             else:
                 try:
+                    job._rockcore_review_context = self._review_context(
+                        job, repos
+                    )
                     review_result = await reviewer.run(job)
                 except Exception as error:
                     logger.warning("Reviewer failed: %s", error)
@@ -5283,6 +5488,7 @@ class Engine:
         """Persist and publish a review failure with an actionable explanation."""
         if self._is_cancelled(job.job_id, job, repos):
             return
+
         if requires_user_action is None:
             requires_user_action = self._is_user_action_required(reason)
         terminal_status = "needs_attention" if requires_user_action else "failed"
@@ -5317,6 +5523,44 @@ class Engine:
             if requires_user_action else "review_repair_incomplete",
             repair_round=repair_round,
         )
+
+    @staticmethod
+    def _review_context(job, repos) -> str:
+        """Build the complete, bounded workflow record used by Reviewer."""
+        constitution = repos["constitution"].get_by_job(job.id)
+        plan = repos["plan"].get_by_job(job.id)
+        tasks = repos["task"].list_by_job(job.id)
+        payload = {
+            "original_request": job.user_request,
+            "risk_level": getattr(job, "risk_level", "medium"),
+            "constitution": ({
+                "goal": constitution.goal,
+                "constraints": constitution.constraints or [],
+                "acceptance_criteria": constitution.acceptance_criteria or [],
+                "protected_paths": constitution.protected_paths or [],
+                "risk": constitution.risk,
+            } if constitution else {}),
+            "plan_summary": plan.summary if plan else "",
+            "tasks": [],
+        }
+        for task in tasks:
+            test_runs = repos["test_run"].list_by_task(task.id)
+            payload["tasks"].append({
+                "id": task.task_id,
+                "title": task.title,
+                "description": task.description,
+                "status": task.status,
+                "allowed_paths": task.allowed_paths or [],
+                "acceptance_command": task.acceptance_command or "",
+                "result_summary": (task.result_summary or "")[:1600],
+                "failure_reason": (task.failure_reason or "")[:1200],
+                "tests": [{
+                    "command": test.command,
+                    "status": test.status,
+                    "output": (test.output or "")[-1600:],
+                } for test in test_runs[-4:]],
+            })
+        return json.dumps(payload, ensure_ascii=False, default=str)[:16000]
 
     @staticmethod
     def _update_latest_repair_round(repos, job_id: int, **updates):
@@ -5484,6 +5728,11 @@ class Engine:
         payload = json.loads(json.dumps(
             result or {}, ensure_ascii=False, default=str
         ))
+        retry_evidence = str(
+            getattr(task, "_rockcore_retry_evidence", "") or ""
+        ).strip()
+        if retry_evidence:
+            payload["retry_evidence"] = retry_evidence[:9000]
         summary = str(
             payload.get("output") or payload.get("content")
             or payload.get("reason") or error or status

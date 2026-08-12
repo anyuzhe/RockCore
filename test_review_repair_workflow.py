@@ -173,6 +173,64 @@ def test_rejected_review_is_replanned_executed_and_reviewed_again(tmp_path):
     asyncio.run(scenario())
 
 
+def test_interrupted_job_resumes_same_checkpoint_without_new_job(
+        tmp_path, monkeypatch):
+    async def scenario():
+        project_root = tmp_path / "interrupted-project"
+        project_root.mkdir()
+        engine = Engine(db_path=str(tmp_path / "interrupted.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Interrupted", str(project_root))
+            job = repos["job"].create(
+                "JOB-INTERRUPTED", project.id, "继续完成"
+            )
+            repos["constitution"].create(
+                job.id, "继续完成", [], ["验证通过"],
+                risk="medium", requires_final_review=False,
+            )
+            repos["plan"].create(job.id, "原计划", raw_output={"tasks": []})
+            done = repos["task"].create("T001", job.id, "已完成")
+            interrupted = repos["task"].create(
+                "T002", job.id, "中断步骤", dependencies=["T001"]
+            )
+            blocked = repos["task"].create(
+                "T003", job.id, "后续步骤", dependencies=["T002"]
+            )
+            repos["task"].update_status_by_pk(done.id, "done")
+            repos["task"].update_status_by_pk(interrupted.id, "interrupted")
+            repos["task"].update_status_by_pk(blocked.id, "blocked")
+            repos["job"].update_status(job.job_id, "interrupted")
+        finally:
+            repos["_session"].close()
+
+        calls = []
+
+        async def fake_execution(job, repos, _baseline, **kwargs):
+            calls.append(set(kwargs["task_ids"]))
+            for task in repos["task"].list_by_job(job.id):
+                if task.task_id in kwargs["task_ids"]:
+                    repos["task"].update_status_by_pk(task.id, "done")
+            engine.state_machine.transition(job.job_id, JobState.EXECUTING)
+            engine.state_machine.transition(job.job_id, JobState.TESTING)
+            return {"status": "completed"}
+
+        monkeypatch.setattr(engine, "_run_execution", fake_execution)
+        result = await engine.resume_attention_job(
+            "JOB-INTERRUPTED", str(project_root)
+        )
+        check = engine._get_repos()
+        try:
+            jobs = check["job"].list_by_project(project.id)
+            assert result["status"] == "done"
+            assert len(jobs) == 1
+            assert calls == [{"T002", "T003"}]
+        finally:
+            check["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_planner_explains_when_rejected_review_cannot_be_repaired(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

@@ -62,12 +62,19 @@ class EmergencyCoderAgent:
         effective_root = project_root or (
             project.root_path if project else "."
         )
+        recovery_context = str(
+            getattr(task, "_rockcore_recovery_context", "") or ""
+        )[:16000]
 
         context = f"""
 Task: {task.task_id} - {task.title}
 Description: {task.description}
 Previous Error: {previous_error}
 Project Root: {effective_root}
+
+Authoritative recovery context (constraints, prior reads/edits, validation,
+and the exact remaining requirement):
+{recovery_context or "(not available)"}
 
 The regular Worker failed on this task. Fix the issue.
 Read the relevant files, understand the error, and apply a fix.

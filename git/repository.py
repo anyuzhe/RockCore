@@ -276,6 +276,148 @@ class Repository:
         result = self._run("status", "--porcelain")
         return not bool(result.stdout.strip())
 
+    def job_commits(self, job_id: str) -> list[str]:
+        """Return task commits created for one RockCore Job, oldest first."""
+        result = self._run(
+            "log", "--reverse", "--format=%H", "--fixed-strings",
+            f"--grep=AI {job_id}:",
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def _discard_job_worktrees(self, job_id: str) -> list[str]:
+        """Delete isolated checkpoints owned by a Job after explicit rollback."""
+        prefix = f"ai/{str(job_id or '').strip().lower()}/"
+        listed = self._run("worktree", "list", "--porcelain")
+        blocks: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in listed.stdout.splitlines() + [""]:
+            if not line.strip():
+                if current:
+                    blocks.append(current)
+                    current = {}
+                continue
+            if line.startswith("worktree "):
+                current["path"] = line[9:].strip()
+            elif line.startswith("branch refs/heads/"):
+                current["branch"] = line[18:].strip()
+
+        removed = []
+        branches = set()
+        for item in blocks:
+            branch = item.get("branch", "")
+            path = item.get("path", "")
+            if not branch.startswith(prefix) or not path:
+                continue
+            result = self._run("worktree", "remove", "--force", path)
+            if result.returncode == 0:
+                removed.append(path)
+                branches.add(branch)
+        refs = self._run(
+            "for-each-ref", "--format=%(refname:short)",
+            f"refs/heads/{prefix}",
+        )
+        branches.update(
+            line.strip() for line in refs.stdout.splitlines() if line.strip()
+        )
+        for branch in sorted(branches):
+            self._run("branch", "-D", branch)
+        self._run("worktree", "prune")
+        return removed
+
+    def rollback_job(self, job_id: str) -> dict:
+        """Safely reverse a Job on a temporary branch, then merge the inverse.
+
+        The project branch is never hard-reset. Later commits remain intact and
+        conflicts are detected in the temporary worktree before the target is
+        touched.
+        """
+        if not self.is_repo():
+            state = self.ensure_initialized()
+            if state.get("status") == "failed":
+                return {
+                    "status": "failed",
+                    "error": state.get("error", "Git unavailable"),
+                }
+        if self.unmerged_files():
+            return {
+                "status": "failed",
+                "error": "项目正在进行内部合并，RockCore 暂时不能安全回退。",
+            }
+        if self._run("config", "user.name").returncode != 0:
+            self._run("config", "user.name", "RockCore")
+        if self._run("config", "user.email").returncode != 0:
+            self._run("config", "user.email", "rockcore@localhost")
+
+        commits = self.job_commits(job_id)
+        if not commits:
+            removed = self._discard_job_worktrees(job_id)
+            return {
+                "status": "rolled_back", "commits": [], "removed_worktrees": removed,
+                "message": "该需求没有已合并的代码变更，已清理其中断检查点。",
+            }
+
+        token = uuid.uuid4().hex[:10]
+        safe_job = re.sub(r"[^a-z0-9._-]+", "-", job_id.lower()).strip("-")
+        branch = f"ai/rollback/{safe_job}-{token}"
+        rollback_root = self.root_path / ".ai" / "recovery" / f"rollback-{token}"
+        rollback_root.parent.mkdir(parents=True, exist_ok=True)
+        added = self._run(
+            "worktree", "add", "-b", branch, str(rollback_root), "HEAD"
+        )
+        if added.returncode != 0:
+            return {
+                "status": "failed",
+                "error": added.stderr.strip() or "无法创建安全回退检查点。",
+            }
+
+        rollback_ready = False
+        try:
+            for commit_hash in reversed(commits):
+                result = run_process(
+                    ["git", "revert", "--no-edit", commit_hash],
+                    capture_output=True, text=True, cwd=rollback_root,
+                )
+                if result.returncode != 0:
+                    run_process(
+                        ["git", "revert", "--abort"],
+                        capture_output=True, text=True, cwd=rollback_root,
+                    )
+                    return {
+                        "status": "failed",
+                        "error": (
+                            "无法安全回退：这次需求与后续修改有重叠。"
+                            "RockCore 已保留现有代码，未做任何破坏性操作。"
+                        ),
+                        "detail": (result.stderr or result.stdout).strip()[:2000],
+                    }
+            rollback_ready = True
+        finally:
+            self._run("worktree", "remove", "--force", str(rollback_root))
+            if not rollback_ready:
+                self._run("branch", "-D", branch)
+
+        merged = self._run(
+            "merge", "--no-ff", "-m", f"RockCore rollback {job_id}", branch
+        )
+        if merged.returncode != 0:
+            self._run("merge", "--abort")
+            self._run("branch", "-D", branch)
+            return {
+                "status": "failed",
+                "error": "回退结果无法安全合入当前项目；现有代码已原样保留。",
+                "detail": (merged.stderr or merged.stdout).strip()[:2000],
+            }
+        self._run("branch", "-D", branch)
+        removed = self._discard_job_worktrees(job_id)
+        return {
+            "status": "rolled_back",
+            "commits": commits,
+            "rollback_commit": self.get_commit_hash(),
+            "removed_worktrees": removed,
+        }
+
     def unmerged_files(self) -> list[str]:
         """Return paths left in an unresolved Git merge."""
         result = self._run("diff", "--name-only", "--diff-filter=U")

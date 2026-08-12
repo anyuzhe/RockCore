@@ -20,7 +20,7 @@ from storage.models import Job
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = {
-    "done", "failed", "cancelled", "interrupted", "needs_attention",
+    "done", "failed", "cancelled", "interrupted", "needs_attention", "rolled_back",
 }
 _SENSITIVE_KEYS = {
     "api_key", "apikey", "authorization", "password", "passwd",
@@ -335,7 +335,8 @@ class JobReportService:
             "passed": "已通过", "pass": "已通过", "failed": "失败",
             "reject": "未通过", "rejected": "未通过", "blocked": "已阻塞",
             "cancelled": "已停止", "interrupted": "待继续",
-            "needs_attention": "需用户处理", "success": "成功",
+            "needs_attention": "需用户处理", "rolled_back": "已回退",
+            "success": "成功",
             "error": "错误", "skipped": "已跳过",
         }.get(str(value or ""), str(value or "-"))
 
@@ -679,6 +680,8 @@ class JobReportService:
             "job_done": "任务完成", "job_failed": "任务失败",
             "job_cancelled": "任务停止", "job_finished": "任务结束",
             "job_needs_attention": "等待用户处理", "model_chat": "模型调用",
+            "job_rolled_back": "需求已回退", "job_rollback_started": "开始回退",
+            "job_rollback_failed": "回退未完成",
             "phase_summary": "阶段摘要",
         }
         timeline_keys = (
