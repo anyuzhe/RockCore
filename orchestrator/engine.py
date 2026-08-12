@@ -1165,6 +1165,24 @@ class Engine:
                     changed = True
         return selected
 
+    @staticmethod
+    def _task_progress_layout(all_job_tasks: list, active_tasks: list,
+                              repair_round: int = 0) -> tuple[dict[str, int], int]:
+        """Map active tasks to stable positions in the original plan."""
+        progress_tasks = active_tasks
+        if not repair_round:
+            progress_tasks = [
+                task for task in all_job_tasks
+                if not re.match(r"^R\d+T", str(task.task_id or ""))
+            ]
+        return (
+            {
+                task.task_id: index
+                for index, task in enumerate(progress_tasks, 1)
+            },
+            len(progress_tasks),
+        )
+
     async def _resume_attention_pipeline(self, job_id: str,
                                          project_root: str):
         """Continue the same Job from its persisted phase and task worktrees."""
@@ -2668,6 +2686,12 @@ class Engine:
         )
 
         selected_task_ids = {task.task_id for task in all_tasks}
+        # Keep progress anchored to the original plan during a checkpoint
+        # continuation.  A subset such as T004-T010 must still be shown as
+        # steps 4-10 of 10, not renumbered to 1-7.
+        task_position_by_id, task_total = self._task_progress_layout(
+            all_job_tasks, all_tasks, repair_round
+        )
         task_dicts = []
         for t in all_tasks:
             task_dicts.append({
@@ -2687,10 +2711,6 @@ class Engine:
                 "_db_task": t,
             })
         task_data_by_id = {item["task_id"]: item for item in task_dicts}
-        task_position_by_id = {
-            item["task_id"]: index
-            for index, item in enumerate(task_dicts, 1)
-        }
         completed_task_results: dict[str, dict] = {}
 
         # Define runner for each task (with worktree isolation)
@@ -2839,7 +2859,7 @@ class Engine:
                     job_id=job.job_id,
                     task_id=task_id,
                     task_index=task_position_by_id.get(task_id, 1),
-                    task_total=len(task_dicts),
+                    task_total=task_total,
                     phase=phase,
                     tool=progress.get("tool", ""),
                     path=progress.get("path", ""),
@@ -2853,7 +2873,7 @@ class Engine:
                         job_id=job.job_id,
                         task_id=task_id,
                         task_index=task_position_by_id.get(task_id, 1),
-                        task_total=len(task_dicts),
+                        task_total=task_total,
                         phase=phase,
                         tool=progress.get("tool", ""),
                         path=progress.get("path", ""),
@@ -2999,7 +3019,7 @@ class Engine:
                 "task_running", job_id=job.job_id,
                 task_id=task_id, title=t.title,
                 task_index=task_position_by_id.get(task_id, 1),
-                task_total=len(task_dicts),
+                task_total=task_total,
                 task_type=t.task_type,
                 max_turns=task_worker.max_turns,
                 exploration_limit=task_worker.max_exploration_turns,
@@ -3008,11 +3028,22 @@ class Engine:
                 skills=t.skills or [],
             )
 
-            # L0-L3: Attempt with escalation
-            result = await self._execute_single_task_with_escalation(
-                t, job, repos, task_worker, task_worktree_root,
-                baseline_snapshot=task_baseline,
+            # A preserved continuation may already contain everything the task
+            # needed before an external stop (for example provider balance).
+            # Validate that artifact first; do not restart the model merely to
+            # rediscover or rewrite existing checkpoint files.
+            result, resumed_validation = await self._validate_resumed_artifact(
+                t, job, repos, task_worktree_root, task_baseline, resumed_paths,
             )
+
+            if result is None:
+                # The checkpoint was absent or incomplete. Continue this same
+                # task with focused context, rather than presenting it as a new
+                # plan step or rerunning completed upstream tasks.
+                result = await self._execute_single_task_with_escalation(
+                    t, job, repos, task_worker, task_worktree_root,
+                    baseline_snapshot=task_baseline,
+                )
             integration_result = None
             runtime_relocation: list[dict] = []
             if runtime_broker and hasattr(
@@ -3099,6 +3130,7 @@ class Engine:
                 recovered_for_validation = (
                     result.get("status") == "pending_validation"
                 )
+                recovered_from_checkpoint = bool(result.get("resumed_artifact"))
                 # Coding tasks must edit files. Read-only report tasks instead
                 # succeed when they return a substantive report.
                 has_file_changes = await self._check_file_changes(
@@ -3204,8 +3236,14 @@ class Engine:
                     )
 
                 # Run acceptance test BEFORE marking done
-                test_passed = True
-                if t.acceptance_command:
+                test_result = resumed_validation
+                test_passed = bool(
+                    resumed_validation
+                    and resumed_validation.get("status") == "passed"
+                ) if recovered_from_checkpoint else True
+                if recovered_from_checkpoint:
+                    pass
+                elif t.acceptance_command:
                     test_result = await self.test_manager.run_tests(
                         t, repos, self.event_bus,
                         baseline_snapshot=task_baseline,
@@ -3463,7 +3501,12 @@ class Engine:
                         "cleanup": runtime_cleanup,
                         "relocated_intermediates": runtime_relocation,
                     }
-                    if recovered_for_validation:
+                    if recovered_from_checkpoint:
+                        result_payload["resumed_from_checkpoint"] = True
+                        result_payload["completion_note"] = (
+                            "已复用中断前的任务产物并通过确定性验收，未重复调用模型"
+                        )
+                    elif recovered_for_validation:
                         result_payload["recovered_from_budget"] = True
                         result_payload["completion_note"] = (
                             "模型预算在收尾阶段耗尽；现有产物已通过确定性验收"
@@ -3805,6 +3848,42 @@ class Engine:
             allowed_paths=refined_paths,
             paths_changed=refined_paths != current_paths,
         )
+
+    async def _validate_resumed_artifact(
+        self, task, job, repos, project_root: str,
+        baseline_snapshot: dict, resumed_paths: list[str],
+    ) -> tuple[dict | None, dict | None]:
+        """Accept a preserved checkpoint without another model call when valid."""
+        if not resumed_paths or task.task_type not in {"coding", "testing"}:
+            return None, None
+        await self.event_bus.publish(
+            "task_pending_validation",
+            job_id=job.job_id,
+            task_id=task.task_id,
+            reason="已恢复原任务产物，先验收后决定是否继续调用模型",
+            resumed_files=resumed_paths,
+        )
+        if task.acceptance_command:
+            validation = await self.test_manager.run_tests(
+                task, repos, self.event_bus,
+                baseline_snapshot=baseline_snapshot,
+                project_root=project_root,
+            )
+        else:
+            validation = await self.test_manager.validate_project(
+                task, repos, self.event_bus,
+                baseline_snapshot=baseline_snapshot,
+                project_root=project_root,
+            )
+        if validation.get("status") != "passed":
+            return None, validation
+        return ({
+            "status": "pending_validation",
+            "error": "恢复的任务产物已通过确定性验收",
+            "failure_stage": "checkpoint_artifact_validation",
+            "pending_event_published": True,
+            "resumed_artifact": True,
+        }, validation)
 
     async def _execute_single_task_with_escalation(
         self, task, job, repos, worker, worktree_root,

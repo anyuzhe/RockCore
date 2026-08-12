@@ -1136,6 +1136,15 @@ class TaskPanel(QWidget):
         )
         if not task_index and task is not None:
             task_index = self._tasks.index(task) + 1
+        # Live events from older checkpoint runs may describe the remaining
+        # subset as 1/N. The complete task list loaded by the UI is authoritative
+        # for user-facing original-plan progress.
+        if task is not None:
+            original_index = self._tasks.index(task) + 1
+            original_total = len(self._tasks)
+            if task_total and task_total < original_total:
+                task_index = original_index
+                task_total = original_total
         payload = {
             **previous,
             "task_id": task_id,

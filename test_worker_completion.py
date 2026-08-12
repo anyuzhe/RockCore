@@ -1348,6 +1348,46 @@ def test_existing_artifact_is_validated_before_provider_failure_is_terminal(
     asyncio.run(scenario())
 
 
+def test_valid_resumed_artifact_skips_another_model_execution(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Resume", str(tmp_path))
+            job = repos["job"].create("JOB-RESUMED-ARTIFACT", project.id, "继续")
+            task = repos["task"].create(
+                "T004", job.id, "继续玩家系统", task_type="coding",
+                allowed_paths=["game.js"],
+            )
+            (tmp_path / "game.js").write_text("const resumed = true;\n")
+            result, validation = await engine._validate_resumed_artifact(
+                task, job, repos, str(tmp_path), {}, ["game.js"],
+            )
+
+            assert result["status"] == "pending_validation"
+            assert result["resumed_artifact"] is True
+            assert validation["status"] == "passed"
+            event = engine.event_bus.get_history("task_pending_validation")[-1]
+            assert event["data"]["resumed_files"] == ["game.js"]
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
+def test_resume_progress_layout_uses_original_plan_positions():
+    tasks = [
+        SimpleNamespace(task_id=f"T{index:03d}")
+        for index in range(1, 11)
+    ]
+
+    positions, total = Engine._task_progress_layout(tasks, tasks[3:], 0)
+
+    assert positions["T004"] == 4
+    assert positions["T010"] == 10
+    assert total == 10
+
+
 def test_worker_uses_real_token_ratio_as_soft_pressure_not_a_read_ban():
     class Cost:
         @staticmethod

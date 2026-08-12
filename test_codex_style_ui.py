@@ -482,6 +482,34 @@ def test_worker_progress_card_explains_live_step_and_changes():
     panel.close()
 
 
+def test_checkpoint_progress_keeps_original_plan_step_numbers():
+    _app()
+    panel = TaskPanel()
+    tasks = [
+        {
+            "task_id": f"T{index:03d}",
+            "title": f"步骤 {index}",
+            "status": "done" if index < 4 else (
+                "running" if index == 4 else "pending"
+            ),
+        }
+        for index in range(1, 11)
+    ]
+    panel.set_workflow({
+        "job_id": "JOB-RESUME-PROGRESS",
+        "user_request": "继续完成",
+        "status": "executing",
+        "created_at": "2026-08-12T10:00:00Z",
+    }, tasks=tasks)
+
+    # Simulate the old subset-relative event emitted while resuming T004-T010.
+    panel.set_worker_progress("T004", task_index=1, task_total=7)
+
+    assert "第 4/10 步" in panel.worker_progress_label.text()
+    assert "第 1/7 步" not in panel.worker_progress_label.text()
+    panel.close()
+
+
 def test_successful_model_fallback_and_terminal_statuses_are_explicit():
     _app()
     window = MainWindow(None)

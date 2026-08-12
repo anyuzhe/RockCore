@@ -264,6 +264,10 @@ def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
                 "job_id": job.job_id,
                 "task_ids": set(kwargs["task_ids"]),
                 "resume_source_job_id": kwargs["resume_source_job_id"],
+                "task_statuses": {
+                    task.task_id: task.status
+                    for task in repos["task"].list_by_job(job.id)
+                },
             })
             for task in repos["task"].list_by_job(job.id):
                 if task.task_id in kwargs["task_ids"]:
@@ -289,6 +293,9 @@ def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
                 "job_id": "JOB-RESUME",
                 "task_ids": {"T002", "T003"},
                 "resume_source_job_id": "JOB-RESUME",
+                "task_statuses": {
+                    "T001": "done", "T002": "pending", "T003": "pending",
+                },
             }]
             assert [(task.task_id, task.status) for task in tasks] == [
                 ("T001", "done"), ("T002", "done"), ("T003", "done")
