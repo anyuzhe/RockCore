@@ -235,7 +235,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         no_changes_declared = False
         exploration_calls = 0
         has_written = False
-        seen_exploration_calls: set[tuple[str, str, bool]] = set()
+        exploration_call_counts: dict[tuple[str, str, bool], int] = {}
         progress_warning_sent = False
         finish_warning_sent = False
         token_compaction_sent = False
@@ -690,10 +690,16 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             args, sort_keys=True, ensure_ascii=False, default=str
                         ),
                     )
+                    prior_exploration_calls = exploration_call_counts.get(
+                        exploration_signature, 0
+                    )
                     repeated_exploration = (
                         task.task_type in {"coding", "analysis", "review", "action"}
                         and is_exploration
-                        and exploration_signature in seen_exploration_calls
+                        # Re-reading a file can be legitimate after truncated
+                        # output or a concurrent edit. Treat it as a strategy
+                        # smell first and reject only after a generous allowance.
+                        and prior_exploration_calls >= 6
                     )
                     artifact_manifest = dict(
                         getattr(task, "_rockcore_artifact_manifest", None) or {}
@@ -748,11 +754,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         result = {
                             "status": "rejected",
                             "error": (
-                                "This exact read/search was already completed in the "
-                                "current phase. Use the existing result and change strategy."
+                                "This exact read/search has already been completed "
+                                "six times in the current phase. Reuse the existing "
+                                "results or change the read range/search strategy."
                             ),
                         }
-                        exploration_blocked = True
                     elif (
                         is_mutating_mcp
                         and external_signature in external_action_signatures
@@ -850,8 +856,18 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             )
                         if is_exploration:
                             exploration_calls += 1
-                            seen_exploration_calls.add(exploration_signature)
+                            exploration_call_counts[exploration_signature] = (
+                                prior_exploration_calls + 1
+                            )
                             meaningful_progress = True
+                            if prior_exploration_calls + 1 == 4:
+                                batch_notices.append(
+                                    "The same read/search has now been executed four "
+                                    "times. This is still allowed, but reuse the "
+                                    "existing result unless a changed file, different "
+                                    "range, or truncated output makes another read "
+                                    "necessary."
+                                )
                             if (
                                 exploration_calls >= self.max_exploration_turns
                                 and not exploration_warning_sent
@@ -940,13 +956,14 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         ).lower()[:300]
                         repeated_errors[signature] = repeated_errors.get(signature, 0) + 1
                         count = repeated_errors[signature]
-                        if count == 2:
+                        if count == 3:
                             batch_notices.append(
-                                "The same tool failure occurred twice. Stop "
-                                "repeating this method and switch to a different "
-                                "built-in tool or strategy now."
+                                "The same tool strategy has failed three times. "
+                                "This is a strategy warning, not a provider failure: "
+                                "reuse existing evidence or choose a different "
+                                "built-in tool before retrying."
                             )
-                        elif count >= 3:
+                        elif count >= 6:
                             return self._failure(
                                 "REPEATED_TOOL_FAILURE: the same tool strategy "
                                 f"failed {count} times: {signature}",

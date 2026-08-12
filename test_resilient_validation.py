@@ -311,3 +311,72 @@ def test_failed_acceptance_gets_one_automatic_focused_repair(tmp_path):
             repos["_session"].close()
 
     asyncio.run(scenario())
+
+
+def test_emergency_runs_only_after_repeated_validation_repairs_fail(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    class BrokenWorker:
+        max_turns = 8
+        max_exploration_turns = 3
+        calls = 0
+
+        def scoped_to(self, root):
+            self.root = Path(root)
+            return self
+
+        async def run(self, *_args, **_kwargs):
+            self.calls += 1
+            (self.root / "result.py").write_text(
+                "def broken(:\n", encoding="utf-8"
+            )
+            return {"status": "completed", "content": "written"}
+
+    class Emergency:
+        calls = 0
+
+        async def run(self, task, _project, **kwargs):
+            self.calls += 1
+            Path(kwargs["project_root"], "result.py").write_text(
+                "def ok():\n    return True\n", encoding="utf-8"
+            )
+            return {"status": "completed", "fix_success": True}
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        worker = BrokenWorker()
+        emergency = Emergency()
+        try:
+            project = repos["project"].create("Demo", str(project_root))
+            job = repos["job"].create(
+                "JOB-VALIDATION-EMERGENCY", project.id, "write code"
+            )
+            task = repos["task"].create(
+                "T001", job.id, "Write code", task_type="coding",
+                allowed_paths=["result.py"],
+                acceptance_command="python -m py_compile result.py",
+            )
+            engine.register_agent("worker", worker)
+            engine.register_agent("emergency_coder", emergency)
+            engine.state_machine._states[job.job_id] = JobState.READY
+
+            result = await engine._run_execution(
+                job, repos,
+                job_baseline=engine.test_manager.capture_snapshot(project_root),
+            )
+
+            repos["_session"].refresh(task)
+            assert result["status"] == "completed"
+            assert task.status == "done"
+            assert worker.calls == 3
+            assert emergency.calls == 1
+            assert len(engine.event_bus.get_history(
+                "task_validation_repairing"
+            )) == 2
+            assert len(engine.event_bus.get_history("task_escalating")) == 1
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())

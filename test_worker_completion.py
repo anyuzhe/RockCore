@@ -509,6 +509,42 @@ def test_pdf_worker_rejects_custom_generator_and_stops_repeated_strategy():
     asyncio.run(scenario())
 
 
+def test_identical_reads_are_allowed_six_times_before_strategy_rejection():
+    class Router:
+        calls = 0
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls <= 6:
+                return {
+                    "content": "Re-reading a previously truncated file.",
+                    "tool_calls": [{
+                        "id": f"read-{self.calls}",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "game.js"}),
+                        },
+                    }],
+                    "usage": {},
+                }
+            return {
+                "content": "Review report based on the completed reads.",
+                "tool_calls": [],
+                "usage": {},
+            }
+
+    async def scenario():
+        broker = _RecordingBroker()
+        result = await WorkerAgent(
+            Router(), broker, max_turns=8, max_exploration_turns=48
+        ).run(_task("analysis"), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed == ["read_file"] * 6
+
+    asyncio.run(scenario())
+
+
 def test_worker_continues_after_a_tool_exception():
     async def scenario():
         router = _ToolExceptionRouter()
@@ -621,7 +657,7 @@ class _TransientProviderWorker:
         })
         if kwargs.get("provider_override") == "kimi":
             return {"status": "completed", "content": "Recovered with Kimi."}
-        return {"status": "failed", "error": "Connection error"}
+        return {"status": "failed", "error": "Provider request timed out after 540s"}
 
 
 class _ThrowingProviderWorker:
@@ -659,12 +695,14 @@ def test_max_turn_failures_without_progress_are_terminal_after_retries(tmp_path)
         assert len(worker.calls) == 3
         assert all(call.get("provider_override") is None for call in worker.calls)
         assert "attempt 1 failed" in worker.calls[1]["recovery_context"]
-        assert "final Worker attempt" in worker.calls[2]["recovery_context"]
+        assert "final focused Worker strategy attempt" in (
+            worker.calls[2]["recovery_context"]
+        )
 
     asyncio.run(scenario())
 
 
-def test_emergency_runs_after_three_primary_worker_failures(tmp_path):
+def test_primary_worker_strategy_failures_do_not_trigger_emergency(tmp_path):
     class FailedWorker:
         def __init__(self):
             self.calls = 0
@@ -700,16 +738,16 @@ def test_emergency_runs_after_three_primary_worker_failures(tmp_path):
             str(tmp_path),
         )
 
-        assert result["status"] == "completed"
+        assert result["status"] == "failed"
         assert worker.calls == 3
-        assert emergency.calls == 1
-        assert emergency.project_roots == [str(tmp_path)]
-        assert len(engine.event_bus.get_history("task_escalating")) == 1
+        assert emergency.calls == 0
+        assert emergency.project_roots == []
+        assert not engine.event_bus.get_history("task_escalating")
 
     asyncio.run(scenario())
 
 
-def test_connection_failure_switches_to_kimi_immediately(tmp_path):
+def test_timeout_switches_to_kimi_immediately(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
         worker = _TransientProviderWorker()
@@ -752,10 +790,47 @@ def test_thrown_provider_failure_skips_same_provider_retries(tmp_path):
     asyncio.run(scenario())
 
 
+def test_repeated_tool_strategy_stays_on_primary_and_validates_artifact(tmp_path):
+    class StalledWorker:
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, *_args, **kwargs):
+            self.calls.append(kwargs.get("provider_override"))
+            return {
+                "status": "failed",
+                "error": "REPEATED_TOOL_FAILURE: identical read rejected six times",
+            }
+
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        engine.model_router._providers["kimi"] = object()
+        engine._check_file_changes = lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=True
+        )
+        worker = StalledWorker()
+
+        result = await engine._execute_single_task_with_escalation(
+            _task(), SimpleNamespace(job_id="JOB-STALL", project=None),
+            {}, worker, str(tmp_path),
+        )
+
+        assert result["status"] == "pending_validation"
+        assert result["failure_stage"] == "strategy_stall_validation"
+        assert worker.calls == [None]
+        assert not engine.event_bus.get_history("task_provider_fallback")
+        assert not engine.event_bus.get_history("task_escalating")
+
+    asyncio.run(scenario())
+
+
 def test_transient_provider_error_is_classified_for_fallback():
-    assert Engine._is_provider_unavailable("Connection error")
-    assert Engine._is_provider_unavailable("HTTP 503 Service Unavailable")
     assert Engine._is_provider_unavailable("Request timed out")
+    assert Engine._is_provider_unavailable("Error code: 429 - overloaded")
+    assert Engine._is_provider_unavailable("Error code: 404 - model not found")
+    assert Engine._is_provider_unavailable("Error code: 401 - invalid API key")
+    assert not Engine._is_provider_unavailable("Connection error")
+    assert not Engine._is_provider_unavailable("HTTP 503 Service Unavailable")
 
 
 def test_tool_choice_capability_error_is_not_provider_unavailability():

@@ -2902,27 +2902,46 @@ class Engine:
                         or (test_result or {}).get("error")
                         or "Validation failed"
                     )
-                    await self.event_bus.publish(
-                        "task_validation_repairing",
-                        job_id=job.job_id,
-                        task_id=task_id,
-                        validation=validation_detail[:1200],
-                    )
-                    repair_result = await task_worker.run(
-                        t,
-                        project_root=task_worktree_root,
-                        recovery_context=(
-                            "Deterministic acceptance validation failed after "
-                            "the implementation. Repair only the concrete failure "
-                            "below, preserve useful changes, and rerun a focused "
-                            "check before finishing.\nValidation output:\n"
-                            + validation_detail[:2400]
-                        ),
-                    )
-                    if (
-                        isinstance(repair_result, dict)
-                        and repair_result.get("status") == "completed"
+                    # Keep focused repairs on the configured Worker. Emergency
+                    # is a quality escalation only after two repair/validation
+                    # rounds have both failed; it is never a response to repeated
+                    # reads or other strategy-level stalls.
+                    validation_repair_attempts = max(2, min(3, int(getattr(
+                        t, "_rockcore_emergency_after_failures", 3
+                    )) - 1))
+                    for validation_attempt in range(
+                        1, validation_repair_attempts + 1
                     ):
+                        await self.event_bus.publish(
+                            "task_validation_repairing",
+                            job_id=job.job_id,
+                            task_id=task_id,
+                            validation=validation_detail[:1200],
+                            attempt=validation_attempt,
+                            max_attempts=validation_repair_attempts,
+                        )
+                        repair_result = await task_worker.run(
+                            t,
+                            project_root=task_worktree_root,
+                            recovery_context=(
+                                "Deterministic acceptance validation failed after "
+                                "the implementation. Repair only the concrete "
+                                "failure below, preserve useful changes, and avoid "
+                                "repeating completed reads.\nValidation output:\n"
+                                + validation_detail[:2400]
+                            ),
+                        )
+                        if (
+                            not isinstance(repair_result, dict)
+                            or repair_result.get("status") != "completed"
+                        ):
+                            validation_detail = str(
+                                (repair_result or {}).get("error")
+                                if isinstance(repair_result, dict)
+                                else "Focused validation repair did not complete"
+                            )
+                            continue
+
                         result = {"status": "completed", "result": repair_result}
                         worker_result = repair_result
                         task_output = str(
@@ -2949,6 +2968,47 @@ class Engine:
                                 project_root=task_worktree_root,
                             )
                         test_passed = test_result.get("status") == "passed"
+                        if test_passed:
+                            break
+                        validation_detail = str(
+                            test_result.get("output")
+                            or test_result.get("error")
+                            or "Validation failed after focused repair"
+                        )
+
+                    if (
+                        not test_passed
+                        and bool(getattr(t, "_rockcore_emergency_enabled", True))
+                        and self.get_agent("emergency_coder")
+                    ):
+                        await self.event_bus.publish(
+                            "task_escalating", job_id=job.job_id,
+                            task_id=task_id, reason="validation_repair_exhausted",
+                            validation=validation_detail[:1200],
+                        )
+                        emergency_result = await self._escalate_to_emergency(
+                            t, job, validation_detail, task_worktree_root
+                        )
+                        if emergency_result and emergency_result.get("fix_success"):
+                            has_file_changes = await self._check_file_changes(
+                                task_worktree_root, task_baseline
+                            )
+                            task_changes = self.test_manager.snapshot_diff(
+                                task_worktree_root, task_baseline
+                            )
+                            if t.acceptance_command:
+                                test_result = await self.test_manager.run_tests(
+                                    t, repos, self.event_bus,
+                                    baseline_snapshot=task_baseline,
+                                    project_root=task_worktree_root,
+                                )
+                            else:
+                                test_result = await self.test_manager.validate_project(
+                                    t, repos, self.event_bus,
+                                    baseline_snapshot=task_baseline,
+                                    project_root=task_worktree_root,
+                                )
+                            test_passed = test_result.get("status") == "passed"
 
                 if test_passed:
                     # Merge worktree back
@@ -3428,8 +3488,7 @@ class Engine:
         self, task, job, repos, worker, worktree_root,
         baseline_snapshot: dict | None = None,
     ):
-        """Retry the primary Worker, then escalate once to Emergency."""
-        escalation_count = 0
+        """Retry one Worker; switch provider only for provider-level failures."""
         last_error = ""
         repair_guidance = ""
         initial_turn_budget = getattr(worker, "max_turns", 16)
@@ -3477,7 +3536,12 @@ class Engine:
                 self._enter_document_finalization_mode(task, worker)
             return True
 
-        async def pending_validation_or_failure(error: str) -> dict:
+        async def pending_validation_or_failure(
+            error: str,
+            *,
+            failure_stage: str = "budget_finalization",
+            budget_exhausted: bool = True,
+        ) -> dict:
             if await self._check_file_changes(
                 worktree_root, baseline_snapshot
             ):
@@ -3490,8 +3554,8 @@ class Engine:
                 return {
                     "status": "pending_validation",
                     "error": error,
-                    "failure_stage": "budget_finalization",
-                    "budget_exhausted": True,
+                    "failure_stage": failure_stage,
+                    "budget_exhausted": budget_exhausted,
                     "pending_event_published": True,
                     "document_progress": getattr(
                         task, "_rockcore_document_progress", {}
@@ -3545,7 +3609,7 @@ class Engine:
                     )
                     if attempt >= 3:
                         recovery_context += (
-                            " This is the final Worker attempt before Emergency. "
+                            " This is the final focused Worker strategy attempt. "
                             "Re-read the acceptance command and relevant final files."
                         )
                     if repair_guidance:
@@ -3565,6 +3629,16 @@ class Engine:
                             "status": "needs_user_action",
                             "error": last_error,
                             "failure_stage": "user_input_required",
+                            "checkpoint": {"reason": last_error},
+                        }
+                    if (
+                        self._is_user_action_required(last_error)
+                        and not self._is_provider_unavailable(last_error)
+                    ):
+                        return {
+                            "status": "needs_user_action",
+                            "error": last_error,
+                            "failure_stage": "user_action_required",
                             "checkpoint": {"reason": last_error},
                         }
                     if self._is_budget_error(last_error):
@@ -3600,10 +3674,25 @@ class Engine:
                         break
                     if self._is_stalled_worker_error(last_error):
                         logger.warning(
-                            "Task %s stalled; switching provider/strategy",
+                            "Task %s hit a strategy stall; keeping the same "
+                            "provider and validating any existing artifact",
                             task.task_id,
                         )
-                        break
+                        if await self._check_file_changes(
+                            worktree_root, baseline_snapshot
+                        ):
+                            return await pending_validation_or_failure(
+                                last_error,
+                                failure_stage="strategy_stall_validation",
+                                budget_exhausted=False,
+                            )
+                        repair_guidance = (
+                            "The previous attempt repeated an ineffective tool "
+                            "strategy. Keep the current provider. Reuse the "
+                            "existing read results, avoid broad exploration, and "
+                            "make the smallest concrete change required."
+                        )
+                        continue
                     if "ended without editing files" in last_error.lower():
                         logger.warning(
                             f"Task {task.task_id}: model ended before editing; "
@@ -3689,6 +3778,16 @@ class Engine:
                         "failure_stage": "user_input_required",
                         "checkpoint": {"reason": last_error},
                     }
+                if (
+                    self._is_user_action_required(last_error)
+                    and not self._is_provider_unavailable(last_error)
+                ):
+                    return {
+                        "status": "needs_user_action",
+                        "error": last_error,
+                        "failure_stage": "user_action_required",
+                        "checkpoint": {"reason": last_error},
+                    }
                 if self._is_budget_error(last_error):
                     if await extend_after_budget(last_error, attempt):
                         continue
@@ -3706,7 +3805,20 @@ class Engine:
                     )
                     break
                 if self._is_stalled_worker_error(last_error):
-                    break
+                    if await self._check_file_changes(
+                        worktree_root, baseline_snapshot
+                    ):
+                        return await pending_validation_or_failure(
+                            last_error,
+                            failure_stage="strategy_stall_validation",
+                            budget_exhausted=False,
+                        )
+                    repair_guidance = (
+                        "The previous attempt repeated an ineffective tool "
+                        "strategy. Keep the current provider and use a focused "
+                        "alternative without repeating completed reads."
+                    )
+                    continue
 
         if (
             "max turns" in last_error.lower()
@@ -3728,49 +3840,8 @@ class Engine:
                 ),
             }
 
-        model_configuration_terminal = self._is_model_configuration_error(
-            last_error
-        )
-        if (
-            self._is_provider_capability_error(last_error)
-            or self._is_provider_unavailable(last_error)
-            or self._is_stalled_worker_error(last_error)
-        ):
-            fallback = await self._run_worker_fallback(
-                worker, task, worktree_root, last_error
-            )
-            if fallback:
-                if fallback.get("status") == "completed":
-                    return fallback
-                model_configuration_terminal = bool(
-                    fallback.get("all_models_unavailable")
-                )
-                last_error = fallback.get("error", last_error)
-
-        if not bool(getattr(task, "_rockcore_auto_repair", True)):
-            return {"status": "failed", "error": last_error}
-
-        # The configured primary Worker failure threshold has been reached.
-        await self.event_bus.publish("task_repairing", job_id=job.job_id,
-                                      task_id=task.task_id, error=last_error,
-                                      attempts=primary_attempts)
-
-        # Emergency Coder: one quality-first attempt after the Worker threshold.
-        if (
-            bool(getattr(task, "_rockcore_emergency_enabled", True))
-            and escalation_count < 1
-        ):
-            escalation_count += 1
-            await self.event_bus.publish("task_escalating", job_id=job.job_id,
-                                          task_id=task.task_id)
-            emergency_result = await self._escalate_to_emergency(
-                task, job, last_error, worktree_root
-            )
-            if emergency_result and emergency_result.get("fix_success"):
-                return {"status": "completed", "result": emergency_result}
-
-        # Any useful artifact gets deterministic validation before RockCore can
-        # decide that a model/provider failure is terminal.
+        # Existing output is more trustworthy than a model's terminal wording.
+        # Validate it before changing provider or invoking another model.
         if await self._check_file_changes(worktree_root, baseline_snapshot):
             await self.event_bus.publish(
                 "task_pending_validation",
@@ -3787,6 +3858,52 @@ class Engine:
                     task, "_rockcore_document_progress", {}
                 ),
             }
+
+        model_configuration_terminal = self._is_model_configuration_error(last_error)
+        if (
+            self._is_provider_capability_error(last_error)
+            or self._is_provider_unavailable(last_error)
+        ):
+            fallback = await self._run_worker_fallback(
+                worker, task, worktree_root, last_error
+            )
+            if fallback:
+                if fallback.get("status") == "completed":
+                    return fallback
+                model_configuration_terminal = bool(
+                    fallback.get("all_models_unavailable")
+                )
+                last_error = fallback.get("error", last_error)
+
+            # A failed fallback may still have produced a valid artifact.
+            if await self._check_file_changes(
+                worktree_root, baseline_snapshot
+            ):
+                await self.event_bus.publish(
+                    "task_pending_validation",
+                    job_id=job.job_id,
+                    task_id=getattr(task, "task_id", ""),
+                    reason=last_error or "备用模型未正常结束，先验收现有产物",
+                )
+                return {
+                    "status": "pending_validation",
+                    "error": last_error,
+                    "failure_stage": "artifact_recovery",
+                    "pending_event_published": True,
+                    "document_progress": getattr(
+                        task, "_rockcore_document_progress", {}
+                    ),
+                }
+
+        if not bool(getattr(task, "_rockcore_auto_repair", True)):
+            return {"status": "failed", "error": last_error}
+
+        # The configured primary Worker strategy threshold has been reached.
+        # Emergency is deliberately not used here: it is reserved for code that
+        # repeatedly fails deterministic validation after focused repair.
+        await self.event_bus.publish("task_repairing", job_id=job.job_id,
+                                      task_id=task.task_id, error=last_error,
+                                      attempts=primary_attempts)
         if model_configuration_terminal:
             return {
                 "status": "failed",
@@ -4037,20 +4154,21 @@ class Engine:
 
     @staticmethod
     def _is_provider_unavailable(error: str) -> bool:
+        """Return true only for failures that justify changing providers.
+
+        Strategy/tool failures, generic server errors and malformed model output
+        stay on the configured provider. Automatic switching is reserved for a
+        timed-out request, throttling/overload, an unavailable model endpoint,
+        or authentication/permission failure.
+        """
         normalized = (error or "").lower()
         markers = (
-            "insufficient balance", "insufficient_balance", "error code: 402",
-            "status code: 402", "error code: 401", "status code: 401",
+            "error code: 401", "status code: 401",
             "error code: 403", "status code: 403", "invalid api key",
-            "authentication", "quota exceeded", "billing",
-            "connection error", "connection reset", "network error",
+            "authentication", "authorization", "missing credentials",
+            "credentials were not found", "credentials unavailable",
             "timed out", "timeout", "rate limit", "too many requests",
-            "temporarily unavailable", "service unavailable", "server error",
-            "status code: 500", "status code: 502", "status code: 503",
-            "status code: 504", "error code: 500", "error code: 502",
-            "error code: 503", "error code: 504",
-            "invalid response", "malformed response", "expected a json object",
-            "missing credentials", "credentials were not found", "api key",
+            "error code: 429", "status code: 429", "overloaded",
             "not found the model", "model not found",
             "resource_not_found_error", "permission denied",
             "error code: 404", "status code: 404",
