@@ -388,6 +388,28 @@ def test_blocked_tasks_have_a_distinct_user_facing_status():
     assert STATUS_STYLE["blocked"]["text"] == "已阻塞"
 
 
+def test_execution_reason_prefers_user_action_root_cause_over_other_failures():
+    summary = Engine._execution_failure_summary(
+        {
+            "T001": {"status": "failed", "error": "NO_PROGRESS: no new evidence"},
+            "T004": {
+                "status": "needs_user_action",
+                "error": "Error code: 402 - Insufficient Balance",
+            },
+            "T005": {
+                "status": "blocked",
+                "error": "Blocked by failed dependencies: T004",
+            },
+        },
+        blocked=["T005"],
+    )
+
+    assert summary["terminal_status"] == "needs_attention"
+    assert summary["attention_tasks"] == ["T004"]
+    assert summary["direct_failures"] == ["T001", "T004"]
+    assert summary["reason"] == "Error code: 402 - Insufficient Balance"
+
+
 def test_model_configuration_failure_has_an_explicit_status():
     assert STATUS_STYLE["model_configuration_failed"]["text"] == (
         "失败—模型配置不可用"

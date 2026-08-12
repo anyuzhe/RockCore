@@ -252,6 +252,52 @@ def test_needs_attention_has_distinct_checkpoint_resume_action():
     panel.close()
 
 
+def test_worker_stage_shows_direct_attention_reason_before_blocked_dependents():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow(
+        {
+            "job_id": "JOB-BALANCE",
+            "user_request": "继续实现游戏",
+            "status": "needs_attention",
+            # Simulate an older aggregate reason racing with the authoritative
+            # direct task failure. The card must show what actually stopped work.
+            "failure_reason": "NO_PROGRESS: no new evidence",
+            "recovery_hint": "已保留任务检查点",
+            "created_at": "2026-08-12T01:00:00Z",
+        },
+        tasks=[
+            {
+                "task_id": "T004",
+                "title": "玩家系统",
+                "task_type": "coding",
+                "status": "needs_attention",
+                "failure_reason": "Error code: 402 - Insufficient Balance",
+                "dependencies": [],
+            },
+            {
+                "task_id": "T005",
+                "title": "敌人系统",
+                "task_type": "coding",
+                "status": "blocked",
+                "failure_reason": "Blocked by failed dependencies: T004",
+                "dependencies": ["T004"],
+            },
+        ],
+    )
+
+    worker = panel.stages["worker"]
+    output = worker.output.toPlainText()
+    assert worker._status == "needs_attention"
+    assert worker.status_label.text() == "需处理"
+    assert "当前模型供应商 API 余额不足（HTTP 402）" in output
+    assert "等待依赖任务完成后自动继续：T004" in output
+    assert "当前模型供应商 API 余额不足（HTTP 402）" in panel.attention_reason.text()
+    assert "充值当前模型供应商" in panel.attention_hint.text()
+    assert "NO_PROGRESS" not in panel.attention_reason.text()
+    panel.close()
+
+
 def test_workflow_shows_governor_fallback_and_unrepairable_reason():
     _app()
     panel = TaskPanel()

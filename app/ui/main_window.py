@@ -402,6 +402,7 @@ class MainWindow(QMainWindow):
                             "title": t.title,
                             "task_type": t.task_type,
                             "status": t.status,
+                            "failure_reason": t.failure_reason or "",
                             "dependencies": t.dependencies or [],
                             "acceptance_command": t.acceptance_command or "",
                             "description": t.description or "",
@@ -1461,9 +1462,9 @@ class MainWindow(QMainWindow):
         elif event_type == "job_needs_attention":
             self.status_label.setText("任务需要你的处理")
             if is_selected:
-                self.task_panel.append_stage_output(
-                    "worker",
-                    f"请处理后继续：{data.get('reason', '需要用户完成必要操作')}",
+                self.task_panel.set_attention_reason(
+                    data.get("reason", "需要用户完成必要操作"),
+                    data.get("recovery_hint", ""),
                 )
         elif event_type == "job_resuming_from_checkpoint":
             self.status_label.setText("正在从中断位置继续任务")

@@ -152,7 +152,10 @@ class WorkflowStage(QFrame):
         self.indicator.set_status(status, style)
         self.status_label.setText(style["text"])
         self.status_label.setStyleSheet(f"color:{style['color']};")
-        if status in {"running", "failed", "blocked", "rejected", "fallback"}:
+        if status in {
+            "running", "failed", "blocked", "rejected", "fallback",
+            "needs_attention", "interrupted",
+        }:
             self.set_expanded(True)
 
     def set_output(self, text: str, expand: bool | None = None):
@@ -168,7 +171,10 @@ class WorkflowStage(QFrame):
             return
         self._lines.append(clean)
         self.output.setPlainText("\n\n".join(self._lines[-20:]))
-        if self._status in {"running", "failed", "blocked", "rejected", "fallback"}:
+        if self._status in {
+            "running", "failed", "blocked", "rejected", "fallback",
+            "needs_attention", "interrupted",
+        }:
             self.set_expanded(True)
 
 
@@ -941,11 +947,7 @@ class TaskPanel(QWidget):
             hint = job.get("recovery_hint") or "可以从检查点继续"
             self.agent_summary.setText(f"已保存有效进度：{reason}。{hint}")
         elif status == "needs_attention":
-            reason = job.get("failure_reason") or "需要你完成一项操作"
-            hint = (
-                job.get("recovery_hint")
-                or "完成后点击“已处理，继续完成任务”，将从当前检查点恢复。"
-            )
+            reason, hint = self._attention_details(job)
             self.agent_summary.setText(f"需要你的处理：{reason}。{hint}")
         elif status == "cancelled":
             self.agent_summary.setText("执行已停止。当前结果仍然保留，可以从这里继续。")
@@ -1310,15 +1312,52 @@ class TaskPanel(QWidget):
         if not is_attention:
             return
         job = job or self._current_job or {}
-        reason = str(
-            job.get("failure_reason") or "需要你完成一项外部操作"
-        ).strip()
-        hint = str(
-            job.get("recovery_hint")
-            or "完成操作后点击下方按钮；RockCore 会从刚才中断的位置继续。"
-        ).strip()
+        reason, hint = self._attention_details(job)
         self.attention_reason.setText(f"原因：{reason}")
         self.attention_hint.setText(f"处理方法：{hint}")
+
+    def set_attention_reason(self, reason: str, hint: str = ""):
+        """Refresh the live attention card from the authoritative stop event."""
+        if not self._current_job:
+            return
+        self._current_job.update({
+            "status": "needs_attention",
+            "failure_reason": str(reason or "需要你完成一项外部操作"),
+            "recovery_hint": str(hint or ""),
+        })
+        self._set_header_status("needs_attention")
+        self._set_terminal_actions("needs_attention", self._current_job)
+        friendly, recovery = self._attention_details(self._current_job)
+        self.agent_summary.setText(
+            f"需要你的处理：{friendly}。"
+            + recovery
+        )
+
+    def _attention_details(self, job: dict) -> tuple[str, str]:
+        """Prefer a direct task blocker over stale aggregate Job metadata."""
+        direct_reason = next((
+            str(task.get("failure_reason") or "").strip()
+            for task in self._tasks
+            if task.get("status") == "needs_attention"
+            and str(task.get("failure_reason") or "").strip()
+        ), "")
+        raw_reason = direct_reason or str(
+            job.get("failure_reason") or "需要你完成一项外部操作"
+        ).strip()
+        normalized = raw_reason.lower()
+        hint = str(job.get("recovery_hint") or "").strip()
+        if any(marker in normalized for marker in (
+            "insufficient balance", "insufficient_balance",
+            "error code: 402", "status code: 402",
+        )):
+            hint = (
+                "请充值当前模型供应商的 API 余额，或在项目 AI 配置中改用"
+                "有可用额度的执行模型；保存后点击“已处理，继续完成任务”，"
+                "将从当前任务检查点恢复。"
+            )
+        elif not hint:
+            hint = "完成操作后点击下方按钮；RockCore 会从刚才中断的位置继续。"
+        return self._friendly_provider_error(raw_reason), hint
 
     def _set_header_status(self, status: str):
         style = STATUS_STYLE.get(status, STATUS_STYLE["created"])
@@ -1347,10 +1386,14 @@ class TaskPanel(QWidget):
         else:
             stage.subtitle_label.setText("文件修改与验证")
         statuses = [task.get("status", "pending") for task in base_tasks]
-        if any(status == "failed" for status in statuses):
-            overall = "failed"
-        elif any(status in {"running", "executing"} for status in statuses):
+        if any(status in {"running", "executing"} for status in statuses):
             overall = "running"
+        elif any(status == "needs_attention" for status in statuses):
+            overall = "needs_attention"
+        elif any(status == "interrupted" for status in statuses):
+            overall = "interrupted"
+        elif any(status == "failed" for status in statuses):
+            overall = "failed"
         elif all(status == "done" for status in statuses):
             overall = "success"
         elif any(status == "cancelled" for status in statuses):
@@ -1367,6 +1410,20 @@ class TaskPanel(QWidget):
             description = task.get("description", "").strip()
             if description and description != task.get("title", ""):
                 lines.append(f"    {description[:300]}")
+            task_status = task.get("status", "pending")
+            failure_reason = str(task.get("failure_reason") or "").strip()
+            if task_status == "needs_attention" and failure_reason:
+                lines.append(
+                    "    需处理：" + self._friendly_provider_error(failure_reason)
+                )
+            elif task_status == "blocked":
+                dependencies = task.get("dependencies") or []
+                lines.append(
+                    "    等待依赖任务完成后自动继续"
+                    + (f"：{', '.join(dependencies)}" if dependencies else "")
+                )
+            elif task_status in {"failed", "interrupted"} and failure_reason:
+                lines.append(f"    原因：{failure_reason[:500]}")
             paths = task.get("allowed_paths") or []
             if paths and paths != ["*"]:
                 lines.append(f"    文件：{', '.join(paths[:8])}")
@@ -1382,7 +1439,10 @@ class TaskPanel(QWidget):
         if self._worker_outputs:
             lines.append("\n模型输出：")
             lines.extend(self._worker_outputs[-10:])
-        stage.set_output("\n".join(lines), expand=overall in {"running", "failed"})
+        stage.set_output(
+            "\n".join(lines),
+            expand=overall in {"running", "failed", "needs_attention", "interrupted"},
+        )
 
     def _populate_test_details(self):
         lines = []
@@ -1418,6 +1478,8 @@ class TaskPanel(QWidget):
     @staticmethod
     def _friendly_provider_error(error: str) -> str:
         normalized = (error or "").lower()
+        if "insufficient balance" in normalized or "insufficient_balance" in normalized:
+            return "当前模型供应商 API 余额不足（HTTP 402）"
         if "credit_balance_exhausted" in normalized or "no credits remaining" in normalized:
             return (
                 "Platform API 账户无可用余额，或认证通道配置错误"

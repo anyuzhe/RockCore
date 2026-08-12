@@ -3596,34 +3596,13 @@ class Engine:
                     blocked_by=blocked_result.get("blocked_by", []),
                 )
 
-            failed = [
-                tid for tid, result in results.items()
-                if isinstance(result, dict) and "error" in result
-            ]
+            failure_summary = self._execution_failure_summary(results, blocked)
+            failed = failure_summary["failed"]
             if failed:
                 logger.error(f"Tasks failed: {failed}")
-                continuation_tasks = [
-                    tid for tid in failed
-                    if isinstance(results.get(tid), dict)
-                    and results[tid].get("status") == "needs_continuation"
-                ]
-                attention_tasks = [
-                    tid for tid in failed
-                    if isinstance(results.get(tid), dict)
-                    and results[tid].get("status") == "needs_user_action"
-                ]
-                failure_messages = [
-                    str(results[tid].get("error", "")) for tid in failed
-                    if isinstance(results.get(tid), dict)
-                ]
-                terminal_status = (
-                    "needs_attention"
-                    if attention_tasks or any(
-                        self._is_user_input_required(message)
-                        for message in failure_messages
-                    )
-                    else ("interrupted" if continuation_tasks else "failed")
-                )
+                continuation_tasks = failure_summary["continuation_tasks"]
+                attention_tasks = failure_summary["attention_tasks"]
+                terminal_status = failure_summary["terminal_status"]
                 repos["job"].update_status(job.job_id, terminal_status)
                 self.state_machine.transition(
                     job.job_id,
@@ -3631,14 +3610,20 @@ class Engine:
                     if terminal_status in {"needs_attention", "interrupted"}
                     else JobState.FAILED,
                 )
-                direct_failures = [tid for tid in failed if tid not in blocked]
-                if direct_failures:
-                    failure_messages = [
-                        str(results[tid].get("error", ""))
-                        for tid in direct_failures
-                    ]
-                reason = failure_messages[0][:160] if failure_messages else "未知错误"
+                direct_failures = failure_summary["direct_failures"]
+                reason = failure_summary["reason"]
                 self._store_job_failure(repos, job.job_id, reason)
+                if terminal_status == "needs_attention":
+                    failure_code, recovery_hint = self._failure_details(reason)
+                    await self.event_bus.publish(
+                        "job_needs_attention",
+                        job_id=job.job_id,
+                        reason=reason,
+                        recovery_hint=recovery_hint,
+                        failure_code=failure_code,
+                        failure_stage="execution_user_action_required",
+                        task_ids=attention_tasks,
+                    )
                 await self.event_bus.publish("phase_summary",
                     phase="execution", agent_type="worker",
                     status=(
@@ -4511,6 +4496,59 @@ class Engine:
         )
         return any(marker in normalized for marker in markers)
 
+    @classmethod
+    def _execution_failure_summary(
+        cls, results: dict, blocked: list[str] | None = None,
+    ) -> dict:
+        """Choose a Job reason from the direct failure matching its status.
+
+        Dependency-blocked tasks describe consequences, not root causes.  When
+        several independent tasks stop differently, a user-action failure must
+        provide the reason for a ``needs_attention`` Job instead of being paired
+        with an unrelated strategy-stall or validation message.
+        """
+        blocked_set = set(blocked or [])
+        failed = [
+            task_id for task_id, result in results.items()
+            if isinstance(result, dict) and "error" in result
+        ]
+        direct_failures = [
+            task_id for task_id in failed if task_id not in blocked_set
+        ]
+
+        def error_for(task_id: str) -> str:
+            result = results.get(task_id)
+            return str(result.get("error", "")) if isinstance(result, dict) else ""
+
+        continuation_tasks = [
+            task_id for task_id in direct_failures
+            if results[task_id].get("status") == "needs_continuation"
+        ]
+        attention_tasks = [
+            task_id for task_id in direct_failures
+            if results[task_id].get("status") == "needs_user_action"
+            or cls._is_user_action_required(error_for(task_id))
+        ]
+        if attention_tasks:
+            terminal_status = "needs_attention"
+            reason_tasks = attention_tasks
+        elif continuation_tasks:
+            terminal_status = "interrupted"
+            reason_tasks = continuation_tasks
+        else:
+            terminal_status = "failed"
+            reason_tasks = direct_failures or failed
+        reasons = [error_for(task_id) for task_id in reason_tasks]
+        reason = next((value for value in reasons if value.strip()), "未知错误")[:1000]
+        return {
+            "failed": failed,
+            "direct_failures": direct_failures,
+            "continuation_tasks": continuation_tasks,
+            "attention_tasks": attention_tasks,
+            "terminal_status": terminal_status,
+            "reason": reason,
+        }
+
     @staticmethod
     def _is_provider_unavailable(error: str) -> bool:
         """Return true only for failures that justify changing providers.
@@ -5255,6 +5293,8 @@ class Engine:
     def _friendly_provider_error(error: str) -> str:
         """Translate common provider failures into concise user-facing reasons."""
         normalized = (error or "").lower()
+        if "insufficient balance" in normalized or "insufficient_balance" in normalized:
+            return "当前模型供应商 API 余额不足（HTTP 402）"
         if Engine._is_model_configuration_error(error):
             return "模型配置不可用；已尝试同供应商候选模型和可用备用供应商"
         if "credit_balance_exhausted" in normalized or "no credits remaining" in normalized:
@@ -5298,6 +5338,16 @@ class Engine:
                 "user_input_required",
                 "补充所需文件或信息后点击“已处理，继续完成任务”，"
                 "将从当前检查点恢复。",
+            )
+        if any(marker in normalized for marker in (
+            "insufficient balance", "insufficient_balance",
+            "error code: 402", "status code: 402",
+        )):
+            return (
+                "provider_balance",
+                "请充值当前模型供应商的 API 余额，或在项目 AI 配置中改用"
+                "有可用额度的执行模型；保存后点击“已处理，继续完成任务”，"
+                "将从当前任务检查点恢复。",
             )
         if cls._is_budget_error(error):
             return (
