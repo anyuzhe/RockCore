@@ -3994,7 +3994,7 @@ class Engine:
             return None, validation
         return ({
             "status": "pending_validation",
-            "error": "恢复的任务产物已通过确定性验收",
+            "completion_note": "恢复的任务产物已通过确定性验收",
             "failure_stage": "checkpoint_artifact_validation",
             "pending_event_published": True,
             "resumed_artifact": True,
@@ -4775,7 +4775,16 @@ class Engine:
         blocked_set = set(blocked or [])
         failed = [
             task_id for task_id, result in results.items()
-            if isinstance(result, dict) and "error" in result
+            if isinstance(result, dict) and (
+                result.get("status") in {
+                    "failed", "blocked", "needs_continuation",
+                    "needs_user_action",
+                }
+                or (
+                    bool(str(result.get("error") or "").strip())
+                    and result.get("status") != "completed"
+                )
+            )
         ]
         direct_failures = [
             task_id for task_id in failed if task_id not in blocked_set

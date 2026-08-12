@@ -1366,6 +1366,8 @@ def test_valid_resumed_artifact_skips_another_model_execution(tmp_path):
 
             assert result["status"] == "pending_validation"
             assert result["resumed_artifact"] is True
+            assert "error" not in result
+            assert result["completion_note"] == "恢复的任务产物已通过确定性验收"
             assert validation["status"] == "passed"
             event = engine.event_bus.get_history("task_pending_validation")[-1]
             assert event["data"]["resumed_files"] == ["game.js"]
@@ -1373,6 +1375,18 @@ def test_valid_resumed_artifact_skips_another_model_execution(tmp_path):
             repos["_session"].close()
 
     asyncio.run(scenario())
+
+
+def test_completed_result_with_legacy_error_text_is_not_a_job_failure():
+    summary = Engine._execution_failure_summary({
+        "T001": {
+            "status": "completed",
+            "error": "恢复的任务产物已通过确定性验收",
+        },
+    })
+
+    assert summary["failed"] == []
+    assert summary["direct_failures"] == []
 
 
 def test_resume_progress_layout_uses_original_plan_positions():
