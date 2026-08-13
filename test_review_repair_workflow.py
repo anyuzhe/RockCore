@@ -310,6 +310,13 @@ def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
             repos["task"].update_status_by_pk(done.id, "done")
             repos["task"].update_status_by_pk(attention.id, "needs_attention")
             repos["task"].update_status_by_pk(blocked.id, "blocked")
+            original_baseline = engine.test_manager.capture_snapshot(project_root)
+            repos["job"].update_checkpoint(job.job_id, {
+                "job_baseline": original_baseline,
+            })
+            (project_root / "created-before-resume.py").write_text(
+                "value = 1\n", encoding="utf-8"
+            )
             repos["job"].update_status(job.job_id, "needs_attention")
             engine.state_machine.restore(job.job_id, JobState.WAITING_USER)
         finally:
@@ -326,6 +333,11 @@ def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
                     task.task_id: task.status
                     for task in repos["task"].list_by_job(job.id)
                 },
+                "baseline_detects_existing_progress": (
+                    [path for path in engine.test_manager.snapshot_diff(
+                        project_root, _baseline
+                    )["added"] if path == "created-before-resume.py"]
+                ),
             })
             for task in repos["task"].list_by_job(job.id):
                 if task.task_id in kwargs["task_ids"]:
@@ -354,6 +366,9 @@ def test_needs_attention_resume_reuses_same_job_and_only_unfinished_tasks(
                 "task_statuses": {
                     "T001": "done", "T002": "pending", "T003": "pending",
                 },
+                "baseline_detects_existing_progress": [
+                    "created-before-resume.py"
+                ],
             }]
             assert [(task.task_id, task.status) for task in tasks] == [
                 ("T001", "done"), ("T002", "done"), ("T003", "done")

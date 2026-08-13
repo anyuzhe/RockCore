@@ -88,11 +88,23 @@ class TestManager:
                 continue
         return snapshot
 
+    @staticmethod
+    def normalize_snapshot(before: dict | None) -> dict[str, tuple]:
+        """Restore snapshots after JSON has converted tuples into lists."""
+        normalized: dict[str, tuple] = {}
+        for path, value in (before or {}).items():
+            if not isinstance(path, str) or not isinstance(value, (list, tuple)):
+                continue
+            if len(value) < 4:
+                continue
+            normalized[path.replace("\\", "/")] = tuple(value[:4])
+        return normalized
+
     @classmethod
     def snapshot_diff(cls, root: str | Path,
                       before: dict | None) -> dict:
         after = cls.capture_snapshot(root)
-        before = before or {}
+        before = cls.normalize_snapshot(before)
         added = sorted(after.keys() - before.keys())
         deleted = sorted(before.keys() - after.keys())
         modified = sorted(

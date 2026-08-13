@@ -15,6 +15,7 @@ from typing import Any
 
 from app.subprocess_utils import run_process
 from app.job_report import JobReportService
+from app.text_utils import strip_runtime_task_context
 MAX_FLASH_RETRY = 2
 MAX_REPLAN_RETRY = 1
 MAX_REVIEW_REPAIR_ROUNDS = 2
@@ -1496,6 +1497,23 @@ class Engine:
             },
         )
 
+    def _get_or_create_job_baseline(self, job, repos,
+                                    project_root: str) -> dict:
+        """Return the immutable initial snapshot used across checkpoint runs."""
+        checkpoint = dict(getattr(job, "last_checkpoint", None) or {})
+        if "job_baseline" in checkpoint:
+            return self.test_manager.normalize_snapshot(
+                checkpoint.get("job_baseline")
+            )
+        baseline = self.test_manager.capture_snapshot(project_root)
+        checkpoint["job_baseline"] = baseline
+        checkpoint["baseline_captured_at"] = (
+            datetime.now().astimezone().isoformat()
+        )
+        repos["job"].update_checkpoint(job.job_id, checkpoint)
+        job.last_checkpoint = checkpoint
+        return baseline
+
     @staticmethod
     def _resumable_task_ids(tasks: list) -> set[str]:
         """Return the unfinished checkpoint and its downstream dependency chain."""
@@ -1620,7 +1638,9 @@ class Engine:
             repository = Repository(proj_root)
             repository.ensure_initialized()
             self.merge_manager = MergeManager(proj_root)
-            baseline = self.test_manager.capture_snapshot(proj_root)
+            baseline = self._get_or_create_job_baseline(
+                job, repos, proj_root
+            )
             complexity = self._classify_request(job.user_request)
             job._rockcore_complexity = complexity
             worker = self.get_agent("worker")
@@ -1634,7 +1654,6 @@ class Engine:
                 checkpoint=dict(job.last_checkpoint or {}),
             )
             repos["job"].update_status(job_id, "executing")
-            repos["job"].clear_failure(job_id)
             repos["_session"].refresh(job)
 
             constitution = repos["constitution"].get_by_job(job.id)
@@ -1807,7 +1826,9 @@ class Engine:
                 )
                 return
             self.merge_manager = MergeManager(project_root)
-            job_baseline = self.test_manager.capture_snapshot(project_root)
+            job_baseline = self._get_or_create_job_baseline(
+                job, repos, project_root
+            )
 
             # Load project-level AI config
             proj_root = job.project.root_path if job.project else project_root
@@ -3820,10 +3841,17 @@ class Engine:
         )
         task_dicts = []
         for t in all_tasks:
+            clean_description = strip_runtime_task_context(t.description or "")
+            if clean_description != (t.description or "").strip():
+                # Migrate descriptions polluted by pre-1.0 runtime grounding.
+                repos["task"].update_definition(
+                    t.id, description=clean_description
+                )
+                t.description = clean_description
             task_dicts.append({
                 "task_id": t.task_id,
                 "title": t.title,
-                "description": t.description,
+                "description": clean_description,
                 "type": t.task_type,
                 # Dependencies already completed before this checkpoint are
                 # satisfied; keep only dependencies participating in this run.
@@ -5061,7 +5089,12 @@ class Engine:
 
     async def _ground_task_in_analysis(self, task, job, repos,
                                        reports: dict[str, str]):
-        """Feed prerequisite findings into a task and repair guessed paths."""
+        """Feed prerequisite findings transiently and repair guessed paths.
+
+        Analysis describes the project at an earlier point in the DAG. It may
+        guide a Worker, but it must never become permanent task text because
+        upstream coding steps can invalidate conclusions such as “empty repo”.
+        """
         if not reports or task.task_type == "analysis":
             return
 
@@ -5070,13 +5103,27 @@ class Engine:
             for task_id, report in sorted(reports.items())
         ]
         report_text = "\n\n".join(report_sections)
-        marker = "\n\n=== Verified prerequisite analysis ===\n"
-        description = task.description or ""
-        if marker.strip() not in description:
-            description = description + marker + report_text
+        description = strip_runtime_task_context(task.description or "")
 
         project_root = job.project.root_path if job.project else "."
         project_files = self._project_output_files(project_root)
+        current_state = (
+            ", ".join(project_files[:80])
+            if project_files else "(no user project files currently present)"
+        )
+        analysis_context = (
+            "Verified prerequisite analysis (historical evidence; current "
+            "filesystem state takes precedence):\n"
+            + report_text
+            + "\n\nCurrent project files at execution time:\n"
+            + current_state
+        )[:12000]
+        existing_context = str(
+            getattr(task, "_rockcore_initial_recovery_context", "") or ""
+        )
+        task._rockcore_initial_recovery_context = "\n\n".join(
+            item for item in (existing_context, analysis_context) if item
+        )
         basename_counts: dict[str, int] = {}
         for relative_path in project_files:
             basename = Path(relative_path).name
@@ -6051,6 +6098,12 @@ class Engine:
             result = results.get(task_id)
             return str(result.get("error", "")) if isinstance(result, dict) else ""
 
+        internal_recoverable_tasks = [
+            task_id for task_id in direct_failures
+            if isinstance(results.get(task_id), dict)
+            and cls._is_internal_recoverable_failure(results[task_id])
+        ]
+
         continuation_tasks = [
             task_id for task_id in direct_failures
             if results[task_id].get("status") == "needs_continuation"
@@ -6066,6 +6119,13 @@ class Engine:
         elif continuation_tasks:
             terminal_status = "interrupted"
             reason_tasks = continuation_tasks
+        elif internal_recoverable_tasks:
+            # Internal validation/runtime interruptions have a useful task
+            # checkpoint and require no user action. Keep the same Job
+            # resumable so dependent tasks continue automatically afterwards.
+            terminal_status = "interrupted"
+            continuation_tasks = list(internal_recoverable_tasks)
+            reason_tasks = continuation_tasks
         else:
             terminal_status = "failed"
             reason_tasks = direct_failures or failed
@@ -6079,6 +6139,22 @@ class Engine:
             "terminal_status": terminal_status,
             "reason": reason,
         }
+
+    @staticmethod
+    def _is_internal_recoverable_failure(result: dict) -> bool:
+        """Identify checkpoints RockCore should resume without user repair."""
+        stage = str(result.get("failure_stage") or "").lower()
+        error = str(result.get("error") or "").lower()
+        if stage in {
+            "validation_continuation", "checkpoint_artifact_validation",
+            "provider_interruption", "strategy_stall_validation",
+        }:
+            return True
+        return (
+            "test command failed" in error
+            or "local validation" in error
+            or "no file changes detected" in error
+        ) and not Engine._is_user_action_required(error)
 
     @staticmethod
     def _is_provider_unavailable(error: str) -> bool:
@@ -7004,8 +7080,16 @@ class Engine:
         )
 
     def _store_job_failure(self, repos, job_id: str, error: str):
+        job = repos["job"].get_by_id(job_id)
+        checkpoint = dict(getattr(job, "last_checkpoint", None) or {})
+        root_failure = dict(checkpoint.get("root_failure") or {})
+        display_error = str(root_failure.get("reason") or error)
         code, hint = self._failure_details(error)
-        repos["job"].set_failure(job_id, code, str(error)[:4000], hint)
+        if display_error != str(error):
+            code, hint = self._failure_details(display_error)
+        repos["job"].set_failure(
+            job_id, code, display_error[:4000], hint
+        )
 
     def _checkpoint_task(self, repos, job, task, *, status: str,
                          result: dict | None = None, error: str = ""):
@@ -7079,11 +7163,47 @@ class Engine:
                     validation.get("output") or validation.get("error") or ""
                 )[:1600],
             }]
+        previous_root_failure = dict(
+            existing_checkpoint.get("root_failure") or {}
+        )
         if status in {"needs_attention", "interrupted", "failed"}:
+            current_reason = str(
+                error or payload.get("error") or ""
+            )[:4000]
+            root_failure = (
+                previous_root_failure
+                if previous_root_failure.get("reason") else {
+                    "task_id": task.task_id,
+                    "status": status,
+                    "reason": current_reason,
+                    "failure_stage": str(
+                        payload.get("failure_stage") or ""
+                    )[:200],
+                    "recorded_at": datetime.now().astimezone().isoformat(),
+                }
+            )
+            # Dependency and changed=0 messages are consequences of an earlier
+            # failure. Keep them for diagnostics but never replace the root.
+            root_reason = str(root_failure.get("reason") or current_reason)
+            existing_checkpoint["root_failure"] = root_failure
+            failure_history = list(
+                existing_checkpoint.get("failure_history") or []
+            )
+            failure_history.append({
+                "task_id": task.task_id,
+                "status": status,
+                "reason": current_reason,
+                "failure_stage": str(
+                    payload.get("failure_stage") or ""
+                )[:200],
+                "recorded_at": datetime.now().astimezone().isoformat(),
+            })
+            existing_checkpoint["failure_history"] = failure_history[-12:]
             session["recoverable_error"] = {
                 "task_id": task.task_id,
                 "status": status,
-                "reason": str(error or payload.get("error") or "")[:1600],
+                "reason": root_reason[:1600],
+                "latest_attempt_reason": current_reason[:1600],
                 "next_action": (
                     "Resolve the user-actionable condition and resume this same task"
                     if status == "needs_attention"
@@ -7094,6 +7214,11 @@ class Engine:
             }
         elif status == "done":
             session["recoverable_error"] = {}
+            if (
+                previous_root_failure.get("task_id") == task.task_id
+                or all(item.status == "done" for item in tasks)
+            ):
+                existing_checkpoint.pop("root_failure", None)
         existing_checkpoint["execution_session"] = session
         runtime_checkpoint = dict(
             getattr(task, "_rockcore_runtime_checkpoint", None) or {}

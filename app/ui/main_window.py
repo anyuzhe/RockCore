@@ -34,6 +34,7 @@ from .settings_dialog import SettingsDialog, load_config
 from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 from app.subprocess_utils import run_process
+from app.text_utils import strip_runtime_task_context
 
 logger = logging.getLogger(__name__)
 
@@ -444,7 +445,9 @@ class MainWindow(QMainWindow):
                             "failure_reason": t.failure_reason or "",
                             "dependencies": t.dependencies or [],
                             "acceptance_command": t.acceptance_command or "",
-                            "description": t.description or "",
+                            "description": strip_runtime_task_context(
+                                t.description or ""
+                            ),
                             "allowed_paths": t.allowed_paths or [],
                             "result_data": dict(t.result_data or {}),
                             "started_at": as_utc_isoformat(next((

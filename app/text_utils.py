@@ -4,6 +4,24 @@ import locale
 from pathlib import Path
 
 
+PREREQUISITE_ANALYSIS_MARKER = "=== Verified prerequisite analysis ==="
+
+
+def strip_runtime_task_context(content: str) -> str:
+    """Remove legacy runtime context that was persisted into task definitions.
+
+    Prerequisite reports are execution-time evidence, not part of the user's
+    planned task. Older RockCore versions appended the whole report to the
+    description, leaving stale statements such as “empty repository” visible
+    after later tasks had created files.
+    """
+    text = str(content or "")
+    marker_index = text.find(PREREQUISITE_ANALYSIS_MARKER)
+    if marker_index < 0:
+        return text.strip()
+    return text[:marker_index].rstrip("\n =")
+
+
 def read_text_compatible(path: str | Path) -> tuple[str, str]:
     """Read text without corrupting UTF BOMs or common Chinese Windows files."""
     data = Path(path).read_bytes()

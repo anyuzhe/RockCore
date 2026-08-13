@@ -6,6 +6,7 @@ from pathlib import Path
 
 from memory.context_manager import ContextManager
 from memory.repo_map import RepoMap
+from app.text_utils import strip_runtime_task_context
 from orchestrator.engine import Engine
 from orchestrator.policy_engine import PolicyEngine
 from orchestrator.state_machine import JobState
@@ -88,6 +89,15 @@ def test_vague_continuation_plan_is_rejected_before_execution():
     assert any(error.startswith("continuation_quality:") for error in errors)
 
 
+def test_legacy_prerequisite_report_is_removed_from_task_description():
+    description = (
+        "Create the UI\n\n=== Verified prerequisite analysis ===\n"
+        "The repository is empty."
+    )
+
+    assert strip_runtime_task_context(description) == "Create the UI"
+
+
 def test_large_scene_range_requires_finer_planner_tasks():
     errors = Engine._plan_granularity_errors({
         "tasks": [{
@@ -124,6 +134,7 @@ class _AnalysisAwareWorker:
         self.root = root
         self.coding_allowed_paths = []
         self.coding_description = ""
+        self.coding_recovery_context = ""
 
     def scoped_to(self, _project_root: str):
         return self
@@ -139,6 +150,9 @@ class _AnalysisAwareWorker:
             }
         self.coding_allowed_paths = list(task.allowed_paths or [])
         self.coding_description = task.description
+        self.coding_recovery_context = str(
+            getattr(task, "_rockcore_initial_recovery_context", "") or ""
+        )
         target = self.root / "site" / "index.html"
         target.write_text(
             target.read_text(encoding="utf-8") + "\n<section>IG matches</section>",
@@ -196,10 +210,13 @@ def test_analysis_report_refines_dependent_task_paths_before_execution(tmp_path)
 
             assert result["status"] == "completed"
             assert worker.coding_allowed_paths == ["site/index.html"]
-            assert "Verified prerequisite analysis" in worker.coding_description
-            assert "site/index.html" in worker.coding_description
+            assert "Verified prerequisite analysis" not in worker.coding_description
+            assert worker.coding_description == "Modify the identified UI"
+            assert "Verified prerequisite analysis" in worker.coding_recovery_context
+            assert "site/index.html" in worker.coding_recovery_context
             stored = repos["task"].list_by_job(job.id)[1]
             assert stored.allowed_paths == ["site/index.html"]
+            assert "Verified prerequisite analysis" not in stored.description
             assert stored.status == "done"
             refined = engine.event_bus.get_history("task_refined")
             assert refined[-1]["data"]["paths_changed"] is True

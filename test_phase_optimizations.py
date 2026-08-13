@@ -483,6 +483,20 @@ def test_run_only_acceptance_test_stays_local():
     assert TestManager.should_validate_locally(task)
 
 
+def test_json_round_tripped_snapshot_keeps_original_change_baseline(tmp_path):
+    baseline = TestManager.capture_snapshot(tmp_path)
+    serialized = {
+        path: list(value) for path, value in baseline.items()
+    }
+    (tmp_path / "created_after_baseline.py").write_text(
+        "value = 1\n", encoding="utf-8"
+    )
+
+    diff = TestManager.snapshot_diff(tmp_path, serialized)
+
+    assert diff["added"] == ["created_after_baseline.py"]
+
+
 def test_tool_schema_is_pruned_by_task_type(tmp_path):
     broker = ToolBroker(tmp_path, PolicyEngine())
     analysis = {

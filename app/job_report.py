@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.paths import project_state_dir
+from app.text_utils import strip_runtime_task_context
 from app.ui.time_utils import format_local_timestamp
 from storage.models import Job
 
@@ -206,7 +207,9 @@ class JobReportService:
                 tasks.append({
                     "task_id": task.task_id,
                     "title": task.title,
-                    "description": task.description,
+                    "description": strip_runtime_task_context(
+                        task.description
+                    ),
                     "task_type": task.task_type,
                     "status": task.status,
                     "allowed_paths": task.allowed_paths or [],

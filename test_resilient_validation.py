@@ -151,6 +151,67 @@ def test_provider_balance_error_requests_user_action_without_replanning(tmp_path
     asyncio.run(scenario())
 
 
+def test_internal_validation_failure_is_resumable_without_user_action():
+    summary = Engine._execution_failure_summary({
+        "T004": {
+            "status": "failed",
+            "error": "Local validation: Test command failed (python -m pytest)",
+            "failure_stage": "validation_continuation",
+        },
+        "T005": {
+            "status": "blocked",
+            "error": "Blocked by failed dependencies: T004",
+        },
+    }, blocked=["T005"])
+
+    assert summary["terminal_status"] == "interrupted"
+    assert summary["continuation_tasks"] == ["T004"]
+    assert summary["attention_tasks"] == []
+    assert "Blocked by" not in summary["reason"]
+
+
+def test_original_failure_survives_secondary_resume_error(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Demo", str(tmp_path))
+        job = repos["job"].create("JOB-ROOT-FAILURE", project.id, "build")
+        task = repos["task"].create(
+            "T004", job.id, "Write tests", task_type="testing"
+        )
+        first = {
+            "status": "needs_continuation",
+            "error": "Test command failed: python: command not found",
+            "failure_stage": "validation_continuation",
+        }
+        engine._checkpoint_task(
+            repos, job, task, status="interrupted", result=first,
+            error=first["error"],
+        )
+        secondary = {
+            "status": "needs_continuation",
+            "error": "No file changes detected from the job baseline",
+            "failure_stage": "validation_continuation",
+        }
+        engine._checkpoint_task(
+            repos, job, task, status="interrupted", result=secondary,
+            error=secondary["error"],
+        )
+        engine._store_job_failure(repos, job.job_id, secondary["error"])
+
+        repos["_session"].refresh(job)
+        assert job.failure_reason == first["error"]
+        assert job.last_checkpoint["root_failure"]["reason"] == first["error"]
+        assert len(job.last_checkpoint["failure_history"]) == 2
+        assert (
+            job.last_checkpoint["execution_session"]["recoverable_error"][
+                "latest_attempt_reason"
+            ] == secondary["error"]
+        )
+    finally:
+        repos["_session"].close()
+
+
 def test_exhausted_model_candidates_wait_for_configuration_and_resume(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
