@@ -1033,7 +1033,36 @@ class TaskPanel(QWidget):
         self.user_source_label.setText("承接上一轮" if source else "")
         self.user_source_label.setVisible(bool(source))
         self.stages["user"].set_status("success")
-        self.stages["user"].set_output("需求已进入工作流", expand=False)
+        understanding = [f"需求：{request.strip() or '已提交当前需求'}"]
+        raw_constitution = (constitution or {}).get("raw_output") or {}
+        if constitution:
+            goal = str(constitution.get("goal") or "").strip()
+            if goal and goal != request.strip():
+                understanding.append(f"目标：{goal}")
+            constraints = constitution.get("constraints") or []
+            criteria = constitution.get("acceptance_criteria") or []
+            if constraints:
+                understanding.append(
+                    "约束：\n" + "\n".join(f"- {value}" for value in constraints)
+                )
+            if criteria:
+                understanding.append(
+                    "验收标准：\n" + "\n".join(f"- {value}" for value in criteria)
+                )
+            strategy = str(raw_constitution.get("execution_strategy") or "").strip()
+            if strategy:
+                understanding.append(
+                    "执行策略：" + ("先规划后执行" if strategy == "planned" else "聚焦执行")
+                )
+            next_action = str(raw_constitution.get("next_action") or "").strip()
+            if next_action:
+                understanding.append("下一步：" + next_action)
+            observations = raw_constitution.get("image_observations") or []
+            if observations:
+                understanding.append(
+                    "附件观察：\n" + "\n".join(f"- {value}" for value in observations)
+                )
+        self.stages["user"].set_output("\n\n".join(understanding), expand=False)
 
         fast_path = bool(
             constitution

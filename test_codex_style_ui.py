@@ -150,6 +150,68 @@ def test_live_stage_updates_expand_inside_the_conversation():
     panel.close()
 
 
+def test_historical_workflow_renders_structured_requirement_understanding():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-UNDERSTANDING",
+        "user_request": "做一个网页游戏",
+        "status": "executing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }, constitution={
+        "goal": "创建可直接打开的网页游戏",
+        "constraints": ["不引入外部依赖"],
+        "acceptance_criteria": ["浏览器中可以运行"],
+        "risk": "low",
+        "requires_final_review": False,
+        "raw_output": {
+            "execution_strategy": "planned",
+            "next_action": "先确认入口文件",
+        },
+    })
+
+    output = panel.stages["user"].output.toPlainText()
+    assert "需求：做一个网页游戏" in output
+    assert "目标：创建可直接打开的网页游戏" in output
+    assert "不引入外部依赖" in output
+    assert "浏览器中可以运行" in output
+    assert "执行策略：先规划后执行" in output
+    assert "下一步：先确认入口文件" in output
+    panel.close()
+
+
+def test_live_main_agent_event_populates_requirement_understanding():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-LIVE-UNDERSTANDING",
+        "user_request": "修复登录页",
+        "status": "governing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }
+    window.task_panel.set_workflow(job)
+    window._selected_job_id = job["job_id"]
+    window._on_event("main_agent_decided", {
+        "job_id": job["job_id"],
+        "summary": "已定位登录入口",
+        "goal": "修复登录页并保留现有认证流程",
+        "constraints": ["不修改服务端接口"],
+        "acceptance_criteria": ["登录成功和失败提示正常"],
+        "risk_reasons": ["涉及用户认证"],
+        "protected_paths": ["server/auth/**"],
+        "execution_strategy": "planned",
+        "next_action": "让策划者拆分验证步骤",
+    })
+
+    output = window.task_panel.stages["user"].output.toPlainText()
+    assert "修复登录页并保留现有认证流程" in output
+    assert "不修改服务端接口" in output
+    assert "涉及用户认证" in output
+    assert "server/auth/**" in output
+    assert "先规划后执行" in output
+    window.close()
+
+
 def test_worker_stage_describes_read_only_analysis_without_file_edits():
     _app()
     panel = TaskPanel()

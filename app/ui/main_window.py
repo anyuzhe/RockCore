@@ -1278,6 +1278,41 @@ class MainWindow(QMainWindow):
                 f"{data.get('summary') or '已理解当前需求'} · {strategy}",
                 {"next_action": data.get("next_action", "")},
             )
+            understanding = [
+                f"需求：{data.get('goal') or '已提交当前需求'}",
+            ]
+            constraints = data.get("constraints") or []
+            criteria = data.get("acceptance_criteria") or []
+            if constraints:
+                understanding.append(
+                    "约束：\n" + "\n".join(f"- {value}" for value in constraints)
+                )
+            if criteria:
+                understanding.append(
+                    "验收标准：\n" + "\n".join(f"- {value}" for value in criteria)
+                )
+            reasons = data.get("risk_reasons") or []
+            if reasons:
+                understanding.append(
+                    "风险依据：\n" + "\n".join(f"- {value}" for value in reasons)
+                )
+            protected = data.get("protected_paths") or []
+            if protected:
+                understanding.append(
+                    "保护范围：\n" + "\n".join(f"- {value}" for value in protected)
+                )
+            observations = data.get("image_observations") or []
+            if observations:
+                understanding.append(
+                    "附件观察：\n" + "\n".join(f"- {value}" for value in observations)
+                )
+            understanding.append(f"执行策略：{strategy}")
+            if data.get("next_action"):
+                understanding.append(f"下一步：{data.get('next_action')}")
+            self.task_panel.update_stage(
+                "user", "success", "需求理解完成",
+                {"理解结果": "\n\n".join(understanding)},
+            )
         elif event_type == "main_agent_fallback" and is_selected:
             self.task_panel.update_stage(
                 "governor", "fallback", data.get("summary", "已切换到确定性流程"),
