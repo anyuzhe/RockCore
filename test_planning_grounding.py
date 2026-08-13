@@ -100,6 +100,21 @@ def test_large_scene_range_requires_finer_planner_tasks():
     assert any(error.startswith("granularity_quality:T004") for error in errors)
 
 
+def test_merged_long_lived_worker_is_not_split_again_by_granularity_gate():
+    errors = Engine._plan_granularity_errors({
+        "tasks": [{
+            "id": "T002", "type": "coding",
+            "title": "完成区域 1-8（连续执行）",
+            "description": (
+                "以下步骤共享核心文件和运行状态，必须在同一 Worker 会话中"
+                "连续完成。\n【内部步骤 1 · 区域实现】\n完成区域 1-8。"
+            ),
+        }],
+    }, "完整游戏")
+
+    assert errors == []
+
+
 class _AnalysisAwareWorker:
     max_turns = 16
     max_exploration_turns = 4

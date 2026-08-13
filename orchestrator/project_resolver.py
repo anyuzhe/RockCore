@@ -61,7 +61,17 @@ class ProjectResolver:
         package = self._read_json("package.json")
         pyproject = self._read_toml("pyproject.toml")
         entrypoints = self._entrypoints(package, pyproject)
-        active = self._runtime_closure(entrypoints)
+        runtime_groups = [
+            {
+                "entrypoint": item["path"],
+                "kind": item["kind"],
+                "files": sorted(self._runtime_closure([item])),
+            }
+            for item in entrypoints
+        ]
+        active = {
+            path for group in runtime_groups for path in group["files"]
+        }
         commands = self._commands(package, pyproject, entrypoints)
         duplicates = self._duplicate_js_symbols()
         runtime_sources = {
@@ -120,6 +130,7 @@ class ProjectResolver:
             "project_root": str(self.root),
             "entrypoints": entrypoints,
             "active_files": sorted(active),
+            "runtime_groups": runtime_groups,
             "support_files": support,
             "legacy_files": legacy,
             "duplicate_symbols": duplicates,

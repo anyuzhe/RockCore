@@ -226,6 +226,83 @@ def test_shared_support_file_does_not_merge_independent_runtime_tasks():
     assert [task["id"] for task in plan["tasks"]] == ["T001", "T002"]
 
 
+def test_serial_runtime_files_merge_even_without_exact_path_overlap():
+    plan = {
+        "summary": "Implement one game runtime",
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "Player state",
+                "description": "Implement player movement state.",
+                "allowed_paths": ["src/player.ts"], "dependencies": [],
+                "acceptance_command": "npm test",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Scene wiring",
+                "description": "Wire player state into the active scene.",
+                "allowed_paths": ["src/scene.ts"], "dependencies": ["T001"],
+                "acceptance_command": "npm test",
+            },
+        ],
+    }
+
+    assert Engine._merge_shared_context_tasks(
+        plan, {"active_files": ["src/player.ts", "src/scene.ts"]}
+    )
+    assert len(plan["tasks"]) == 1
+    assert "内部步骤 1 · Player state" in plan["tasks"][0]["description"]
+    assert "内部步骤 2 · Scene wiring" in plan["tasks"][0]["description"]
+
+
+def test_independent_runtime_files_do_not_merge_without_serial_context():
+    plan = {
+        "summary": "Independent features",
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "Player",
+                "description": "Implement player.",
+                "allowed_paths": ["src/player.ts"], "dependencies": [],
+                "acceptance_command": "npm test",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Admin",
+                "description": "Implement admin page.",
+                "allowed_paths": ["src/admin.ts"], "dependencies": [],
+                "acceptance_command": "npm test",
+            },
+        ],
+    }
+
+    assert not Engine._merge_shared_context_tasks(
+        plan, {"active_files": ["src/player.ts", "src/admin.ts"]}
+    )
+    assert len(plan["tasks"]) == 2
+
+
+def test_planner_context_key_merges_shared_runtime_reasoning():
+    plan = {
+        "summary": "Shared state machine",
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "State model",
+                "description": "Implement state transitions.",
+                "context_key": "game-state", "allowed_paths": ["src/state.ts"],
+                "dependencies": [], "acceptance_command": "npm test",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "State rendering",
+                "description": "Render the same state machine.",
+                "context_key": "game-state", "allowed_paths": ["src/view.ts"],
+                "dependencies": ["T001"], "acceptance_command": "npm test",
+            },
+        ],
+    }
+
+    assert Engine._merge_shared_context_tasks(
+        plan, {"active_files": ["src/state.ts", "src/view.ts"]}
+    )
+    assert len(plan["tasks"]) == 1
+
+
 def test_transitive_overlap_does_not_merge_conflicting_acceptance_commands():
     plan = {
         "summary": "Keep independently validated stages",

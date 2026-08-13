@@ -42,9 +42,12 @@ Rules:
     deliverable, so do not require them to create or modify project files.
 12. One task creates one fresh Worker conversation. Split only at stable boundaries
     such as backend/frontend, data migration, or independently testable runtime
-    stages. If two stages read or edit any of the same core runtime files, combine
-    them into one task so the Worker keeps one continuous context. Shared support
-    files such as package.json or README alone do not require combining tasks.
+    stages. If two stages read or edit any of the same core runtime files, or they
+    operate on the same state machine, scene, controller, store, event loop, or
+    runtime data flow, combine them into one task so the Worker keeps one continuous
+    context. Use an internal checklist inside that task instead of starting another
+    Worker. Shared support files such as package.json or README alone do not require
+    combining tasks.
 13. Dependencies must list only direct prerequisites. Do not repeat every transitive
     dependency on all later tasks.
 14. The supplied Active Project Surface is deterministic preflight evidence. Do
@@ -83,6 +86,10 @@ Rules:
 26. Let each implementation stage state
     its exact inputs, outputs, and deterministic acceptance evidence. The plan is
     complete only when the union of tasks fully satisfies the user's request.
+27. Assign a short context_key to every implementation task. Reuse the same
+    context_key only when tasks would need the same loaded code and live runtime
+    reasoning. Tasks with the same context_key will be merged into one long-lived
+    Worker conversation. Use different keys for genuinely independent runtimes.
 
 Output ONLY valid JSON with this structure:
 {
@@ -94,6 +101,7 @@ Output ONLY valid JSON with this structure:
       "type": "analysis|coding|testing|review|action",
       "description": "What to do",
       "dependencies": [],
+      "context_key": "game-runtime",
       "skills": ["simple-edit"],
       "allowed_paths": ["relative/path/glob", "*.html", "src/**/*.py"],
       "acceptance_command": "pytest ..."

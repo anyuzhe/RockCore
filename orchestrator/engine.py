@@ -2705,6 +2705,16 @@ class Engine:
                 str(task.get("description") or ""),
             ))
             normalized = text.lower()
+            # The shared-context optimizer deliberately turns several focused
+            # stages into one long-lived Worker task with an internal checklist.
+            # Do not ask Planner to split that task again: doing so would recreate
+            # the repeated context loading this optimizer exists to prevent.
+            continuous_worker = (
+                "以下步骤共享核心文件和运行状态" in text
+                and "内部步骤" in text
+            )
+            if continuous_worker:
+                continue
             if any(marker in normalized for marker in umbrella_markers):
                 errors.append(
                     f"granularity_quality:{task_id} is an umbrella task; "
@@ -2922,6 +2932,21 @@ class Engine:
             for path in ((surface or {}).get("support_files") or [])
             if str(path).strip()
         }
+        runtime_groups = [
+            {
+                str(path).replace("\\", "/").lstrip("./")
+                for path in (group.get("files") or [])
+                if str(path).strip()
+            }
+            for group in ((surface or {}).get("runtime_groups") or [])
+            if isinstance(group, dict)
+        ]
+        if not runtime_groups and active_files:
+            # Backward compatibility for checkpoints and tests created before
+            # ProjectResolver recorded one closure per runtime entrypoint.
+            entrypoints = list((surface or {}).get("entrypoints") or [])
+            if len(entrypoints) <= 1:
+                runtime_groups = [set(active_files)]
 
         parent = {task_id: task_id for task_id in task_by_id}
         group_commands = {
@@ -2984,6 +3009,47 @@ class Engine:
             task_id: anchors(task) for task_id, task in task_by_id.items()
         }
 
+        context_keys = {
+            task_id: re.sub(
+                r"[^a-z0-9_.:/-]+", "-",
+                str(task.get("context_key") or "").strip().lower(),
+            ).strip("-")
+            for task_id, task in task_by_id.items()
+        }
+
+        def depends_on(task: dict, target_id: str,
+                       seen: set[str] | None = None) -> bool:
+            """Return whether task belongs to target's serial execution chain."""
+            seen = set(seen or ())
+            task_id = str(task.get("id") or "")
+            if not task_id or task_id in seen:
+                return False
+            seen.add(task_id)
+            for dependency in task.get("dependencies") or []:
+                dependency_id = str(dependency)
+                if dependency_id == target_id:
+                    return True
+                dependency_task = task_by_id.get(dependency_id)
+                if dependency_task and depends_on(
+                    dependency_task, target_id, seen
+                ):
+                    return True
+            return False
+
+        def runtime_anchors(task_id: str) -> set[str]:
+            return anchors_by_id[task_id].intersection(active_files)
+
+        def shares_runtime_group(left_id: str, right_id: str) -> bool:
+            left_runtime = runtime_anchors(left_id)
+            right_runtime = runtime_anchors(right_id)
+            return bool(
+                left_runtime and right_runtime and any(
+                    left_runtime.intersection(group)
+                    and right_runtime.intersection(group)
+                    for group in runtime_groups
+                )
+            )
+
         for left_index, left in enumerate(tasks):
             left_id = str(left.get("id") or "")
             left_type = str(left.get("type") or "coding")
@@ -2999,7 +3065,20 @@ class Engine:
                 shared = anchors_by_id[left_id].intersection(
                     anchors_by_id[right_id]
                 )
-                if not shared:
+                same_declared_context = bool(
+                    context_keys[left_id]
+                    and context_keys[left_id] == context_keys[right_id]
+                )
+                serial_runtime_context = bool(
+                    shares_runtime_group(left_id, right_id)
+                    and (
+                        depends_on(right, left_id)
+                        or depends_on(left, right_id)
+                    )
+                )
+                if not (
+                    shared or same_declared_context or serial_runtime_context
+                ):
                     continue
                 # A prerequisite analysis can become the first part of the same
                 # conversation.  Unrelated analysis reports remain standalone.
@@ -3010,6 +3089,11 @@ class Engine:
                         str(item) for item in (coding.get("dependencies") or [])
                     }:
                         continue
+                # A matching context_key is Planner's explicit declaration that
+                # these stages need the same loaded code/runtime reasoning. When
+                # it is absent, the deterministic fallback joins a serial chain
+                # inside the resolved runtime closure, while acceptance-command
+                # compatibility still protects genuinely separate runtimes.
                 union(left_id, right_id)
 
         groups: dict[str, list[dict]] = {}

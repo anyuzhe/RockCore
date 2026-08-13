@@ -67,6 +67,8 @@ def test_package_scripts_import_graph_and_commands_are_resolved(tmp_path):
     assert surface["active_files"] == [
         "package.json", "src/lib/api.js", "src/server.js",
     ]
+    assert surface["runtime_groups"]
+    assert surface["runtime_groups"][0]["entrypoint"] == "src/server.js"
     assert surface["commands"]["start"] == "npm run start"
     assert surface["commands"]["test"] == "npm test"
 
