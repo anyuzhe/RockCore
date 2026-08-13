@@ -118,6 +118,9 @@ from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
 from .agent_config import ProjectAgentConfig, load_project_config
+from .failure_evals import FailureEvalStore
+from .hooks import HookRunner
+from .skill_learning import SkillLearningService
 from storage.database import create_session_factory
 from storage.repositories import (
     ProjectRepository, ExecutionConversationRepository, JobRepository, ConstitutionRepository,
@@ -156,6 +159,9 @@ class Engine:
 
         self.event_bus = EventBus()
         self.job_reports = JobReportService(self._session_factory)
+        self.failure_evals = FailureEvalStore(self._session_factory)
+        self.skill_learning = SkillLearningService(self._session_factory)
+        self.hook_runner = HookRunner(self.event_bus)
         self.event_bus.subscribe("*", self.job_reports.record_event)
         self.event_bus.subscribe("model_chat", self._record_model_usage)
         self.event_bus.subscribe(
@@ -165,6 +171,8 @@ class Engine:
             "task_budget_checkpoint", self._record_budget_checkpoint
         )
         self.event_bus.subscribe("job_finished", self._generate_job_report)
+        self.event_bus.subscribe("job_finished", self._capture_failure_eval)
+        self.event_bus.subscribe("job_finished", self._observe_skill_learning)
         self.state_machine = StateMachine()
         self.main_agent = MainAgent(self)
         self._default_scheduler = Scheduler(
@@ -186,8 +194,48 @@ class Engine:
         )
         self._job_runtimes: dict[str, JobRuntime] = {}
         self._project_job_locks: dict[str, asyncio.Lock] = {}
+        # User guidance for an active requirement is consumed by the same
+        # long-lived Worker.  It is deliberately kept outside model history
+        # until Worker has closed the current assistant/tool-result batch.
+        self._worker_instructions: dict[str, list[dict[str, str]]] = {}
         # Wire state machine to event bus.
         self.state_machine.add_listener(self._on_state_change_sync)
+
+    async def steer_job(self, job_id: str, instruction: str) -> bool:
+        """Queue guidance for the active Worker without creating a new Job.
+
+        The queue is Job-scoped so parallel projects cannot consume each
+        other's instructions.  Worker drains it only at a provider-protocol
+        safe boundary after every tool-call batch has all matching replies.
+        """
+        job_id = str(job_id or "").strip()
+        instruction = str(instruction or "").strip()
+        if not job_id or not instruction:
+            return False
+        session = self._session_factory()
+        try:
+            job = JobRepository(session).get_by_id(job_id)
+            if not job or job.status in {
+                "done", "failed", "cancelled", "interrupted",
+                "needs_attention", "rolled_back",
+            }:
+                return False
+        finally:
+            session.close()
+        item = {
+            "text": instruction[:8000],
+            "created_at": datetime.now().astimezone().isoformat(),
+        }
+        self._worker_instructions.setdefault(job_id, []).append(item)
+        await self.event_bus.publish(
+            "worker_instruction_queued", job_id=job_id,
+            instruction=item["text"], created_at=item["created_at"],
+        )
+        return True
+
+    def _drain_worker_instructions(self, job_id: str) -> list[dict[str, str]]:
+        """Atomically take pending guidance for exactly one running Job."""
+        return self._worker_instructions.pop(str(job_id or ""), [])
 
     def _active_runtime(self) -> JobRuntime | None:
         return self._runtime_context.get()
@@ -420,6 +468,18 @@ class Engine:
             path = str(data.get("path") or "").replace("\\", "/")
             tool_name = str(data.get("tool") or "")
             result_data = dict(data.get("result") or {})
+            runtime_by_task = dict(checkpoint.get("worker_runtime") or {})
+            runtime = dict(runtime_by_task.get(task_id) or {})
+            runtime.update({
+                "task_id": task_id,
+                "phase": str(data.get("phase") or ""),
+                "last_tool": tool_name,
+                "last_path": path,
+                "last_turn": int(data.get("turn") or 0),
+                "last_status": str(data.get("status") or ""),
+                "updated_at": datetime.now().astimezone().isoformat(),
+                "pending_action": "Continue after the last completed tool result",
+            })
             if tool_name in {"read_file", "search_in_file", "search_code", "read_log"}:
                 evidence_key = path or tool_name
                 session.setdefault("read_evidence", {})[evidence_key] = {
@@ -431,6 +491,9 @@ class Engine:
                         else result_data.get("total_lines") or "read"
                     )[:200],
                 }
+                runtime.setdefault("read_evidence", {})[evidence_key] = dict(
+                    session["read_evidence"][evidence_key]
+                )
             if tool_name:
                 record_substep(
                     session,
@@ -452,6 +515,22 @@ class Engine:
                 session["changed_files"] = list(dict.fromkeys(
                     list(session.get("changed_files") or []) + [path]
                 ))[:100]
+                runtime["completed_writes"] = list(dict.fromkeys(
+                    list(runtime.get("completed_writes") or []) + [path]
+                ))[:100]
+            runtime["recent_results"] = (
+                list(runtime.get("recent_results") or []) + [{
+                    "tool": tool_name, "path": path,
+                    "status": str(data.get("status") or ""),
+                    "summary": str(
+                        result_data.get("summary")
+                        or result_data.get("message")
+                        or result_data.get("error") or ""
+                    )[:500],
+                }]
+            )[-20:]
+            runtime_by_task[task_id] = runtime
+            checkpoint["worker_runtime"] = runtime_by_task
             session["current_step"] = task_id
             session["next_action"] = "Continue the current task without rediscovering unchanged files"
             checkpoint["execution_session"] = session
@@ -508,6 +587,80 @@ class Engine:
             "job_report_ready", job_id=job_id, path=str(path),
         )
         return str(path)
+
+    async def replay_job_events(self, job_id: str, *, speed: float = 0.0) -> int:
+        """Replay a durable Job timeline into the UI without any model call."""
+        events = await asyncio.to_thread(self.job_reports.events, job_id)
+        await self.event_bus.publish_transient(
+            "job_replay_started", job_id=job_id, event_count=len(events),
+        )
+        previous = None
+        count = 0
+        for item in events:
+            event_type = str(item.get("event") or "")
+            data = dict(item.get("data") or {})
+            if not event_type:
+                continue
+            if speed > 0 and previous:
+                try:
+                    current = datetime.fromisoformat(
+                        str(item.get("timestamp") or "").replace("Z", "+00:00")
+                    )
+                    delay = max(0.0, min(1.5, (current - previous).total_seconds() / speed))
+                    if delay:
+                        await asyncio.sleep(delay)
+                    previous = current
+                except (TypeError, ValueError):
+                    pass
+            elif speed > 0:
+                try:
+                    previous = datetime.fromisoformat(
+                        str(item.get("timestamp") or "").replace("Z", "+00:00")
+                    )
+                except (TypeError, ValueError):
+                    previous = None
+            await self.event_bus.publish_transient(
+                "job_replay_event", job_id=job_id,
+                original_event=event_type, original_data=data,
+                timestamp=item.get("timestamp", ""),
+            )
+            count += 1
+        await self.event_bus.publish_transient(
+            "job_replay_finished", job_id=job_id, event_count=count,
+        )
+        return count
+
+    async def _run_project_hooks(self, config: ProjectAgentConfig, event: str,
+                                 *, job_id: str, project_root: str,
+                                 task_id: str = "") -> list[dict]:
+        hooks = getattr(config, "hooks", None)
+        commands = list(getattr(hooks, event, []) or []) if hooks else []
+        if not hooks or not hooks.enabled or not commands:
+            return []
+        return await self.hook_runner.run(
+            event, job_id=job_id, project_root=project_root,
+            task_id=task_id, commands=commands,
+        )
+
+    async def _capture_failure_eval(self, _event_type: str, **data):
+        job_id = str(data.get("job_id") or "")
+        if not job_id:
+            return
+        case = await asyncio.to_thread(self.failure_evals.capture, job_id)
+        if case:
+            await self.event_bus.publish_transient(
+                "failure_eval_captured", job_id=job_id, case=case,
+            )
+
+    async def _observe_skill_learning(self, _event_type: str, **data):
+        job_id = str(data.get("job_id") or "")
+        if not job_id:
+            return
+        suggestion = await asyncio.to_thread(self.skill_learning.observe, job_id)
+        if suggestion:
+            await self.event_bus.publish_transient(
+                "skill_suggestion", job_id=job_id, **suggestion,
+            )
 
     def get_agent(self, agent_type: str):
         runtime = self._active_runtime()
@@ -648,6 +801,14 @@ class Engine:
                 )
         finally:
             self._close_repos(repos)
+        # Keep this short metadata scan on the engine thread. SQLite in-memory
+        # databases are connection-local, so moving it to a worker thread can
+        # open a fresh connection with no schema during tests and embeddings.
+        historical_evals = self.failure_evals.sync_historical()
+        if historical_evals:
+            await self.event_bus.publish_transient(
+                "failure_evals_synced", count=len(historical_evals),
+            )
         logger.info("Engine started")
 
     async def stop(self):
@@ -1652,6 +1813,15 @@ class Engine:
             proj_root = job.project.root_path if job.project else project_root
             proj_config = load_project_config(proj_root)
             logger.info(f"Job {job_id}: mode={proj_config.mode}")
+            before_job_hooks = await self._run_project_hooks(
+                proj_config, "before_job", job_id=job_id,
+                project_root=proj_root,
+            )
+            if any(item.get("status") != "passed" for item in before_job_hooks):
+                raise RuntimeError(
+                    "before_job hook failed: "
+                    + str(before_job_hooks[-1].get("output") or "unknown error")
+                )
 
             project_surface = await self._resolve_project_surface(
                 job, repos, proj_root
@@ -3841,9 +4011,10 @@ class Engine:
                 "changed": [], "files_changed": 0,
                 "additions": 0, "deletions": 0,
             }
+            after_write_hook_failure: dict = {}
 
             async def publish_worker_progress(progress: dict):
-                nonlocal live_change_summary
+                nonlocal live_change_summary, after_write_hook_failure
                 phase = str(progress.get("phase") or "正在执行")
                 if phase in {"正在修改文件", "正在执行验证"}:
                     live_change_summary = self.test_manager.change_summary(
@@ -3895,8 +4066,30 @@ class Engine:
                         result=progress.get("result") or {},
                         duration_ms=progress.get("duration_ms", 0),
                     )
+                    if (
+                        progress.get("tool") in {
+                            "write_file", "apply_patch", "insert_before",
+                            "insert_after", "write_docx", "write_pptx",
+                            "write_pdf", "promote_artifact",
+                        }
+                        and str(progress.get("status") or "")
+                        not in {"error", "rejected", "failed"}
+                    ):
+                        hook_results = await self._run_project_hooks(
+                            proj_config, "after_write", job_id=job.job_id,
+                            project_root=task_worktree_root, task_id=task_id,
+                        )
+                        failed_hook = next((
+                            item for item in hook_results
+                            if item.get("status") != "passed"
+                        ), None)
+                        if failed_hook:
+                            after_write_hook_failure = dict(failed_hook)
 
             t._rockcore_progress_callback = publish_worker_progress
+            t._rockcore_instruction_source = (
+                lambda job_id=job.job_id: self._drain_worker_instructions(job_id)
+            )
             base_exploration = (
                 proj_config.get_exploration_turns(complexity)
                 if proj_config else getattr(task_worker, "max_exploration_turns", 12)
@@ -4293,14 +4486,34 @@ class Engine:
                     resumed_validation
                     and resumed_validation.get("status") == "passed"
                 ) if recovered_from_checkpoint else True
-                if recovered_from_checkpoint:
+                if after_write_hook_failure:
+                    test_passed = False
+                    test_result = {
+                        "status": "failed",
+                        "output": after_write_hook_failure.get(
+                            "output", "after_write hook failed"
+                        ),
+                        "hook": "after_write",
+                    }
+                elif recovered_from_checkpoint:
                     pass
                 elif t.acceptance_command:
-                    test_result = await self.test_manager.run_tests(
-                        t, repos, self.event_bus,
-                        baseline_snapshot=task_baseline,
-                        project_root=task_worktree_root,
+                    before_test_hooks = await self._run_project_hooks(
+                        proj_config, "before_test", job_id=job.job_id,
+                        project_root=task_worktree_root, task_id=task_id,
                     )
+                    if any(item.get("status") != "passed" for item in before_test_hooks):
+                        test_result = {
+                            "status": "failed",
+                            "output": before_test_hooks[-1].get("output", "Hook failed"),
+                            "hook": "before_test",
+                        }
+                    else:
+                        test_result = await self.test_manager.run_tests(
+                            t, repos, self.event_bus,
+                            baseline_snapshot=task_baseline,
+                            project_root=task_worktree_root,
+                        )
                     if test_result and test_result.get("status") != "passed":
                         test_passed = False
                         logger.warning(f"Task {task_id} acceptance test failed: {test_result.get('status')}")
@@ -4309,11 +4522,22 @@ class Engine:
                     and (proj_config is None or proj_config.auto_validation)
                     and has_file_changes
                 ):
-                    test_result = await self.test_manager.validate_project(
-                        t, repos, self.event_bus,
-                        baseline_snapshot=task_baseline,
-                        project_root=task_worktree_root,
+                    before_test_hooks = await self._run_project_hooks(
+                        proj_config, "before_test", job_id=job.job_id,
+                        project_root=task_worktree_root, task_id=task_id,
                     )
+                    if any(item.get("status") != "passed" for item in before_test_hooks):
+                        test_result = {
+                            "status": "failed",
+                            "output": before_test_hooks[-1].get("output", "Hook failed"),
+                            "hook": "before_test",
+                        }
+                    else:
+                        test_result = await self.test_manager.validate_project(
+                            t, repos, self.event_bus,
+                            baseline_snapshot=task_baseline,
+                            project_root=task_worktree_root,
+                        )
                     if test_result.get("status") != "passed":
                         test_passed = False
                         logger.warning(
@@ -4446,6 +4670,29 @@ class Engine:
                 if test_passed:
                     # Merge worktree back
                     if has_worktree and has_file_changes:
+                        before_commit_hooks = await self._run_project_hooks(
+                            proj_config, "before_commit", job_id=job.job_id,
+                            project_root=task_worktree_root, task_id=task_id,
+                        )
+                        if any(
+                            item.get("status") != "passed"
+                            for item in before_commit_hooks
+                        ):
+                            detail = str(
+                                before_commit_hooks[-1].get("output")
+                                or "before_commit hook failed"
+                            )
+                            failure = {
+                                "status": "failed", "error": detail,
+                                "failure_stage": "before_commit_hook",
+                                "checkpoint": {"changes": task_changes},
+                            }
+                            repos["task"].update_status_by_pk(t.id, "failed")
+                            self._checkpoint_task(
+                                repos, job, t, status="failed",
+                                result=failure, error=detail,
+                            )
+                            return failure
                         merge_msg = f"AI {job.job_id}: {task_id} - {t.title}"
                         merge_result = await self.merge_manager.commit_and_merge(task_id, merge_msg)
                         integration_result = merge_result
@@ -6908,9 +7155,15 @@ class Engine:
             "commands": dict(surface.get("commands") or {}),
             "ambiguities": list(surface.get("ambiguities") or [])[:8],
             "completed_tasks": list(completed_by_id.values())[-8:],
+            "worker_runtime": dict(
+                (checkpoint.get("worker_runtime") or {}).get(
+                    getattr(task, "task_id", ""),
+                ) or {}
+            ),
         }
         if not any(payload[key] for key in (
-            "entrypoints", "active_files", "completed_tasks", "ambiguities"
+            "entrypoints", "active_files", "completed_tasks", "ambiguities",
+            "worker_runtime",
         )):
             return ""
         return (
@@ -7356,6 +7609,12 @@ Prefer these existing files when relevant:
                     warning="项目中未检测到用户文件；已保留审核后的完成状态",
                 )
 
+        if job.project:
+            config = load_project_config(job.project.root_path)
+            await self._run_project_hooks(
+                config, "after_job", job_id=job.job_id,
+                project_root=job.project.root_path,
+            )
         await self.event_bus.publish(
             "job_finished", job_id=job.job_id, status=job.status
         )

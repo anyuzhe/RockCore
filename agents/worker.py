@@ -146,6 +146,7 @@ class WorkerAgent:
         logger.info(f"Worker: executing task {task.task_id}: {task.title}")
 
         progress_callback = getattr(task, "_rockcore_progress_callback", None)
+        instruction_source = getattr(task, "_rockcore_instruction_source", None)
 
         async def report_progress(
             phase: str, *, tool: str = "", path: str = "", turn: int = 0,
@@ -173,6 +174,26 @@ class WorkerAgent:
                     await outcome
             except Exception as error:
                 logger.debug("Worker progress callback failed: %s", error)
+
+        async def receive_user_guidance() -> list[str]:
+            """Drain live guidance only at a complete message boundary."""
+            if not callable(instruction_source):
+                return []
+            try:
+                value = instruction_source()
+                if inspect.isawaitable(value):
+                    value = await value
+            except Exception as error:
+                logger.debug("Worker instruction source failed: %s", error)
+                return []
+            guidance = []
+            for item in value or []:
+                text = str(
+                    item.get("text", "") if isinstance(item, dict) else item
+                ).strip()
+                if text:
+                    guidance.append(text[:8000])
+            return guidance
 
         project_root = project_root or (project.root_path if project else ".")
 
@@ -303,6 +324,22 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
 
         try:
             for turn in range(self.max_turns):
+                live_guidance = await receive_user_guidance()
+                if live_guidance:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The user corrected or refined the current running "
+                            "requirement. Apply this guidance in the same task; "
+                            "preserve useful work already completed:\n- "
+                            + "\n- ".join(live_guidance)
+                        ),
+                    })
+                    await report_progress(
+                        "已接收用户补充说明", turn=turn + 1,
+                        event_kind="instruction_applied", status="success",
+                        result={"instructions": live_guidance},
+                    )
                 job_id = str(
                     getattr(self.model_router, "_current_job_id", "") or "unknown"
                 )
@@ -1085,6 +1122,24 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         "role": "user",
                         "content": "\n\n".join(dict.fromkeys(batch_notices)),
                     })
+
+                # The assistant tool_calls message now has every matching tool
+                # result.  This is the earliest safe point for live user input.
+                live_guidance = await receive_user_guidance()
+                if live_guidance:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The user added guidance while this tool batch was "
+                            "running. Continue the same task and preserve completed "
+                            "work:\n- " + "\n- ".join(live_guidance)
+                        ),
+                    })
+                    await report_progress(
+                        "已应用用户补充说明", turn=turn + 1,
+                        event_kind="instruction_applied", status="success",
+                        result={"instructions": live_guidance},
+                    )
 
                 if exploration_blocked:
                     messages.append({

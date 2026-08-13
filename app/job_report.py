@@ -78,6 +78,14 @@ class JobReportService:
             return None
         return path if not existing_only or path.is_file() else None
 
+    def events(self, job_id: str) -> list[dict[str, Any]]:
+        """Return the durable event recording used by reports and replay."""
+        try:
+            _, event_path = self._resolve_paths(job_id)
+        except (LookupError, OSError):
+            return []
+        return self._load_events(event_path)
+
     async def record_event(self, event_type: str, **data):
         """Append a sanitized event without depending on the transient UI queue."""
         job_id = str(data.get("job_id") or "").strip()

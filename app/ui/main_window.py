@@ -354,6 +354,7 @@ class MainWindow(QMainWindow):
         )
         self.task_panel.rollback_requested.connect(self._on_rollback_requested)
         self.task_panel.report_requested.connect(self._on_report_requested)
+        self.task_panel.replay_requested.connect(self._on_replay_requested)
 
         self.project_panel.project_selected.connect(self._on_project_selected)
         self.project_panel.project_deleted.connect(self._on_project_deleted)
@@ -445,6 +446,7 @@ class MainWindow(QMainWindow):
                             "acceptance_command": t.acceptance_command or "",
                             "description": t.description or "",
                             "allowed_paths": t.allowed_paths or [],
+                            "result_data": dict(t.result_data or {}),
                             "started_at": as_utc_isoformat(next((
                                 run.started_at
                                 for run in repos["agent_run"].list_by_task(t.id)
@@ -713,6 +715,13 @@ class MainWindow(QMainWindow):
             return
         self.task_panel.set_report_state(generating=True, available=True)
         asyncio.ensure_future(self._generate_and_open_job_report(job_id))
+
+    def _on_replay_requested(self, data: dict):
+        job_id = str(data.get("job_id") or "")
+        if not job_id or not self.engine:
+            self.task_panel.finish_replay(0)
+            return
+        asyncio.ensure_future(self.engine.replay_job_events(job_id, speed=20.0))
 
     async def _generate_and_open_job_report(self, job_id: str):
         try:
@@ -1024,6 +1033,22 @@ class MainWindow(QMainWindow):
             project_key in self._starting_projects or self._job_starting
         )
         if running_job_id or project_starting:
+            # "继续 JOB-…" while it is running means steer the current Worker,
+            # not create a second requirement. Attachments still become a queued
+            # turn because provider image payloads are immutable mid-call.
+            if (
+                running_job_id
+                and self._followup_source_job_id == running_job_id
+                and not attachments
+                and self.engine
+            ):
+                self.input_text.clear()
+                asyncio.ensure_future(
+                    self._steer_running_job(running_job_id, request)
+                )
+                self.status_label.setText("补充说明已发送，将在当前工具步骤后生效")
+                self._update_send_state()
+                return
             queued = {
                 "request": request,
                 "attachments": attachments,
@@ -1069,6 +1094,16 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("执行引擎尚未连接")
         self._update_send_state()
+
+    async def _steer_running_job(self, job_id: str, instruction: str):
+        accepted = await self.engine.steer_job(job_id, instruction)
+        if accepted:
+            self.task_panel.log(f"已补充当前执行：{instruction[:200]}", "log")
+        else:
+            self.status_label.setText("当前执行已结束，补充内容已转为下一轮需求")
+            self.input_text.setPlainText(instruction)
+            self._clear_followup_source()
+            self._on_submit_request()
 
     async def _run_job_async(self, request: str, source_job_id: str | None,
                              attachments: list[dict] | None = None,
@@ -1783,6 +1818,33 @@ class MainWindow(QMainWindow):
                 self.task_panel.log(
                     f"任务报告生成失败：{data.get('error', '未知错误')}", "log",
                 )
+        elif event_type == "job_replay_started" and is_selected:
+            self.task_panel.worker_activity.clear()
+            self.task_panel.worker_activity.set_live(True)
+            self.status_label.setText("正在重放历史执行过程")
+        elif event_type == "job_replay_event" and is_selected:
+            original = str(data.get("original_event") or "")
+            original_data = dict(data.get("original_data") or {})
+            if original in {
+                "task_running", "task_progress", "worker_tool_started",
+                "worker_tool_completed", "test_running", "test_result",
+                "task_done", "task_failed", "phase_summary",
+            }:
+                self._on_event(original, original_data)
+        elif event_type == "job_replay_finished" and is_selected:
+            self.task_panel.worker_activity.set_live(False)
+            self.task_panel.finish_replay(int(data.get("event_count") or 0))
+            self.status_label.setText("历史执行过程重放完成")
+        elif event_type == "failure_eval_captured" and is_selected:
+            case = data.get("case") or {}
+            self.task_panel.log(
+                f"已生成失败回归 Eval：{case.get('id', '')}", "log"
+            )
+        elif event_type == "skill_suggestion" and is_selected:
+            self.task_panel.append_stage_output(
+                "worker", str(data.get("message") or "发现可沉淀的 Skill")
+                + f" 建议名称：{data.get('name', 'project-workflow')}。",
+            )
         elif event_type == "job_needs_attention":
             self.status_label.setText("任务需要你的处理")
             if is_selected:

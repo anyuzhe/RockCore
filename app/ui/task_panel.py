@@ -424,6 +424,7 @@ class TaskPanel(QWidget):
     attention_resume_requested = pyqtSignal(dict)
     rollback_requested = pyqtSignal(dict)
     report_requested = pyqtSignal(dict)
+    replay_requested = pyqtSignal(dict)
 
     STAGES = (
         ("user", "理解需求", "目标与当前轮输入"),
@@ -508,6 +509,12 @@ class TaskPanel(QWidget):
         self.report_btn.setVisible(False)
         self.report_btn.clicked.connect(self._request_report)
         header_layout.addWidget(self.report_btn)
+        self.replay_btn = QPushButton("重放过程")
+        self.replay_btn.setObjectName("quietButton")
+        self.replay_btn.setToolTip("从持久事件记录重放执行过程，不会再次调用模型")
+        self.replay_btn.setVisible(False)
+        self.replay_btn.clicked.connect(self._request_replay)
+        header_layout.addWidget(self.replay_btn)
         root.addWidget(header)
 
         self.scroll = QScrollArea()
@@ -624,6 +631,23 @@ class TaskPanel(QWidget):
         self.agent_summary.setObjectName("assistantSummary")
         self.agent_summary.setWordWrap(True)
         agent_layout.addWidget(self.agent_summary)
+
+        self.evidence_frame = QFrame()
+        self.evidence_frame.setObjectName("resultEvidenceCard")
+        evidence_layout = QVBoxLayout(self.evidence_frame)
+        evidence_layout.setContentsMargins(14, 11, 14, 11)
+        evidence_title = QLabel("结果证据")
+        evidence_title.setObjectName("traceLabel")
+        self.evidence_text = QLabel("")
+        self.evidence_text.setObjectName("assistantSummary")
+        self.evidence_text.setWordWrap(True)
+        self.evidence_text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        evidence_layout.addWidget(evidence_title)
+        evidence_layout.addWidget(self.evidence_text)
+        self.evidence_frame.hide()
+        agent_layout.addWidget(self.evidence_frame)
 
         self.worker_activity = ExecutionActivityTimeline()
 
@@ -1077,6 +1101,7 @@ class TaskPanel(QWidget):
         )
         self._set_header_status(status)
         self._set_terminal_actions(status, job)
+        self._set_result_evidence(status, job, self._tasks)
         self.set_report_state(
             path=str(job.get("report_path") or ""),
             generating=bool(job.get("report_generating")),
@@ -2073,6 +2098,62 @@ class TaskPanel(QWidget):
             self.report_btn.setText("正在生成…")
             self.report_requested.emit(self._current_job)
 
+    def _request_replay(self):
+        if self._current_job:
+            self.replay_btn.setEnabled(False)
+            self.replay_btn.setText("正在重放…")
+            self.replay_requested.emit(self._current_job)
+
+    def finish_replay(self, event_count: int = 0):
+        self.replay_btn.setText("重放过程")
+        self.replay_btn.setEnabled(True)
+        self.log(f"过程重放完成：{event_count} 条持久事件", "log")
+
+    def _set_result_evidence(self, status: str, job: dict,
+                             tasks: list[dict]):
+        """Lead terminal UI with concrete artifacts and validation evidence."""
+        if status not in TERMINAL_JOB_STATUSES:
+            self.evidence_frame.hide()
+            return
+        changed = []
+        validations = []
+        commits = []
+        unmet = []
+        for task in tasks or []:
+            data = dict(task.get("result_data") or {})
+            changes = data.get("changes") or {}
+            changed.extend(map(str, changes.get("changed") or []))
+            integration = data.get("integration") or {}
+            commit = str(
+                integration.get("commit") or integration.get("commit_hash") or ""
+            ).strip()
+            if commit:
+                commits.append(commit)
+            for result in task.get("test_results") or []:
+                validations.append(
+                    f"{result.get('command') or '项目验收'}："
+                    f"{STATUS_STYLE.get(result.get('status', ''), {}).get('text', result.get('status', '未知'))}"
+                )
+            if task.get("status") in {"failed", "blocked", "interrupted", "needs_attention"}:
+                unmet.append(
+                    f"{task.get('task_id', '')}："
+                    f"{task.get('failure_reason') or '尚未完成'}"
+                )
+        lines = [
+            "产出：" + (
+                "、".join(dict.fromkeys(changed)) if changed
+                else "本次为只读分析或没有产生文件变化"
+            ),
+            "验收：" + ("；".join(validations) if validations else "无独立验收命令记录"),
+            "未完成：" + ("；".join(unmet) if unmet else "无"),
+        ]
+        if commits:
+            lines.append("提交：" + "、".join(dict.fromkeys(commits)))
+        if job.get("report_path"):
+            lines.append("审计报告：已生成，可点击“查看报告”")
+        self.evidence_text.setText("\n".join(lines))
+        self.evidence_frame.show()
+
     def set_report_state(self, *, path: str = "", generating: bool = False,
                          available: bool = True):
         """Expose an existing report or an on-demand generator for old Jobs."""
@@ -2110,6 +2191,8 @@ class TaskPanel(QWidget):
             "done", "failed", "cancelled", "interrupted", "needs_attention",
         })
         self.rollback_btn.setEnabled(status != "rolled_back")
+        self.replay_btn.setVisible(status in TERMINAL_JOB_STATUSES)
+        self.replay_btn.setEnabled(status in TERMINAL_JOB_STATUSES)
         self.attention_card.setVisible(is_attention)
         self.attention_resume_btn.setEnabled(is_attention)
         if not is_attention:

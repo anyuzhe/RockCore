@@ -1143,7 +1143,7 @@ def test_legacy_role_defaults_are_upgraded_to_recommended_stack():
         },
     })
 
-    assert config.config_version == 9
+    assert config.config_version == 10
     assert config.governor.model == "gpt-5.6-sol"
     assert config.governor.reasoning_effort == "high"
     assert config.planner.model == "kimi-k3"
@@ -1191,7 +1191,7 @@ def test_version_seven_project_limits_are_tripled_once():
     upgraded = ProjectAgentConfig.from_dict(legacy)
     reloaded = ProjectAgentConfig.from_dict(upgraded.to_dict())
 
-    assert upgraded.config_version == 9
+    assert upgraded.config_version == 10
     assert upgraded.planner.max_turns == 24
     assert upgraded.worker.max_turns == 150
     assert upgraded.worker.model == "deepseek-v4-pro"

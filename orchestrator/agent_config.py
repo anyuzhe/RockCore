@@ -66,6 +66,32 @@ class WorkerProfile(AgentProfile):
     fallback_model: str = KIMI_K27_CODE_MODEL
 
 
+@dataclass
+class HookConfig:
+    """Project-owned deterministic lifecycle commands."""
+
+    enabled: bool = False
+    before_job: list[str] = field(default_factory=list)
+    after_write: list[str] = field(default_factory=list)
+    before_test: list[str] = field(default_factory=list)
+    before_commit: list[str] = field(default_factory=list)
+    after_job: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "HookConfig":
+        values = data if isinstance(data, dict) else {}
+        result = cls(enabled=bool(values.get("enabled", False)))
+        for name in (
+            "before_job", "after_write", "before_test",
+            "before_commit", "after_job",
+        ):
+            raw = values.get(name) or []
+            if isinstance(raw, str):
+                raw = [raw]
+            setattr(result, name, [str(item).strip() for item in raw if str(item).strip()])
+        return result
+
+
 CORE_BUILTIN_SKILLS = [
     "simple-create",
     "simple-edit",
@@ -274,7 +300,7 @@ class ProjectAgentConfig:
     """Per-project AI workflow configuration. Persisted to .ai/agents.json."""
 
     # ── Mode ──
-    config_version: int = 9
+    config_version: int = 10
     # The historical governor profile now configures the model Main Agent.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
@@ -324,6 +350,7 @@ class ProjectAgentConfig:
     skills: SkillConfig = field(default_factory=SkillConfig)
     plugins: PluginConfig = field(default_factory=PluginConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    hooks: HookConfig = field(default_factory=HookConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProjectAgentConfig":
@@ -351,6 +378,7 @@ class ProjectAgentConfig:
         cfg.skills = SkillConfig.from_dict(data.get("skills"))
         cfg.plugins = PluginConfig.from_dict(data.get("plugins"))
         cfg.mcp = MCPConfig.from_dict(data.get("mcp"))
+        cfg.hooks = HookConfig.from_dict(data.get("hooks"))
         if source_version < 2:
             cfg._upgrade_legacy_recommendations()
         if source_version < 5:
@@ -362,7 +390,7 @@ class ProjectAgentConfig:
         if source_version < 9:
             cfg._upgrade_default_worker_model()
         cfg._normalize_provider_model_ids()
-        cfg.config_version = 9
+        cfg.config_version = 10
         return cfg
 
     def _upgrade_default_worker_model(self):
@@ -477,6 +505,7 @@ class ProjectAgentConfig:
             "skills": asdict(self.skills),
             "plugins": asdict(self.plugins),
             "mcp": asdict(self.mcp),
+            "hooks": asdict(self.hooks),
         }
 
     def builtin_mcp_servers(self, request: str = "") -> list[MCPServerConfig]:

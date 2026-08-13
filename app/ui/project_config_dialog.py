@@ -15,7 +15,7 @@ from PyQt6.QtGui import QColor, QPalette
 from orchestrator.agent_config import (
     ProjectAgentConfig, load_project_config, save_project_config,
     PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, CORE_BUILTIN_SKILLS,
-    COMMON_PLUGINS, SkillConfig, PluginConfig, MCPConfig,
+    COMMON_PLUGINS, SkillConfig, PluginConfig, MCPConfig, HookConfig,
 )
 from mcp_runtime.trust import approve_project_mcp, revoke_project_mcp
 from skills.trust import approve_project_skills, revoke_project_skills
@@ -263,6 +263,31 @@ class ProjectConfigDialog(QDialog):
 
         worker_layout.addStretch()
         self.tabs.addTab(worker_widget, "执行者")
+
+        # ── Hooks Tab ──
+        hooks_widget = QWidget()
+        hooks_layout = QVBoxLayout(hooks_widget)
+        self.hooks_enabled = QCheckBox("启用项目生命周期 Hooks")
+        self.hooks_enabled.setToolTip(
+            "在固定阶段运行项目自己配置的命令，不调用模型；每行一条命令"
+        )
+        hooks_layout.addWidget(self.hooks_enabled)
+        self._hook_editors = {}
+        for key, label in (
+            ("before_job", "任务开始前"),
+            ("after_write", "文件修改后"),
+            ("before_test", "验收前"),
+            ("before_commit", "提交合并前"),
+            ("after_job", "任务结束后"),
+        ):
+            editor = QPlainTextEdit()
+            editor.setPlaceholderText("每行一条命令；留空表示不执行")
+            editor.setMaximumHeight(70)
+            hooks_layout.addWidget(QLabel(label))
+            hooks_layout.addWidget(editor)
+            self._hook_editors[key] = editor
+        hooks_layout.addStretch(1)
+        self.tabs.addTab(hooks_widget, "Hooks")
 
         # ── Skills Tab ──
         skills_widget = QWidget()
@@ -568,6 +593,11 @@ class ProjectConfigDialog(QDialog):
             ensure_ascii=False, indent=2,
         ))
 
+        # Hooks
+        self.hooks_enabled.setChecked(cfg.hooks.enabled)
+        for name, editor in self._hook_editors.items():
+            editor.setPlainText("\n".join(getattr(cfg.hooks, name, []) or []))
+
     def _save(self):
         cfg = self._config
         try:
@@ -634,6 +664,17 @@ class ProjectConfigDialog(QDialog):
                 plugin_id for plugin_id, item in self._plugin_items.items()
                 if item.checkState() == Qt.CheckState.Checked
             ],
+        )
+        cfg.hooks = HookConfig(
+            enabled=self.hooks_enabled.isChecked(),
+            **{
+                name: [
+                    line.strip()
+                    for line in editor.toPlainText().splitlines()
+                    if line.strip()
+                ]
+                for name, editor in self._hook_editors.items()
+            },
         )
 
         try:

@@ -968,6 +968,30 @@ def test_terminal_status_clears_live_worker_activity():
     panel.close()
 
 
+def test_terminal_result_leads_with_evidence_and_offers_event_replay():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-EVIDENCE", "user_request": "修改页面",
+        "status": "done", "report_path": "/tmp/JOB-EVIDENCE.pdf",
+    }, tasks=[{
+        "task_id": "T001", "title": "修改页面", "status": "done",
+        "result_data": {
+            "changes": {"changed": ["index.html", "style.css"]},
+            "integration": {"commit": "abc1234"},
+        },
+        "test_results": [{"command": "pytest -q", "status": "passed"}],
+    }])
+
+    assert not panel.evidence_frame.isHidden()
+    assert "index.html" in panel.evidence_text.text()
+    assert "pytest -q" in panel.evidence_text.text()
+    assert "abc1234" in panel.evidence_text.text()
+    assert not panel.replay_btn.isHidden()
+    assert panel.replay_btn.text() == "重放过程"
+    panel.close()
+
+
 def test_live_task_timer_starts_and_finishes_on_task_events():
     _app()
     window = MainWindow(None)
