@@ -240,6 +240,9 @@ async def main():
         QFrame#executionActivityItem {
             background: transparent; border: none;
         }
+        QFrame#workflowStage QWidget#executionActivityTimeline {
+            margin-left: 24px;
+        }
         QLabel#activitySummary { color: #34312d; font-size: 12px; }
         QLabel#activityMeta { color: #8a847c; font-size: 10px; }
         QToolButton#activityDisclosureButton {

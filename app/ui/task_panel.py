@@ -138,6 +138,12 @@ class WorkflowStage(QFrame):
         layout.addWidget(self.output)
         self.set_status("pending")
 
+    def add_content_widget(self, widget: QWidget) -> None:
+        """Place live phase-specific content inside this workflow stage."""
+        # Keep the stage's diagnostic text last so the normal activity stream
+        # remains directly below the stage header.
+        self.layout().insertWidget(1, widget)
+
     def _toggle_output(self):
         self.set_expanded(not self.output.isVisible())
 
@@ -570,7 +576,6 @@ class TaskPanel(QWidget):
         agent_layout.addWidget(self.agent_summary)
 
         self.worker_activity = ExecutionActivityTimeline()
-        agent_layout.addWidget(self.worker_activity)
 
         self.attention_card = QFrame()
         self.attention_card.setObjectName("attentionCard")
@@ -614,6 +619,7 @@ class TaskPanel(QWidget):
             stage = WorkflowStage(key, title, subtitle)
             self.stages[key] = stage
             self.trace_layout.addWidget(stage)
+        self.stages["worker"].add_content_widget(self.worker_activity)
         self.repair_stages: dict[str, WorkflowStage] = {}
         agent_layout.addLayout(self.trace_layout)
 

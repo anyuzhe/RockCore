@@ -573,6 +573,16 @@ def test_worker_activity_timeline_updates_started_tool_in_place():
     panel.close()
 
 
+def test_worker_activity_timeline_is_nested_inside_worker_stage():
+    _app()
+    panel = TaskPanel()
+
+    assert panel.worker_activity.parentWidget() is panel.stages["worker"]
+    assert panel.stages["worker"].layout().indexOf(panel.worker_activity) == 1
+    assert panel.trace_layout.indexOf(panel.stages["worker"]) >= 0
+    panel.close()
+
+
 def test_worker_activity_groups_consecutive_reads_and_searches_by_task():
     _app()
     panel = TaskPanel()
