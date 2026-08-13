@@ -576,6 +576,20 @@ def test_changed_source_or_result_is_not_an_uninformative_repeat():
     )
 
 
+def test_cache_metadata_does_not_change_exploration_observation():
+    original = {
+        "status": "success", "content": "same", "source_version": "v1",
+        "tool": "read_file", "duration_ms": 12,
+    }
+    cached = {
+        **original, "cache_hit": True, "duration_ms": 0,
+    }
+
+    assert WorkerAgent._exploration_observation(original) == (
+        WorkerAgent._exploration_observation(cached)
+    )
+
+
 def test_paginated_or_truncated_results_are_allowed_to_continue():
     assert WorkerAgent._exploration_result_is_truncated({
         "status": "success", "has_more": True, "next_start": 81,

@@ -1,5 +1,7 @@
 """ToolBroker — central security checkpoint for all AI tool execution."""
 
+import copy
+import json
 import logging
 import inspect
 import os
@@ -20,6 +22,30 @@ from tools.runtime_tools import TaskRuntimeTools
 
 logger = logging.getLogger(__name__)
 
+_READ_CACHE_TOOLS = {"read_file", "search_in_file", "search_code"}
+_CACHE_INVALIDATING_TOOLS = {
+    "write_file",
+    "apply_patch",
+    "insert_before",
+    "insert_after",
+    "write_docx",
+    "write_pptx",
+    "write_pdf",
+    "write_temp_file",
+    "promote_artifact",
+    "run_command",
+    "run_tests",
+}
+_UNSUCCESSFUL_WRITE_STATUSES = {
+    "ambiguous",
+    "dependency_missing",
+    "encoding_error",
+    "error",
+    "failed",
+    "no_match",
+    "rejected",
+}
+
 
 class ToolBroker:
     """Central security layer: all AI tool calls go through here."""
@@ -39,6 +65,9 @@ class ToolBroker:
         self.git_tools = GitTools(self.project_root)
         self.test_tools = TestTools(self.project_root)
         self.runtime_tools: TaskRuntimeTools | None = None
+        # A broker is scoped to one worker task. Keep exact repeated reads in
+        # memory and invalidate them whenever that task successfully writes.
+        self._read_cache: dict[tuple[str, str], dict] = {}
 
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
@@ -477,6 +506,18 @@ class ToolBroker:
                 "duration_ms": int((time.time() - start) * 1000),
             }
 
+        cache_key = self._read_cache_key(requested_tool_name, args)
+        if cache_key is not None and cache_key in self._read_cache:
+            result = copy.deepcopy(self._read_cache[cache_key])
+            result["tool"] = requested_tool_name
+            result["duration_ms"] = 0
+            result["cache_hit"] = True
+            if routed_to_runtime:
+                result["redirected_to_runtime"] = True
+            if ignored_arguments:
+                result["ignored_arguments"] = ignored_arguments
+            return result
+
         # 2. Execute
         try:
             result = (
@@ -485,6 +526,21 @@ class ToolBroker:
             )
             duration = int((time.time() - start) * 1000)
             if isinstance(result, dict):
+                mutating_mcp_succeeded = (
+                    is_mcp
+                    and not self.mcp_manager.tool_is_read_only(tool_name)
+                    and self._write_succeeded(result)
+                )
+                command_may_have_written = requested_tool_name in {
+                    "run_command", "run_tests",
+                }
+                if mutating_mcp_succeeded or command_may_have_written or (
+                    requested_tool_name in _CACHE_INVALIDATING_TOOLS
+                    or tool_name in _CACHE_INVALIDATING_TOOLS
+                ) and self._write_succeeded(result):
+                    self._read_cache.clear()
+                elif cache_key is not None and self._result_is_cacheable(result):
+                    self._read_cache[cache_key] = copy.deepcopy(result)
                 result["tool"] = requested_tool_name
                 result["duration_ms"] = duration
                 if routed_to_runtime:
@@ -511,6 +567,26 @@ class ToolBroker:
             }
 
     @staticmethod
+    def _read_cache_key(tool_name: str, args: dict) -> tuple[str, str] | None:
+        if tool_name not in _READ_CACHE_TOOLS:
+            return None
+        serialized = json.dumps(
+            args, sort_keys=True, ensure_ascii=False, default=str,
+            separators=(",", ":"),
+        )
+        return tool_name, serialized
+
+    @staticmethod
+    def _result_is_cacheable(result: dict) -> bool:
+        return not result.get("error") and str(
+            result.get("status") or ""
+        ).lower() not in _UNSUCCESSFUL_WRITE_STATUSES
+
+    @staticmethod
+    def _write_succeeded(result: dict) -> bool:
+        return ToolBroker._result_is_cacheable(result)
+
+    @staticmethod
     def _normalize_tool_arguments(handler, args: dict) -> tuple[dict, list[str]]:
         """Drop provider-added metadata unsupported by the concrete handler."""
         values = dict(args) if isinstance(args, dict) else {}
@@ -533,6 +609,7 @@ class ToolBroker:
 
     def set_project_root(self, project_root: str | os.PathLike[str] | None):
         """Update the project root (called per-job to match the actual project)."""
+        self._read_cache.clear()
         self.project_root = (
             os.fspath(project_root) if project_root is not None else os.getcwd()
         )
@@ -578,6 +655,7 @@ class ToolBroker:
         source_job_id: str = "",
     ) -> dict:
         """Attach a private scratch directory to this task-scoped broker."""
+        self._read_cache.clear()
         self.runtime_tools = TaskRuntimeTools(
             self.project_root,
             state_root,

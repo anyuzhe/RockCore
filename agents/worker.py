@@ -1198,6 +1198,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             key: value for key, value in result.items()
             if key not in {
                 "duration_ms", "tool", "absolute_path", "ignored_arguments",
+                "cache_hit",
             }
         }
         payload = json.dumps(
