@@ -20,18 +20,45 @@ MAX_REPLAN_RETRY = 1
 MAX_REVIEW_REPAIR_ROUNDS = 2
 
 
-# Keywords that signal higher complexity
-COMPLEX_KEYWORDS = [
-    "数据库", "database", "迁移", "migration", "并发", "concurrent",
-    "认证", "auth", "安全", "security", "重构", "refactor",
-    "微服务", "microservice", "API", "接口", "支付", "payment",
-    "多线程", "multithread", "分布式", "distributed",
-]
-SIMPLE_KEYWORDS = [
-    "html", "HTML", "网页", "页面", "css", "CSS", "静态",
-    "修改", "fix", "修复", "bug", "小", "简单",
-    "显示", "展示", "调整", "改一下", "加个",
-]
+# Complexity is workload size, not merely the technical domain.  Broad words
+# such as "API", "payment", "page", or "fix" are deliberately absent: a typo
+# on a payment page can be tiny, while a browser game can be substantial.
+COMPLEX_WORKLOAD_KEYWORDS = (
+    "微服务", "microservice", "分布式", "distributed", "多线程",
+    "multithread", "并发架构", "concurrency architecture", "跨平台",
+    "cross-platform", "全量迁移", "完整迁移", "data migration",
+    "架构重构", "系统重构", "整体重构", "rewrite the system",
+)
+COMPLEX_SCOPE_MARKERS = (
+    "完整系统", "整个系统", "全套", "全部功能", "从零搭建", "从头开发",
+    "端到端", "多个模块", "所有模块", "完整游戏", "完整应用",
+    "full system", "entire system", "all features", "from scratch",
+    "end-to-end", "multiple modules", "complete game", "complete app",
+)
+OPEN_ENDED_BUILD_MARKERS = (
+    "开发一个", "开发一款", "创建一个", "制作一个", "搭建一个", "实现一个",
+    "build a", "build an", "create a", "develop a", "implement a",
+)
+MULTI_BEHAVIOR_MARKERS = (
+    "游戏", "小游戏", "系统", "平台", "应用", "工作流", "编辑器", "dashboard",
+    "game", "system", "platform", "application", "workflow", "editor",
+)
+FOCUSED_SIMPLE_MARKERS = (
+    "错别字", "拼写", "文案", "按钮文字", "标题文字", "颜色", "字号", "间距",
+    "链接地址", "注释", "改名", "重命名", "typo", "spelling", "copy text",
+    "button label", "text color", "font size", "spacing", "rename", "comment",
+)
+EXPLICIT_SMALL_SCOPE_MARKERS = (
+    "一个字段", "一个按钮", "一处", "单处", "一行", "单行", "仅修改",
+    "只修改", "一个文件", "单个文件", "one field", "one button", "one line",
+    "single line", "only change", "single file",
+)
+SIMPLE_STATIC_ARTIFACT_PATTERN = re.compile(
+    r"(?:简单|基础|静态|simple|basic|static).{0,24}"
+    r"(?:html|网页|页面|page)"
+    r"|(?:html|网页|页面|page).{0,24}(?:简单|基础|静态|simple|basic|static)",
+    re.IGNORECASE,
+)
 DOCUMENT_KEYWORDS = (
     ".pdf", "pdf", "文档", "书籍", "全书", "长文档", "电子书",
     "document", "book", "ebook",
@@ -664,21 +691,53 @@ class Engine:
         await self.event_bus.publish("job_done", job_id=job.job_id)
 
     def _classify_request(self, user_request: str) -> str:
-        """Classify a user request as simple, normal, or complex."""
-        req_lower = user_request.lower()
-        has_complex = any(kw.lower() in req_lower for kw in COMPLEX_KEYWORDS)
-        has_simple = any(kw in user_request or kw.lower() in req_lower for kw in SIMPLE_KEYWORDS)
+        """Conservatively classify request workload before model routing.
+
+        This rule layer should only claim ``simple`` when scope is explicit.
+        Ambiguous creation requests default to ``normal`` so MainAgent can make
+        the semantic decision instead of silently bypassing planning.
+        """
+        request = " ".join(str(user_request or "").split())
+        req_lower = request.lower()
+        has_complex_workload = any(
+            marker.lower() in req_lower for marker in COMPLEX_WORKLOAD_KEYWORDS
+        )
+        has_complex_scope = any(
+            marker.lower() in req_lower for marker in COMPLEX_SCOPE_MARKERS
+        )
 
         # Document work is dominated by source size rather than wording length.
         # Check it before generic phrases such as "创建一个", otherwise a whole
         # book can accidentally receive the small-task budget.
-        if self._is_document_request(user_request):
+        if self._is_document_request(request):
             if any(marker in req_lower for marker in LONG_DOCUMENT_KEYWORDS):
                 return "complex"
-            return "complex" if has_complex else "normal"
-        if has_complex:
+            return "complex" if has_complex_workload or has_complex_scope else "normal"
+        if has_complex_workload or has_complex_scope:
             return "complex"
-        if has_simple and len(user_request) < 200:
+
+        open_ended_build = any(
+            marker.lower() in req_lower for marker in OPEN_ENDED_BUILD_MARKERS
+        )
+        multi_behavior_subject = any(
+            marker.lower() in req_lower for marker in MULTI_BEHAVIOR_MARKERS
+        )
+        focused_change = any(
+            marker.lower() in req_lower for marker in FOCUSED_SIMPLE_MARKERS
+        )
+        explicit_small_scope = any(
+            marker.lower() in req_lower for marker in EXPLICIT_SMALL_SCOPE_MARKERS
+        )
+        simple_static_artifact = bool(
+            SIMPLE_STATIC_ARTIFACT_PATTERN.search(request)
+        )
+
+        # Short wording is not evidence of a small implementation.  A request
+        # such as "build a browser tank game" is open-ended and must receive a
+        # semantic MainAgent pass even though it contains "page" and is short.
+        if len(request) <= 240 and (
+            focused_change or explicit_small_scope or simple_static_artifact
+        ) and not (open_ended_build and multi_behavior_subject):
             return "simple"
         return "normal"
 
@@ -2256,6 +2315,9 @@ class Engine:
             )
 
         self._optimize_plan(plan_data, effective_complexity)
+        self._merge_shared_context_tasks(
+            plan_data, getattr(job, "_rockcore_project_surface", None)
+        )
         self._serialize_overlapping_tasks(
             plan_data, getattr(job, "_rockcore_project_surface", None)
         )
@@ -2308,6 +2370,9 @@ class Engine:
                     plan_data, getattr(job, "_rockcore_project_surface", None)
                 )
                 self._optimize_plan(plan_data, effective_complexity)
+                self._merge_shared_context_tasks(
+                    plan_data, getattr(job, "_rockcore_project_surface", None)
+                )
                 self._serialize_overlapping_tasks(
                     plan_data, getattr(job, "_rockcore_project_surface", None)
                 )
@@ -2824,6 +2889,233 @@ class Engine:
             for task in coding if str(task.get("acceptance_command") or "").strip()
         }
         return len(commands) <= 1
+
+    @classmethod
+    def _merge_shared_context_tasks(cls, plan_data: dict,
+                                    surface: dict | None = None) -> bool:
+        """Merge implementation stages that would reload the same core files.
+
+        A Planner task maps to one fresh Worker conversation.  Repeated coding
+        stages over the same runtime files therefore cost more context without
+        providing isolation.  Merge those stages deterministically, while
+        preserving analysis-only deliverables, action boundaries, independent
+        scopes, and conflicting acceptance commands.
+        """
+        original = copy.deepcopy(plan_data)
+        tasks = copy.deepcopy(list(plan_data.get("tasks") or []))
+        if len(tasks) < 2:
+            return False
+
+        task_by_id = {
+            str(task.get("id") or ""): task for task in tasks if task.get("id")
+        }
+        order = {
+            str(task.get("id") or ""): index for index, task in enumerate(tasks)
+        }
+        active_files = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in ((surface or {}).get("active_files") or [])
+            if str(path).strip()
+        }
+        support_files = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in ((surface or {}).get("support_files") or [])
+            if str(path).strip()
+        }
+
+        parent = {task_id: task_id for task_id in task_by_id}
+        group_commands = {
+            task_id: ({str(task.get("acceptance_command") or "").strip()}
+                      if str(task.get("acceptance_command") or "").strip()
+                      else set())
+            for task_id, task in task_by_id.items()
+        }
+
+        def find(task_id: str) -> str:
+            while parent[task_id] != task_id:
+                parent[task_id] = parent[parent[task_id]]
+                task_id = parent[task_id]
+            return task_id
+
+        def union(left_id: str, right_id: str) -> bool:
+            left_root, right_root = find(left_id), find(right_id)
+            if left_root == right_root:
+                return True
+            merged_commands = (
+                group_commands[left_root] | group_commands[right_root]
+            )
+            if len(merged_commands) > 1:
+                return False
+            if order[left_root] <= order[right_root]:
+                parent[right_root] = left_root
+                group_commands[left_root] = merged_commands
+            else:
+                parent[left_root] = right_root
+                group_commands[right_root] = merged_commands
+            return True
+
+        def anchors(task: dict) -> set[str]:
+            result: set[str] = set()
+            support_names = {
+                "package.json", "package-lock.json", "pnpm-lock.yaml",
+                "yarn.lock", "pyproject.toml", "pytest.ini", "readme.md",
+                "tsconfig.json", "vite.config.js", "vite.config.ts",
+            }
+            for raw_path in task.get("allowed_paths") or []:
+                path = str(raw_path or "").replace("\\", "/").lstrip("./")
+                if not path or cls._is_project_wide_plan_path(path):
+                    continue
+                if path in support_files or Path(path).name.lower() in support_names:
+                    continue
+                if any(character in path for character in "*?["):
+                    matches = {
+                        candidate for candidate in active_files
+                        if fnmatch.fnmatch(candidate, path)
+                    }
+                    # A broad source glob is not a stable context boundary unless
+                    # deterministic project resolution narrows it to a small set.
+                    if 0 < len(matches) <= 12:
+                        result.update(matches)
+                    continue
+                result.add(path)
+            return result
+
+        anchors_by_id = {
+            task_id: anchors(task) for task_id, task in task_by_id.items()
+        }
+
+        for left_index, left in enumerate(tasks):
+            left_id = str(left.get("id") or "")
+            left_type = str(left.get("type") or "coding")
+            if left_type not in {"analysis", "coding"} or not left_id:
+                continue
+            for right in tasks[left_index + 1:]:
+                right_id = str(right.get("id") or "")
+                right_type = str(right.get("type") or "coding")
+                if right_type not in {"analysis", "coding"} or not right_id:
+                    continue
+                if left_type == right_type == "analysis":
+                    continue
+                shared = anchors_by_id[left_id].intersection(
+                    anchors_by_id[right_id]
+                )
+                if not shared:
+                    continue
+                # A prerequisite analysis can become the first part of the same
+                # conversation.  Unrelated analysis reports remain standalone.
+                if "analysis" in {left_type, right_type}:
+                    analysis_id = left_id if left_type == "analysis" else right_id
+                    coding = right if right_type == "coding" else left
+                    if analysis_id not in {
+                        str(item) for item in (coding.get("dependencies") or [])
+                    }:
+                        continue
+                union(left_id, right_id)
+
+        groups: dict[str, list[dict]] = {}
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            if task_id:
+                groups.setdefault(find(task_id), []).append(task)
+        merge_groups = [
+            sorted(group, key=lambda item: order[str(item.get("id"))])
+            for group in groups.values()
+            if len(group) > 1 and any(
+                str(item.get("type") or "coding") == "coding" for item in group
+            )
+        ]
+        if not merge_groups:
+            return False
+
+        old_to_primary: dict[str, str] = {}
+        merged_by_primary: dict[str, dict] = {}
+        removed_ids: set[str] = set()
+        for group in merge_groups:
+            coding_members = [
+                item for item in group
+                if str(item.get("type") or "coding") == "coding"
+            ]
+            primary = coding_members[0]
+            primary_id = str(primary.get("id"))
+            group_ids = {str(item.get("id")) for item in group}
+            for task_id in group_ids:
+                old_to_primary[task_id.upper()] = primary_id
+                if task_id != primary_id:
+                    removed_ids.add(task_id)
+
+            sections = []
+            for step_number, item in enumerate(group, start=1):
+                title = str(item.get("title") or item.get("id") or "执行步骤")
+                description = str(item.get("description") or "").strip()
+                if str(item.get("type") or "coding") == "analysis":
+                    description = cls._analysis_as_preflight(description)
+                sections.append(
+                    f"【内部步骤 {step_number} · {title}】\n{description}".strip()
+                )
+            primary["title"] = (
+                str(primary.get("title") or "完成共享上下文实现")
+                + "（连续执行）"
+            )
+            primary["description"] = (
+                "以下步骤共享核心文件和运行状态，必须在同一 Worker 会话中"
+                "连续完成；完成前置检查后继续实现，不要在步骤之间重新扫描项目。\n\n"
+                + "\n\n".join(sections)
+            )
+            primary["type"] = "coding"
+            primary["allowed_paths"] = list(dict.fromkeys(
+                str(path) for item in group
+                for path in (item.get("allowed_paths") or []) if str(path).strip()
+            ))
+            primary["skills"] = list(dict.fromkeys(
+                str(skill) for item in group
+                for skill in (item.get("skills") or []) if str(skill).strip()
+            ))[:3]
+            primary["acceptance_command"] = next((
+                str(item.get("acceptance_command") or "").strip()
+                for item in reversed(group)
+                if str(item.get("acceptance_command") or "").strip()
+            ), "")
+            primary["dependencies"] = list(dict.fromkeys(
+                str(dependency) for item in group
+                for dependency in (item.get("dependencies") or [])
+                if str(dependency) not in group_ids
+            ))
+            merged_by_primary[primary_id] = primary
+
+        retained: list[dict] = []
+        emitted: set[str] = set()
+        for task in tasks:
+            task_id = str(task.get("id") or "")
+            mapped_id = old_to_primary.get(task_id.upper(), task_id)
+            if task_id in removed_ids:
+                continue
+            if mapped_id in merged_by_primary:
+                if mapped_id in emitted:
+                    continue
+                task = merged_by_primary[mapped_id]
+                emitted.add(mapped_id)
+            task["dependencies"] = list(dict.fromkeys(
+                old_to_primary.get(str(dependency).upper(), str(dependency))
+                for dependency in (task.get("dependencies") or [])
+                if old_to_primary.get(str(dependency).upper(), str(dependency))
+                != str(task.get("id") or "")
+            ))
+            for field in ("title", "description"):
+                task[field] = cls._rewrite_task_references(
+                    task.get(field), old_to_primary,
+                    str(task.get("id") or ""), set(),
+                )
+            retained.append(task)
+
+        plan_data["tasks"] = retained
+        plan_data["summary"] = cls._rewrite_task_references(
+            str(plan_data.get("summary") or ""), old_to_primary, "", set()
+        ) + f"（共享上下文步骤已合并为 {len(retained)} 个 Worker 任务）"
+        if PolicyEngine().check_task_plan(plan_data, {}):
+            plan_data.clear()
+            plan_data.update(original)
+            return False
+        return True
 
     @classmethod
     def _promote_complexity_from_plan(cls, complexity: str,

@@ -212,7 +212,9 @@ def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path)
         engine._finalize = finalize
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["planner", "worker", "skip-reviewer"]
+        # An ambiguous functional repair is no longer declared simple from the
+        # word "fix" alone. It receives a semantic MainAgent/Governor pass.
+        assert calls == ["governor", "planner", "worker", "skip-reviewer"]
 
     asyncio.run(scenario())
 

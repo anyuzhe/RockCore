@@ -137,6 +137,130 @@ def test_simple_plan_rewrites_removed_task_references_and_read_only_clause():
     assert PolicyEngine().check_task_plan(plan, {}) == []
 
 
+def test_conservative_complexity_classifier_keeps_ambiguous_builds_planned(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+
+    assert engine._classify_request("创建一个简单 HTML 页面") == "simple"
+    assert engine._classify_request("修改支付页面的一处错别字") == "simple"
+    assert engine._classify_request("开发一个网页版坦克大战小游戏") == "normal"
+    assert engine._classify_request("创建一个订单管理应用") == "normal"
+    assert engine._classify_request("搭建一个完整的分布式支付系统") == "complex"
+
+
+def test_shared_runtime_tasks_merge_into_one_worker_conversation():
+    plan = {
+        "summary": "Implement game after T001 and finish T004",
+        "tasks": [
+            {
+                "id": "T001", "type": "analysis", "title": "Inspect game",
+                "description": "检查 game.js 和 index.html 的现有结构。",
+                "allowed_paths": ["game.js", "index.html"], "dependencies": [],
+                "acceptance_command": "",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Build game core",
+                "description": "依据 T001 结论实现地图、玩家和子弹。",
+                "allowed_paths": ["game.js", "index.html"],
+                "dependencies": ["T001"], "acceptance_command": "node --check game.js",
+            },
+            {
+                "id": "T003", "type": "coding", "title": "Add enemy behavior",
+                "description": "继续在 game.js 中实现敌人和碰撞。",
+                "allowed_paths": ["game.js"], "dependencies": ["T002"],
+                "acceptance_command": "node --check game.js",
+            },
+            {
+                "id": "T004", "type": "coding", "title": "Wire game state",
+                "description": "连接 game.js 与 index.html 的状态和重启界面。",
+                "allowed_paths": ["game.js", "index.html"],
+                "dependencies": ["T003"], "acceptance_command": "node --check game.js",
+            },
+            {
+                "id": "T005", "type": "testing", "title": "Validate game",
+                "description": "验证 T004 的最终结果。",
+                "allowed_paths": ["game.js", "index.html"],
+                "dependencies": ["T004"], "acceptance_command": "node --check game.js",
+            },
+        ],
+    }
+
+    assert Engine._merge_shared_context_tasks(
+        plan, {"active_files": ["game.js", "index.html"]}
+    )
+
+    assert [task["id"] for task in plan["tasks"]] == ["T002", "T005"]
+    implementation, validation = plan["tasks"]
+    assert "内部步骤 1 · Inspect game" in implementation["description"]
+    assert "内部步骤 4 · Wire game state" in implementation["description"]
+    assert implementation["acceptance_command"] == "node --check game.js"
+    assert validation["dependencies"] == ["T002"]
+    assert "T004" not in validation["description"]
+    assert PolicyEngine().check_task_plan(plan, {}) == []
+
+
+def test_shared_support_file_does_not_merge_independent_runtime_tasks():
+    plan = {
+        "summary": "Implement independent services",
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "Backend",
+                "description": "Implement backend API.",
+                "allowed_paths": ["server/api.py", "package.json"],
+                "dependencies": [], "acceptance_command": "pytest -q",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Frontend",
+                "description": "Implement independent frontend.",
+                "allowed_paths": ["web/app.js", "package.json"],
+                "dependencies": [], "acceptance_command": "npm test",
+            },
+        ],
+    }
+
+    assert not Engine._merge_shared_context_tasks(
+        plan, {
+            "active_files": ["server/api.py", "web/app.js"],
+            "support_files": ["package.json"],
+        }
+    )
+    assert [task["id"] for task in plan["tasks"]] == ["T001", "T002"]
+
+
+def test_transitive_overlap_does_not_merge_conflicting_acceptance_commands():
+    plan = {
+        "summary": "Keep independently validated stages",
+        "tasks": [
+            {
+                "id": "T001", "type": "coding", "title": "Python stage",
+                "description": "Update shared runtime.",
+                "allowed_paths": ["shared.json", "service.py"],
+                "dependencies": [], "acceptance_command": "pytest -q",
+            },
+            {
+                "id": "T002", "type": "coding", "title": "Shared wiring",
+                "description": "Wire the shared runtime.",
+                "allowed_paths": ["shared.json"],
+                "dependencies": ["T001"], "acceptance_command": "",
+            },
+            {
+                "id": "T003", "type": "coding", "title": "Node stage",
+                "description": "Update the browser runtime.",
+                "allowed_paths": ["shared.json", "app.js"],
+                "dependencies": ["T002"], "acceptance_command": "npm test",
+            },
+        ],
+    }
+
+    assert Engine._merge_shared_context_tasks(
+        plan, {"active_files": ["shared.json", "service.py", "app.js"]}
+    )
+    assert len(plan["tasks"]) == 2
+    assert {task["acceptance_command"] for task in plan["tasks"]} == {
+        "pytest -q", "npm test",
+    }
+    assert PolicyEngine().check_task_plan(plan, {}) == []
+
+
 def test_broad_multi_feature_plan_is_promoted_and_not_collapsed():
     tasks = [{
         "id": "T001", "type": "analysis", "title": "Analyze project",

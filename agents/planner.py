@@ -40,9 +40,11 @@ Rules:
     when one exists; otherwise leave acceptance_command empty for local validation.
 11. Analysis tasks are read-only by default. Their final written analysis is the
     deliverable, so do not require them to create or modify project files.
-12. Split only at stable boundaries such as backend/frontend, data migration,
-    or independently testable runtime stages. Keep same-file implementation and
-    wiring together so a Worker can finish with one continuous context.
+12. One task creates one fresh Worker conversation. Split only at stable boundaries
+    such as backend/frontend, data migration, or independently testable runtime
+    stages. If two stages read or edit any of the same core runtime files, combine
+    them into one task so the Worker keeps one continuous context. Shared support
+    files such as package.json or README alone do not require combining tasks.
 13. Dependencies must list only direct prerequisites. Do not repeat every transitive
     dependency on all later tasks.
 14. The supplied Active Project Surface is deterministic preflight evidence. Do
@@ -73,7 +75,8 @@ Rules:
     acceptance criterion must belong to at least one task. Do not silently omit
     visual, interaction, state, compatibility, error-path, or restart behavior.
 24. Group related behaviors into an implementation stage when they share files,
-    state, and verification. Avoid long serial chains of Workers editing the same file.
+    state, and verification. A serial chain of Workers editing the same source file
+    is invalid planning: replace it with one task containing an internal checklist.
 25. Never use an umbrella task such as "implement the remaining systems", "finish
     zones 1-8", or "complete A/B/C/D". A task naming three or more substantial
     subsystems, scenes, regions, or user-visible behaviors must be decomposed.
