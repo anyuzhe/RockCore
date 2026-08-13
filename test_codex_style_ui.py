@@ -212,6 +212,61 @@ def test_live_main_agent_event_populates_requirement_understanding():
     window.close()
 
 
+def test_requirement_understanding_stays_running_until_decision_arrives():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-UNDERSTANDING-STATE",
+        "user_request": "创建天气页面",
+        "status": "governing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }
+    window.task_panel.set_workflow(job)
+    window._selected_job_id = job["job_id"]
+
+    understanding = window.task_panel.stages["user"]
+    assert understanding._status == "running"
+    assert understanding.indicator.is_spinning
+    assert "正在结合项目上下文" in understanding.output.toPlainText()
+
+    window._on_event("main_agent_decided", {
+        "job_id": job["job_id"],
+        "goal": "创建天气页面并显示当前地区",
+        "constraints": ["不暴露定位数据"],
+        "acceptance_criteria": ["天气信息可见"],
+        "execution_strategy": "planned",
+    })
+
+    assert understanding._status == "success"
+    assert not understanding.indicator.is_spinning
+    assert "创建天气页面并显示当前地区" in understanding.output.toPlainText()
+    window.close()
+
+
+def test_requirement_understanding_fallback_completes_only_on_fallback_event():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-UNDERSTANDING-FALLBACK",
+        "user_request": "检查项目",
+        "status": "governing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }
+    window.task_panel.set_workflow(job)
+    window._selected_job_id = job["job_id"]
+    assert window.task_panel.stages["user"]._status == "running"
+
+    window._on_event("main_agent_fallback", {
+        "job_id": job["job_id"],
+        "summary": "主控不可用，继续规则流程",
+        "error": "offline",
+    })
+
+    assert window.task_panel.stages["user"]._status == "success"
+    assert "确定性规则" in window.task_panel.stages["user"].output.toPlainText()
+    window.close()
+
+
 def test_worker_stage_describes_read_only_analysis_without_file_edits():
     _app()
     panel = TaskPanel()
@@ -640,7 +695,8 @@ def test_worker_activity_timeline_is_nested_inside_worker_stage():
     panel = TaskPanel()
 
     assert panel.worker_activity.parentWidget() is panel.stages["worker"]
-    assert panel.stages["worker"].layout().indexOf(panel.worker_activity) == 1
+    assert panel.stages["worker"].layout().indexOf(panel.processing_time_label) == 1
+    assert panel.stages["worker"].layout().indexOf(panel.worker_activity) == 2
     assert panel.trace_layout.indexOf(panel.stages["worker"]) >= 0
     panel.close()
 
@@ -704,7 +760,9 @@ def test_worker_model_progress_is_readable_activity_not_task_dump():
     activities = list(panel.worker_activity._items.values())
     assert activities
     assert "接下来会修改按钮状态" in activities[-1].summary.text()
-    assert activities[-1].meta.text().startswith("执行思路")
+    assert activities[-1].meta.text() == "本段用时 1.2s"
+    assert activities[-1].summary.objectName() == "activityNarrative"
+    assert activities[-1].indicator.isHidden()
     assert "模型输出：" not in panel.stages["worker"].output.toPlainText()
     panel.close()
 
@@ -809,6 +867,50 @@ def test_worker_activity_groups_repeated_validation_commands():
     panel.close()
 
 
+def test_worker_actions_are_grouped_below_each_narrative_segment():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-NARRATIVE-GROUPS", "user_request": "修复页面",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "修复", "status": "running"}])
+
+    panel.add_worker_thought("T001", "先检查页面入口。", 100)
+    first_read = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="read_file",
+        path="index.html", turn=1, status="success",
+    )
+    panel.add_worker_thought("T001", "入口已确认，接下来修改样式。", 200)
+    second_read = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="read_file",
+        path="style.css", turn=2, status="success",
+    )
+
+    assert first_read == "T001-project-read-0-1"
+    assert second_read == "T001-project-read-0-2"
+    ordered_ids = list(panel.worker_activity._items)
+    assert ordered_ids == [
+        "T001-narrative-1", first_read,
+        "T001-narrative-2", second_read,
+    ]
+    panel.close()
+
+
+def test_processing_time_uses_job_timestamps_and_stops_when_terminal():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-ELAPSED", "user_request": "检查项目",
+        "status": "done",
+        "created_at": "2026-08-13T10:00:00Z",
+        "completed_at": "2026-08-13T10:05:21Z",
+    })
+
+    assert panel.processing_time_label.text() == "已处理 5分钟 21秒"
+    assert not panel._processing_timer.isActive()
+    panel.close()
+
+
 def test_successful_model_fallback_and_terminal_statuses_are_explicit():
     _app()
     window = MainWindow(None)
@@ -875,7 +977,7 @@ def test_main_window_routes_tool_and_validation_events_to_activity_timeline():
     window._on_event("test_running", {
         "job_id": job["job_id"], "task_id": "T001", "command": "pytest -q",
     })
-    validation = window.task_panel.worker_activity.item("T001-verification-0")
+    validation = window.task_panel.worker_activity.item("T001-verification-0-0")
     assert validation.indicator.is_spinning
     window._on_event("test_result", {
         "job_id": job["job_id"], "task_id": "T001", "status": "passed",

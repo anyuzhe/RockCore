@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.ui.status_constants import ACTIVE_STATUSES, STATUS_STYLE
-from app.ui.time_utils import format_local_timestamp
+from app.ui.time_utils import format_local_timestamp, to_local_datetime
 
 
 CONVERSATION_STATUS_TEXT = {
@@ -298,7 +298,7 @@ class ExecutionActivityItem(QFrame):
         layout.addWidget(self.details)
 
     def update_activity(self, *, status: str, summary: str, meta: str = "",
-                        details: str = ""):
+                        details: str = "", variant: str = "action"):
         successful = {
             "success", "completed", "written", "read", "found", "passed",
             "ok", "cached", "promoted", "created", "updated", "clean",
@@ -308,14 +308,25 @@ class ExecutionActivityItem(QFrame):
             "started": "running", "running": "running",
             "error": "failed", "rejected": "failed",
         }.get(status, status or "pending")
-        self.indicator.set_status(
-            style_status, STATUS_STYLE.get(style_status, STATUS_STYLE["pending"])
+        is_narrative = variant == "narrative"
+        self.indicator.setVisible(not is_narrative)
+        if not is_narrative:
+            self.indicator.set_status(
+                style_status, STATUS_STYLE.get(style_status, STATUS_STYLE["pending"])
+            )
+        else:
+            self.indicator.clear()
+        self.summary.setObjectName(
+            "activityNarrative" if is_narrative else "activitySummary"
         )
+        self.summary.style().unpolish(self.summary)
+        self.summary.style().polish(self.summary)
         self.summary.setText(summary)
         self.meta.setText(meta)
         self.meta.setVisible(bool(meta))
         self.details.setPlainText(details)
         self.toggle.setVisible(bool(details.strip()))
+        self.toggle.setVisible(not is_narrative and bool(details.strip()))
         if not details.strip():
             self.details.hide()
 
@@ -403,8 +414,14 @@ class TaskPanel(QWidget):
         # as expandable evidence instead of flooding the conversation feed.
         self._read_activity_groups: dict[str, dict] = {}
         self._verification_activity_groups: dict[str, dict] = {}
+        self._worker_narrative_sequence: dict[str, int] = {}
+        self._processing_started_at: datetime | None = None
+        self._processing_completed_at: datetime | None = None
         self._progress_sequence = 0
         self._usage = self._empty_usage()
+        self._processing_timer = QTimer(self)
+        self._processing_timer.setInterval(1000)
+        self._processing_timer.timeout.connect(self._refresh_processing_time)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -620,6 +637,9 @@ class TaskPanel(QWidget):
             self.stages[key] = stage
             self.trace_layout.addWidget(stage)
         self.stages["worker"].add_content_widget(self.worker_activity)
+        self.processing_time_label = QLabel("已处理 0秒")
+        self.processing_time_label.setObjectName("processingTimeLabel")
+        self.stages["worker"].layout().insertWidget(1, self.processing_time_label)
         self.repair_stages: dict[str, WorkflowStage] = {}
         agent_layout.addLayout(self.trace_layout)
 
@@ -988,6 +1008,7 @@ class TaskPanel(QWidget):
             self._pending_tool_activities = {}
             self._read_activity_groups = {}
             self._verification_activity_groups = {}
+            self._worker_narrative_sequence = {}
             self._progress_sequence = 0
             self.worker_activity.clear()
             for disclosure in (self.run_details, self.diff_details, self.test_details):
@@ -1004,6 +1025,9 @@ class TaskPanel(QWidget):
             stage.reset()
 
         status = job.get("status", "created")
+        self._set_processing_time(
+            job.get("created_at"), job.get("completed_at"), status
+        )
         source = job.get("source_job_id")
         request = job.get("user_request", "")
         # The complete requirement is already shown in the conversation and
@@ -1032,7 +1056,12 @@ class TaskPanel(QWidget):
         self._set_user_attachments(job.get("attachments") or [])
         self.user_source_label.setText("承接上一轮" if source else "")
         self.user_source_label.setVisible(bool(source))
-        self.stages["user"].set_status("success")
+        understanding_complete = bool(constitution) or status not in {
+            "created", "governing",
+        }
+        self.stages["user"].set_status(
+            "success" if understanding_complete else "running"
+        )
         understanding = [f"需求：{request.strip() or '已提交当前需求'}"]
         raw_constitution = (constitution or {}).get("raw_output") or {}
         if constitution:
@@ -1062,7 +1091,15 @@ class TaskPanel(QWidget):
                 understanding.append(
                     "附件观察：\n" + "\n".join(f"- {value}" for value in observations)
                 )
-        self.stages["user"].set_output("\n\n".join(understanding), expand=False)
+        if understanding_complete:
+            self.stages["user"].set_output(
+                "\n\n".join(understanding), expand=False
+            )
+        else:
+            self.stages["user"].set_output(
+                "正在结合项目上下文理解目标、约束和验收标准",
+                expand=True,
+            )
 
         fast_path = bool(
             constitution
@@ -1216,6 +1253,10 @@ class TaskPanel(QWidget):
         self._pending_tool_activities = {}
         self._read_activity_groups = {}
         self._verification_activity_groups = {}
+        self._worker_narrative_sequence = {}
+        self._processing_timer.stop()
+        self._processing_started_at = None
+        self.processing_time_label.setText("已处理 0秒")
         self._progress_sequence = 0
         self.worker_activity.clear()
         self.worker_progress_wrap.hide()
@@ -1336,12 +1377,14 @@ class TaskPanel(QWidget):
         meta: str = "",
     ) -> str:
         """Insert/update a readable live action in the execution conversation."""
+        narrative_group = int(self._worker_narrative_sequence.get(task_id, 0) or 0)
         if self._tool_kind(tool) in {"read", "search"}:
             return self._add_grouped_read_activity(
                 task_id, event_kind=event_kind, tool=tool, path=path,
                 turn=turn, status=status, arguments=arguments, result=result,
                 duration_ms=duration_ms, activity_id=activity_id,
                 repair_round=self._active_repair_round,
+                narrative_group=narrative_group,
             )
         if self._tool_kind(tool) == "verify":
             return self._add_grouped_verification_activity(
@@ -1349,6 +1392,7 @@ class TaskPanel(QWidget):
                 turn=turn, status=status, arguments=arguments, result=result,
                 duration_ms=duration_ms, activity_id=activity_id,
                 repair_round=self._active_repair_round,
+                narrative_group=narrative_group,
             )
         if not activity_id:
             counter = self._activity_counters.get(task_id, 0) + 1
@@ -1383,17 +1427,21 @@ class TaskPanel(QWidget):
         return activity_id
 
     @staticmethod
-    def _read_group_key(task_id: str, repair_round: int = 0) -> str:
-        return f"{task_id or 'task'}-project-read-{int(repair_round or 0)}"
+    def _read_group_key(task_id: str, repair_round: int = 0,
+                        narrative_group: int = 0) -> str:
+        return (
+            f"{task_id or 'task'}-project-read-{int(repair_round or 0)}"
+            f"-{int(narrative_group or 0)}"
+        )
 
     def _add_grouped_read_activity(
         self, task_id: str, *, event_kind: str, tool: str, path: str,
         turn: int, status: str, arguments: dict | None,
         result: dict | None, duration_ms: int, activity_id: str,
-        repair_round: int,
+        repair_round: int, narrative_group: int = 0,
     ) -> str:
         """Combine read/search/list calls into one Codex-style activity."""
-        key = self._read_group_key(task_id, repair_round)
+        key = self._read_group_key(task_id, repair_round, narrative_group)
         group = self._read_activity_groups.setdefault(key, {
             "files": [], "entries": {}, "active": 0, "failed": 0,
             "duration_ms": 0,
@@ -1447,17 +1495,23 @@ class TaskPanel(QWidget):
         return key
 
     @staticmethod
-    def _verification_group_key(task_id: str, repair_round: int = 0) -> str:
-        return f"{task_id or 'task'}-verification-{int(repair_round or 0)}"
+    def _verification_group_key(task_id: str, repair_round: int = 0,
+                                narrative_group: int = 0) -> str:
+        return (
+            f"{task_id or 'task'}-verification-{int(repair_round or 0)}"
+            f"-{int(narrative_group or 0)}"
+        )
 
     def _add_grouped_verification_activity(
         self, task_id: str, *, event_kind: str, tool: str, path: str,
         turn: int, status: str, arguments: dict | None,
         result: dict | None, duration_ms: int, activity_id: str,
-        repair_round: int,
+        repair_round: int, narrative_group: int = 0,
     ) -> str:
         """Combine repeated commands and final acceptance into one activity."""
-        key = self._verification_group_key(task_id, repair_round)
+        key = self._verification_group_key(
+            task_id, repair_round, narrative_group
+        )
         group = self._verification_activity_groups.setdefault(key, {
             "entries": {}, "active": 0, "failed": 0, "passed": 0,
             "duration_ms": 0,
@@ -1519,19 +1573,16 @@ class TaskPanel(QWidget):
         clean = self._normalize_model_output(content)
         if not clean:
             return
-        # Keep the conversation readable. Full model text remains in reports and
-        # persisted model events; the live feed shows a concise progress note.
-        concise = re.sub(r"\n{3,}", "\n\n", clean).strip()[:1200]
-        self.add_worker_activity(
-            task_id,
-            event_kind="thought",
-            status="success",
-            summary=concise,
-            meta=(
-                "执行思路"
-                + (f" · {duration_ms / 1000:.1f}s" if duration_ms else "")
-            ),
+        sequence = int(self._worker_narrative_sequence.get(task_id, 0) or 0) + 1
+        self._worker_narrative_sequence[task_id] = sequence
+        narrative = re.sub(r"\n{3,}", "\n\n", clean).strip()[:4000]
+        self.worker_activity.add_or_update(
+            f"{task_id or 'task'}-narrative-{sequence}",
+            status="success", summary=narrative,
+            meta=(f"本段用时 {duration_ms / 1000:.1f}s" if duration_ms else ""),
+            details="", variant="narrative",
         )
+        QTimer.singleShot(0, self._scroll_to_bottom)
 
     def load_worker_activities(self, activities: list[dict]):
         self.worker_activity.clear()
@@ -1539,6 +1590,7 @@ class TaskPanel(QWidget):
         self._pending_tool_activities = {}
         self._read_activity_groups = {}
         self._verification_activity_groups = {}
+        self._worker_narrative_sequence = {}
         for index, activity in enumerate(activities or [], start=1):
             self.add_worker_activity(
                 str(activity.get("task_id") or ""),
@@ -1569,6 +1621,9 @@ class TaskPanel(QWidget):
             duration_ms=0,
             activity_id=f"{task_id or 'task'}-acceptance",
             repair_round=repair_round,
+            narrative_group=int(
+                self._worker_narrative_sequence.get(task_id, 0) or 0
+            ),
         )
 
     def add_model_output(self, agent_type: str, provider: str, response: str,
@@ -1793,10 +1848,55 @@ class TaskPanel(QWidget):
     def has_task(self, task_id: str) -> bool:
         return any(task.get("task_id") == task_id for task in self._tasks)
 
+    @staticmethod
+    def _format_elapsed(seconds: int) -> str:
+        seconds = max(0, int(seconds or 0))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}小时 {minutes}分钟 {seconds}秒"
+        if minutes:
+            return f"{minutes}分钟 {seconds}秒"
+        return f"{seconds}秒"
+
+    def _set_processing_time(self, created_at, completed_at, status: str):
+        try:
+            self._processing_started_at = to_local_datetime(created_at)
+        except (TypeError, ValueError, OverflowError):
+            self._processing_started_at = datetime.now().astimezone()
+        self._processing_completed_at = None
+        if completed_at:
+            try:
+                self._processing_completed_at = to_local_datetime(completed_at)
+            except (TypeError, ValueError, OverflowError):
+                self._processing_completed_at = None
+        if status in ACTIVE_STATUSES:
+            self._processing_timer.start()
+        else:
+            self._processing_timer.stop()
+        self._refresh_processing_time()
+
+    def _refresh_processing_time(self):
+        if not self._processing_started_at:
+            self.processing_time_label.setText("已处理 0秒")
+            return
+        end = self._processing_completed_at or datetime.now().astimezone()
+        elapsed = int(max(0, (end - self._processing_started_at).total_seconds()))
+        self.processing_time_label.setText(
+            "已处理 " + self._format_elapsed(elapsed)
+        )
+
     def update_job_status(self, job_id: str, status: str):
         if not self._current_job or self._current_job.get("job_id") != job_id:
             return
         self._current_job["status"] = status
+        if status in ACTIVE_STATUSES:
+            if not self._processing_timer.isActive():
+                self._processing_timer.start()
+        else:
+            self._processing_completed_at = datetime.now().astimezone()
+            self._processing_timer.stop()
+        self._refresh_processing_time()
         self._set_header_status(status)
         self._set_terminal_actions(status, self._current_job)
         if status in {
@@ -2045,7 +2145,10 @@ class TaskPanel(QWidget):
                 )
         stage.set_output(
             "\n".join(lines),
-            expand=overall in {"running", "failed", "needs_attention", "interrupted"},
+            # The narrative activity stream is the primary execution view.
+            # Keep the legacy per-task dump available behind the disclosure,
+            # without opening a large duplicate text box automatically.
+            expand=False,
         )
         stage.setToolTip("\n".join(
             f"步骤 {index}：{task.get('task_id', '?')}"

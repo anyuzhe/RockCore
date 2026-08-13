@@ -474,6 +474,7 @@ class MainWindow(QMainWindow):
                         "failure_reason": getattr(job, "failure_reason", "") or "",
                         "recovery_hint": getattr(job, "recovery_hint", "") or "",
                         "created_at": as_utc_isoformat(job.created_at),
+                        "completed_at": as_utc_isoformat(job.completed_at),
                         "turn_number": len(turns),
                         "turn_total": len(turns),
                         "assistant_summary": str(
@@ -1265,6 +1266,9 @@ class MainWindow(QMainWindow):
 
         if event_type == "job_governing" and is_selected:
             self.task_panel.update_stage(
+                "user", "running", "正在理解需求并整理验收目标"
+            )
+            self.task_panel.update_stage(
                 "governor", "running", "主控模型正在理解需求并选择执行路径"
             )
         elif event_type == "main_agent_decided" and is_selected:
@@ -1315,12 +1319,19 @@ class MainWindow(QMainWindow):
             )
         elif event_type == "main_agent_fallback" and is_selected:
             self.task_panel.update_stage(
+                "user", "success", "已使用确定性规则完成需求理解"
+            )
+            self.task_panel.update_stage(
                 "governor", "fallback", data.get("summary", "已切换到确定性流程"),
                 {"error": data.get("error", "")},
             )
         elif event_type == "main_agent_summary" and is_selected:
             self.task_panel.agent_summary.setText(data.get("summary", ""))
         elif event_type == "governor_risk_assessed" and is_selected:
+            if self.task_panel.stages["user"]._status == "running":
+                self.task_panel.update_stage(
+                    "user", "success", "需求目标与验收范围已确定"
+                )
             risk_name = {
                 "low": "低", "medium": "中", "high": "高", "critical": "关键",
             }.get(data.get("risk_level", "medium"), "中")

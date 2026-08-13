@@ -244,7 +244,15 @@ async def main():
             margin-left: 24px;
         }
         QLabel#activitySummary { color: #34312d; font-size: 12px; }
+        QLabel#activityNarrative {
+            color: #25231f; font-size: 13px; line-height: 1.5;
+            padding-top: 8px; padding-bottom: 4px;
+        }
         QLabel#activityMeta { color: #8a847c; font-size: 10px; }
+        QLabel#processingTimeLabel {
+            color: #7b766f; font-size: 12px; padding: 8px 0 7px 24px;
+            border-bottom: 1px solid #ebe7e1;
+        }
         QToolButton#activityDisclosureButton {
             background: transparent; color: #817b73; border: none; padding: 3px;
         }
