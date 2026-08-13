@@ -553,7 +553,7 @@ def test_worker_activity_timeline_updates_started_tool_in_place():
     item = panel.worker_activity.item(activity_id)
     assert item is not None
     assert item.indicator.is_spinning
-    assert item.summary.text() == "正在读取 src/main.js"
+    assert item.summary.text() == "正在读取项目文件（1 项）"
 
     completed_id = panel.add_worker_activity(
         "T001", event_kind="tool_completed", tool="read_file",
@@ -566,9 +566,48 @@ def test_worker_activity_timeline_updates_started_tool_in_place():
     assert completed_id == activity_id
     assert len(panel.worker_activity._items) == 1
     assert not item.indicator.is_spinning
-    assert item.summary.text() == "已读取 src/main.js"
-    assert "443ms" in item.meta.text()
+    assert item.summary.text() == "已读取项目文件（1 项）"
+    assert "src/main.js" in item.meta.text()
+    assert "0.4s" in item.meta.text()
     assert not item.toggle.isHidden()
+    panel.close()
+
+
+def test_worker_activity_groups_consecutive_reads_and_searches_by_task():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-GROUPED-READS",
+        "user_request": "了解项目结构",
+        "status": "executing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{
+        "task_id": "T001", "title": "读取项目", "status": "running",
+    }])
+
+    first_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="list_files",
+        path="src", turn=1, status="success",
+        result={"status": "success", "files": ["src/main.py"]},
+    )
+    second_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="read_file",
+        path="src/main.py", turn=2, status="success",
+        result={"status": "success", "content": "main()"},
+    )
+    search_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="search_code",
+        path="MainWindow", turn=3, status="success",
+        result={"status": "success", "matches": []},
+    )
+
+    assert first_id == second_id == search_id
+    assert len(panel.worker_activity._items) == 1
+    item = panel.worker_activity.item(first_id)
+    assert item.summary.text() == "已读取项目文件（3 项）"
+    assert "src、src/main.py、MainWindow" in item.meta.text()
+    assert "src/main.py · read_file" in item.details.toPlainText()
+    assert "MainWindow · search_code" in item.details.toPlainText()
     panel.close()
 
 
@@ -660,7 +699,7 @@ def test_worker_activity_names_search_query_and_validation_command():
         path="pytest -q", status="started",
     )
 
-    assert panel.worker_activity.item(search_id).summary.text() == "已搜索 PlayerTank"
+    assert panel.worker_activity.item(search_id).summary.text() == "已读取项目文件（1 项）"
     assert panel.worker_activity.item(command_id).summary.text() == "正在验证 pytest -q"
     panel.close()
 
@@ -726,7 +765,7 @@ def test_main_window_routes_tool_and_validation_events_to_activity_timeline():
         "result": {"status": "success"}, "duration_ms": 25,
     })
     assert not started.indicator.is_spinning
-    assert started.summary.text() == "已读取 index.html"
+    assert started.summary.text() == "已读取项目文件（1 项）"
 
     window._on_event("test_running", {
         "job_id": job["job_id"], "task_id": "T001", "command": "pytest -q",

@@ -393,6 +393,9 @@ class TaskPanel(QWidget):
         self._task_progress: dict[str, dict] = {}
         self._activity_counters: dict[str, int] = {}
         self._pending_tool_activities: dict[tuple[str, str, int], str] = {}
+        # Exploratory reads are one user-visible step. Keep individual calls
+        # as expandable evidence instead of flooding the conversation feed.
+        self._read_activity_groups: dict[str, dict] = {}
         self._progress_sequence = 0
         self._usage = self._empty_usage()
         self._setup_ui()
@@ -976,6 +979,7 @@ class TaskPanel(QWidget):
             self._task_progress = {}
             self._activity_counters = {}
             self._pending_tool_activities = {}
+            self._read_activity_groups = {}
             self._progress_sequence = 0
             self.worker_activity.clear()
             for disclosure in (self.run_details, self.diff_details, self.test_details):
@@ -1173,6 +1177,7 @@ class TaskPanel(QWidget):
         self._task_progress = {}
         self._activity_counters = {}
         self._pending_tool_activities = {}
+        self._read_activity_groups = {}
         self._progress_sequence = 0
         self.worker_activity.clear()
         self.worker_progress_wrap.hide()
@@ -1226,7 +1231,10 @@ class TaskPanel(QWidget):
     @staticmethod
     def _tool_kind(tool: str) -> str:
         name = str(tool or "").lower()
-        if name in {"read_file", "read_pdf", "list_files"}:
+        if name in {
+            "read_file", "read_pdf", "read_docx", "read_pptx", "read_log",
+            "read_temp_file", "list_files", "list_temp_files",
+        }:
             return "read"
         if name in {"search_code", "search_in_file"}:
             return "search"
@@ -1290,6 +1298,13 @@ class TaskPanel(QWidget):
         meta: str = "",
     ) -> str:
         """Insert/update a readable live action in the execution conversation."""
+        if self._tool_kind(tool) in {"read", "search"}:
+            return self._add_grouped_read_activity(
+                task_id, event_kind=event_kind, tool=tool, path=path,
+                turn=turn, status=status, arguments=arguments, result=result,
+                duration_ms=duration_ms, activity_id=activity_id,
+                repair_round=self._active_repair_round,
+            )
         if not activity_id:
             counter = self._activity_counters.get(task_id, 0) + 1
             self._activity_counters[task_id] = counter
@@ -1322,6 +1337,70 @@ class TaskPanel(QWidget):
         QTimer.singleShot(0, self._scroll_to_bottom)
         return activity_id
 
+    @staticmethod
+    def _read_group_key(task_id: str, repair_round: int = 0) -> str:
+        return f"{task_id or 'task'}-project-read-{int(repair_round or 0)}"
+
+    def _add_grouped_read_activity(
+        self, task_id: str, *, event_kind: str, tool: str, path: str,
+        turn: int, status: str, arguments: dict | None,
+        result: dict | None, duration_ms: int, activity_id: str,
+        repair_round: int,
+    ) -> str:
+        """Combine read/search/list calls into one Codex-style activity."""
+        key = self._read_group_key(task_id, repair_round)
+        group = self._read_activity_groups.setdefault(key, {
+            "files": [], "entries": {}, "active": 0, "failed": 0,
+            "duration_ms": 0,
+        })
+        target = str(path or "").strip() or "项目文件"
+        entry_key = str(activity_id or f"{tool}:{int(turn or 0)}:{target}")
+        if event_kind == "tool_started":
+            group["active"] += 1
+        else:
+            group["active"] = max(0, group["active"] - 1)
+            if status in {"error", "rejected", "failed"}:
+                group["failed"] += 1
+        group["duration_ms"] += max(0, int(duration_ms or 0))
+        if target not in group["files"]:
+            group["files"].append(target)
+        group["entries"][entry_key] = {
+            "tool": tool, "path": target, "status": status,
+            "arguments": arguments or {}, "result": result or {},
+        }
+        files = group["files"]
+        shown = files[:8]
+        suffix = f"、以及其他 {len(files) - 8} 项" if len(files) > 8 else ""
+        state = "正在读取" if group["active"] else "已读取"
+        summary = f"{state}项目文件（{len(files)} 项）"
+        if group["failed"]:
+            summary += f"，{group['failed']} 项失败"
+        meta = "、".join(shown) + suffix
+        if group["duration_ms"]:
+            meta += f" · {group['duration_ms'] / 1000:.1f}s"
+        lines = []
+        raw_details = []
+        for item in group["entries"].values():
+            marker = "!" if item["status"] in {"error", "rejected", "failed"} else "✓"
+            lines.append(f"{marker} {item['path']} · {item['tool']}")
+            if item["arguments"] or item["result"]:
+                raw_details.append(self._activity_details(
+                    item["tool"], item["arguments"], item["result"]
+                ))
+        details = "\n".join(lines)
+        if raw_details:
+            details += "\n\n" + "\n\n".join(raw_details)
+        details = details[:12000]
+        item = self.worker_activity.add_or_update(
+            key,
+            status=("running" if group["active"] else (
+                "failed" if group["failed"] else "success"
+            )),
+            summary=summary, meta=meta, details=details,
+        )
+        QTimer.singleShot(0, self._scroll_to_bottom)
+        return key
+
     def add_worker_thought(self, task_id: str, content: str,
                            duration_ms: int = 0):
         clean = self._normalize_model_output(content)
@@ -1345,6 +1424,7 @@ class TaskPanel(QWidget):
         self.worker_activity.clear()
         self._activity_counters = {}
         self._pending_tool_activities = {}
+        self._read_activity_groups = {}
         for index, activity in enumerate(activities or [], start=1):
             self.add_worker_activity(
                 str(activity.get("task_id") or ""),
