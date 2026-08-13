@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import shlex
+import subprocess
 from types import SimpleNamespace
 
 from agents.worker import WorkerAgent
@@ -163,6 +164,25 @@ def test_hooks_round_trip_and_execute_without_shell(tmp_path):
     ))
     assert results[0]["status"] == "passed"
     assert "hook-ok:before_job" in results[0]["output"]
+
+
+def test_windows_hook_parser_accepts_posix_and_native_serialization():
+    arguments = [
+        r"C:\Program Files\Python 311\python.exe",
+        "-c",
+        "print('hook-ok')",
+    ]
+
+    assert HookRunner.split_command(
+        shlex.join(arguments), platform="win32"
+    ) == arguments
+    assert HookRunner.split_command(
+        subprocess.list2cmdline(arguments), platform="win32"
+    ) == arguments
+    simple_executable = ["python", "-c", "print(1 + 2)"]
+    assert HookRunner.split_command(
+        shlex.join(simple_executable), platform="win32"
+    ) == simple_executable
 
 
 def test_skill_learning_suggests_only_after_repeated_success(tmp_path):

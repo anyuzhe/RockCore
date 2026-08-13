@@ -97,6 +97,10 @@ class FileTools:
             return {"error": f"File too large ({size} bytes, max {max_size})"}
 
         content, file_encoding = read_text_compatible(resolved)
+        # Tool responses use one stable line representation on every OS.
+        # Preserve the file's encoding and raw bytes for mutations, but do not
+        # leak Windows CRLF into model context or cache comparisons.
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
         lines = content.split("\n")
         total_lines = len(lines)
 

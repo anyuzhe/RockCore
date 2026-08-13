@@ -119,6 +119,19 @@ def test_successful_write_invalidates_cached_reads(tmp_path):
     assert calls == 2
 
 
+def test_read_file_normalizes_windows_line_endings_without_rewriting_file(tmp_path):
+    source = tmp_path / "windows.txt"
+    source.write_bytes(b"first\r\nsecond\r\n")
+    broker = ToolBroker(tmp_path, PolicyEngine())
+
+    result = asyncio.run(broker.execute(
+        _task(), "read_file", {"path": "windows.txt"}
+    ))
+
+    assert result["content"] == "first\nsecond\n"
+    assert source.read_bytes() == b"first\r\nsecond\r\n"
+
+
 def test_read_errors_are_not_cached(tmp_path):
     broker = ToolBroker(tmp_path, PolicyEngine())
     calls = 0
