@@ -408,6 +408,10 @@ class MainWindow(QMainWindow):
                             "acceptance_command": t.acceptance_command or "",
                             "description": t.description or "",
                             "allowed_paths": t.allowed_paths or [],
+                            "worker_activities": self._task_worker_activities(
+                                t.task_id,
+                                repos["agent_run"].list_by_task(t.id),
+                            ),
                             "usage": self._task_usage(
                                 repos["agent_run"].list_by_task(t.id)
                             ),
@@ -1145,8 +1149,8 @@ class MainWindow(QMainWindow):
         if event_job_id and not is_selected:
             buffered = self._job_event_buffers.setdefault(event_job_id, [])
             buffered.append((event_type, dict(data)))
-            if len(buffered) > 150:
-                del buffered[:-150]
+            if len(buffered) > 500:
+                del buffered[:-500]
         if is_selected:
             self.task_panel.log_event(event_type, **data)
         repair_round = int(data.get("repair_round", 0) or 0)
@@ -1228,6 +1232,17 @@ class MainWindow(QMainWindow):
                 ),
                 max_turns=int(data.get("max_turns", 0) or 0),
             )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_started",
+                status="started",
+                summary=f"正在执行 {data.get('title', '当前步骤')}",
+                meta=(
+                    f"第 {int(data.get('task_index', 1) or 1)}/"
+                    f"{int(data.get('task_total', 1) or 1)} 步"
+                ),
+            )
             skills = data.get("skills") or []
             if skills:
                 self.task_panel.append_stage_output(
@@ -1247,6 +1262,25 @@ class MainWindow(QMainWindow):
                 turn=int(data.get("turn", 0) or 0),
                 max_turns=int(data.get("max_turns", 0) or 0),
             )
+        elif event_type in {
+            "worker_tool_started", "worker_tool_completed",
+        } and is_selected:
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                event_kind=(
+                    "tool_started" if event_type == "worker_tool_started"
+                    else "tool_completed"
+                ),
+                tool=str(data.get("tool") or ""),
+                path=str(data.get("path") or ""),
+                turn=int(data.get("turn", 0) or 0),
+                status=str(data.get("status") or (
+                    "started" if event_type == "worker_tool_started" else "success"
+                )),
+                arguments=data.get("arguments") or {},
+                result=data.get("result") or {},
+                duration_ms=int(data.get("duration_ms", 0) or 0),
+            )
         elif event_type == "task_done" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "done")
             result = data.get("result") or {}
@@ -1255,6 +1289,19 @@ class MainWindow(QMainWindow):
                     "worker", "检查完成：未发现需要修改的问题。",
                     repair_round=task_repair_round,
                 )
+            changes = result.get("changes") or {}
+            changed = changes.get("changed") or []
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_done",
+                status="success",
+                summary=(
+                    "步骤已完成"
+                    + (f"，更新了 {len(changed)} 个文件" if changed else "")
+                ),
+                meta=data.get("task_id", ""),
+            )
             self._capture_diff(data.get("result"))
         elif event_type == "task_reclassified" and is_selected:
             self.task_panel.append_stage_output(
@@ -1323,6 +1370,14 @@ class MainWindow(QMainWindow):
                 f"待继续原因：{data.get('reason', '达到用户设置的硬上限')}",
                 repair_round=task_repair_round,
             )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_interrupted",
+                status="interrupted",
+                summary="步骤进度已保存，等待继续",
+                meta=data.get("task_id", ""),
+            )
         elif event_type == "task_needs_user_action" and is_selected:
             self.bridge.task_update.emit(
                 data.get("task_id", ""), "needs_attention"
@@ -1336,6 +1391,14 @@ class MainWindow(QMainWindow):
                 "worker",
                 f"需要处理：{data.get('reason', '请查看任务说明')}",
                 repair_round=task_repair_round,
+            )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_attention",
+                status="needs_attention",
+                summary=f"等待处理：{data.get('reason', '需要用户操作')}",
+                meta=data.get("task_id", ""),
             )
         elif event_type == "task_failed" and is_selected:
             failure_stage = data.get("failure_stage", "")
@@ -1364,6 +1427,14 @@ class MainWindow(QMainWindow):
                 "worker", f"{prefix}：{detail}",
                 repair_round=task_repair_round,
             )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_failed",
+                status="failed",
+                summary=f"步骤未完成：{detail[:500]}",
+                meta=data.get("task_id", ""),
+            )
             self._capture_diff(data.get("result"))
         elif event_type == "task_blocked" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "blocked")
@@ -1373,6 +1444,17 @@ class MainWindow(QMainWindow):
                 f"{data.get('task_id', '')} 因依赖任务失败而未执行"
                 + (f"：{blocked_by}" if blocked_by else ""),
                 repair_round=task_repair_round,
+            )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-task",
+                event_kind="task_blocked",
+                status="blocked",
+                summary=(
+                    "步骤等待依赖"
+                    + (f"：{blocked_by}" if blocked_by else "")
+                ),
+                meta=data.get("task_id", ""),
             )
         elif event_type == "task_repairing" and is_selected:
             self.task_panel.update_stage(
@@ -1463,6 +1545,14 @@ class MainWindow(QMainWindow):
                 "worker",
                 f"正在验收：{data.get('command', '')}",
                 repair_round=task_repair_round,
+            )
+            self.task_panel.add_worker_activity(
+                data.get("task_id", ""),
+                activity_id=f"{data.get('task_id', '')}-validation",
+                event_kind="validation_started",
+                status="started",
+                summary="正在验证 " + (data.get("command") or "项目结果"),
+                meta=data.get("task_id", ""),
             )
         elif event_type == "job_reviewing" and is_selected:
             self.task_panel.clear_worker_progress()
@@ -1558,6 +1648,24 @@ class MainWindow(QMainWindow):
                 data.get("task_id", ""), data.get("status", "?"), data.get("output", "")
             )
             if is_selected:
+                result_status = str(data.get("status") or "")
+                self.task_panel.add_worker_activity(
+                    data.get("task_id", ""),
+                    activity_id=f"{data.get('task_id', '')}-validation",
+                    event_kind="validation_completed",
+                    status=(
+                        "success" if result_status == "passed" else "failed"
+                    ),
+                    summary=(
+                        "验收通过" if result_status == "passed"
+                        else "验收未通过"
+                    ),
+                    meta=data.get("task_id", ""),
+                    result={
+                        "status": result_status,
+                        "output": str(data.get("output") or "")[:3000],
+                    },
+                )
                 self.task_panel.append_stage_output(
                     "worker",
                     f"验收 {data.get('status', '?')}：{data.get('output', '')[:500]}",
@@ -1757,6 +1865,41 @@ class MainWindow(QMainWindow):
                 else None
             ),
         }
+
+    @staticmethod
+    def _task_worker_activities(task_id: str, runs: list) -> list[dict]:
+        """Restore persisted Worker tool calls as a readable activity timeline."""
+        activities = []
+        for run in runs:
+            if getattr(run, "agent_type", "") != "worker":
+                continue
+            for call in sorted(
+                getattr(run, "tool_calls", None) or [],
+                key=lambda item: item.created_at,
+            ):
+                try:
+                    result = json.loads(call.result_summary or "{}")
+                    if not isinstance(result, dict):
+                        result = {"summary": call.result_summary or ""}
+                except json.JSONDecodeError:
+                    result = {"summary": call.result_summary or ""}
+                arguments = dict(call.arguments or {})
+                path = str(
+                    result.get("path") or arguments.get("path")
+                    or arguments.get("target_path") or arguments.get("query")
+                    or arguments.get("pattern") or arguments.get("command") or ""
+                )
+                activities.append({
+                    "task_id": task_id,
+                    "tool": call.tool_name,
+                    "path": path,
+                    "status": call.status or "success",
+                    "arguments": arguments,
+                    "result": result,
+                    "duration_ms": int(call.duration_ms or 0),
+                    "created_at": as_utc_isoformat(call.created_at),
+                })
+        return activities
 
     @staticmethod
     def _job_usage(job) -> dict:

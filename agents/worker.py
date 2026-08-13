@@ -769,6 +769,19 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             )
                         )
                     )
+                    await report_progress(
+                        self._progress_phase(func_name),
+                        tool=func_name,
+                        path=str(
+                            args.get("path") or args.get("target_path")
+                            or args.get("query") or args.get("pattern")
+                            or args.get("command") or ""
+                        ),
+                        turn=turn + 1,
+                        event_kind="tool_started",
+                        status="started",
+                        arguments=args,
+                    )
                     if custom_document_code:
                         result = {
                             "status": "rejected",
@@ -848,6 +861,9 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             result.get("path")
                             or args.get("path")
                             or args.get("target_path")
+                            or args.get("query")
+                            or args.get("pattern")
+                            or args.get("command")
                             or ""
                         ),
                         turn=turn + 1,

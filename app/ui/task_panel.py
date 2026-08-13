@@ -239,6 +239,125 @@ class ExecutionDisclosure(QFrame):
         self.output.setTextCursor(cursor)
 
 
+class ExecutionActivityItem(QFrame):
+    """One readable Worker action with optional technical details."""
+
+    def __init__(self, activity_id: str, parent=None):
+        super().__init__(parent)
+        self.activity_id = activity_id
+        self.setObjectName("executionActivityItem")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 5, 0, 5)
+        layout.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.indicator = StatusIndicator()
+        row.addWidget(self.indicator)
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(1)
+        self.summary = QLabel("")
+        self.summary.setObjectName("activitySummary")
+        self.summary.setWordWrap(True)
+        self.meta = QLabel("")
+        self.meta.setObjectName("activityMeta")
+        self.meta.setWordWrap(True)
+        text_layout.addWidget(self.summary)
+        text_layout.addWidget(self.meta)
+        row.addLayout(text_layout, 1)
+        self.toggle = QToolButton()
+        self.toggle.setObjectName("activityDisclosureButton")
+        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle.setToolTip("查看技术详情")
+        self.toggle.clicked.connect(self.toggle_details)
+        self.toggle.hide()
+        row.addWidget(self.toggle)
+        layout.addLayout(row)
+
+        self.details = QPlainTextEdit()
+        self.details.setObjectName("activityDetails")
+        self.details.setReadOnly(True)
+        self.details.setFont(QFont(["SF Mono", "Menlo", "Consolas"], 9))
+        self.details.setMinimumHeight(72)
+        self.details.setMaximumHeight(220)
+        self.details.hide()
+        layout.addWidget(self.details)
+
+    def update_activity(self, *, status: str, summary: str, meta: str = "",
+                        details: str = ""):
+        successful = {
+            "success", "completed", "written", "read", "found", "passed",
+            "ok", "cached", "promoted", "created", "updated", "clean",
+        }
+        style_status = {
+            **{value: "success" for value in successful},
+            "started": "running", "running": "running",
+            "error": "failed", "rejected": "failed",
+        }.get(status, status or "pending")
+        self.indicator.set_status(
+            style_status, STATUS_STYLE.get(style_status, STATUS_STYLE["pending"])
+        )
+        self.summary.setText(summary)
+        self.meta.setText(meta)
+        self.meta.setVisible(bool(meta))
+        self.details.setPlainText(details)
+        self.toggle.setVisible(bool(details.strip()))
+        if not details.strip():
+            self.details.hide()
+
+    def toggle_details(self):
+        visible = not self.details.isVisible()
+        self.details.setVisible(visible)
+        self.toggle.setArrowType(
+            Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow
+        )
+        self.toggle.setToolTip("收起技术详情" if visible else "查看技术详情")
+
+
+class ExecutionActivityTimeline(QWidget):
+    """Codex-style live activity feed for Worker actions."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("executionActivityTimeline")
+        self._items: dict[str, ExecutionActivityItem] = {}
+        self._sequence = 0
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        self.hide()
+
+    def clear(self):
+        self._items = {}
+        self._sequence = 0
+        while self.layout.count():
+            item = self.layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.hide()
+
+    def add_or_update(self, activity_id: str = "", **activity):
+        if not activity_id:
+            self._sequence += 1
+            activity_id = f"activity-{self._sequence}"
+        item = self._items.get(activity_id)
+        if item is None:
+            item = ExecutionActivityItem(activity_id)
+            self._items[activity_id] = item
+            self.layout.addWidget(item)
+        item.update_activity(**activity)
+        self.show()
+        return item
+
+    def item(self, activity_id: str) -> ExecutionActivityItem | None:
+        return self._items.get(activity_id)
+
+    @property
+    def has_items(self) -> bool:
+        return bool(self._items)
+
+
 class TaskPanel(QWidget):
     """A requirement shown as a conversation with an inline execution trace."""
 
@@ -264,6 +383,8 @@ class TaskPanel(QWidget):
         self._reviews: list[dict] = []
         self._active_repair_round = 0
         self._task_progress: dict[str, dict] = {}
+        self._activity_counters: dict[str, int] = {}
+        self._pending_tool_activities: dict[tuple[str, str, int], str] = {}
         self._progress_sequence = 0
         self._usage = self._empty_usage()
         self._setup_ui()
@@ -417,6 +538,9 @@ class TaskPanel(QWidget):
         self.agent_summary.setObjectName("assistantSummary")
         self.agent_summary.setWordWrap(True)
         agent_layout.addWidget(self.agent_summary)
+
+        self.worker_activity = ExecutionActivityTimeline()
+        agent_layout.addWidget(self.worker_activity)
 
         self.attention_card = QFrame()
         self.attention_card.setObjectName("attentionCard")
@@ -824,7 +948,10 @@ class TaskPanel(QWidget):
         worker_outputs = list(self._worker_outputs) if same_job else []
         if not same_job:
             self._task_progress = {}
+            self._activity_counters = {}
+            self._pending_tool_activities = {}
             self._progress_sequence = 0
+            self.worker_activity.clear()
             for disclosure in (self.run_details, self.diff_details, self.test_details):
                 disclosure.clear()
         self._current_job = job
@@ -915,6 +1042,16 @@ class TaskPanel(QWidget):
         self._refresh_worker_stage()
         self._refresh_worker_progress()
         self._populate_test_details()
+        historical_activities = [
+            activity
+            for task in self._tasks
+            for activity in (task.get("worker_activities") or [])
+        ]
+        historical_activities.sort(
+            key=lambda item: str(item.get("created_at") or "")
+        )
+        if historical_activities and (not same_job or not self.worker_activity.has_items):
+            self.load_worker_activities(historical_activities)
 
         if reviews:
             # Reviews are loaded newest-first; the fixed stage represents the
@@ -981,7 +1118,10 @@ class TaskPanel(QWidget):
         self._reviews = []
         self._active_repair_round = 0
         self._task_progress = {}
+        self._activity_counters = {}
+        self._pending_tool_activities = {}
         self._progress_sequence = 0
+        self.worker_activity.clear()
         self.worker_progress_wrap.hide()
         self._clear_repair_stages()
         self._set_usage(self._empty_usage())
@@ -1028,6 +1168,142 @@ class TaskPanel(QWidget):
         stage = self._stage_for(key, repair_round)
         if stage:
             stage.append_output(text)
+
+    @staticmethod
+    def _tool_kind(tool: str) -> str:
+        name = str(tool or "").lower()
+        if name in {"read_file", "read_pdf", "list_files"}:
+            return "read"
+        if name in {"search_code", "search_in_file"}:
+            return "search"
+        if name in {
+            "write_file", "apply_patch", "insert_before", "insert_after",
+            "write_pdf", "promote_artifact",
+        }:
+            return "write"
+        if name in {"run_tests", "run_command", "git_diff"}:
+            return "verify"
+        return "tool"
+
+    @classmethod
+    def _activity_summary(cls, tool: str, path: str = "",
+                          status: str = "started") -> str:
+        target = str(path or "").strip()
+        action = {
+            "read": "正在读取" if status == "started" else "已读取",
+            "search": "正在搜索" if status == "started" else "已搜索",
+            "write": "正在编辑" if status == "started" else "已编辑",
+            "verify": "正在验证" if status == "started" else "已验证",
+            "tool": "正在执行工具" if status == "started" else "已执行工具",
+        }[cls._tool_kind(tool)]
+        if status in {"error", "rejected", "failed", "password_required"}:
+            action = {
+                "read": "读取失败", "search": "搜索失败", "write": "编辑失败",
+                "verify": "验证失败", "tool": "工具执行失败",
+            }[cls._tool_kind(tool)]
+        return f"{action} {target}".strip()
+
+    @staticmethod
+    def _activity_details(tool: str, arguments: dict | None,
+                          result: dict | None) -> str:
+        sections = [f"工具：{tool or 'unknown'}"]
+        if arguments:
+            display_arguments = dict(arguments)
+            for key in ("content", "patch"):
+                value = display_arguments.get(key)
+                if isinstance(value, str) and len(value) > 500:
+                    display_arguments[key] = (
+                        value[:320] + f"\n…（共 {len(value):,} 字符）"
+                    )
+            sections.append(
+                "参数：\n" + json.dumps(
+                    display_arguments, ensure_ascii=False, indent=2, default=str
+                )[:5000]
+            )
+        if result:
+            sections.append(
+                "结果：\n" + json.dumps(
+                    result, ensure_ascii=False, indent=2, default=str
+                )[:7000]
+            )
+        return "\n\n".join(sections)
+
+    def add_worker_activity(
+        self, task_id: str, *, event_kind: str, tool: str = "",
+        path: str = "", turn: int = 0, status: str = "started",
+        arguments: dict | None = None, result: dict | None = None,
+        duration_ms: int = 0, activity_id: str = "", summary: str = "",
+        meta: str = "",
+    ) -> str:
+        """Insert/update a readable live action in the execution conversation."""
+        if not activity_id:
+            counter = self._activity_counters.get(task_id, 0) + 1
+            self._activity_counters[task_id] = counter
+            activity_id = f"{task_id or 'task'}-{event_kind}-{turn}-{counter}"
+        key = (str(task_id), str(tool), int(turn or 0))
+        if event_kind == "tool_started":
+            self._pending_tool_activities[key] = activity_id
+        elif event_kind == "tool_completed":
+            activity_id = self._pending_tool_activities.pop(key, activity_id)
+        if not summary:
+            summary = self._activity_summary(tool, path, status)
+        if not meta:
+            parts = [task_id] if task_id else []
+            if duration_ms:
+                parts.append(
+                    f"{duration_ms / 1000:.1f}s"
+                    if duration_ms >= 1000 else f"{duration_ms}ms"
+                )
+            if status in {"error", "rejected", "failed", "password_required"}:
+                parts.append("未成功")
+            meta = " · ".join(parts)
+        details = self._activity_details(tool, arguments, result)
+        self.worker_activity.add_or_update(
+            activity_id,
+            status=status,
+            summary=summary,
+            meta=meta,
+            details=details if arguments or result else "",
+        )
+        QTimer.singleShot(0, self._scroll_to_bottom)
+        return activity_id
+
+    def add_worker_thought(self, task_id: str, content: str,
+                           duration_ms: int = 0):
+        clean = self._normalize_model_output(content)
+        if not clean:
+            return
+        # Keep the conversation readable. Full model text remains in reports and
+        # persisted model events; the live feed shows a concise progress note.
+        concise = re.sub(r"\n{3,}", "\n\n", clean).strip()[:1200]
+        self.add_worker_activity(
+            task_id,
+            event_kind="thought",
+            status="success",
+            summary=concise,
+            meta=(
+                "执行思路"
+                + (f" · {duration_ms / 1000:.1f}s" if duration_ms else "")
+            ),
+        )
+
+    def load_worker_activities(self, activities: list[dict]):
+        self.worker_activity.clear()
+        self._activity_counters = {}
+        self._pending_tool_activities = {}
+        for index, activity in enumerate(activities or [], start=1):
+            self.add_worker_activity(
+                str(activity.get("task_id") or ""),
+                activity_id=f"history-{index}",
+                event_kind="tool_completed",
+                tool=str(activity.get("tool") or ""),
+                path=str(activity.get("path") or ""),
+                turn=int(activity.get("turn", 0) or 0),
+                status=str(activity.get("status") or "success"),
+                arguments=activity.get("arguments") or {},
+                result=activity.get("result") or {},
+                duration_ms=int(activity.get("duration_ms", 0) or 0),
+            )
 
     def add_model_output(self, agent_type: str, provider: str, response: str,
                          error: str | None, duration_ms: int,
@@ -1107,7 +1383,14 @@ class TaskPanel(QWidget):
             )
         if key == "worker" and not repair_round:
             self._worker_outputs.append(text)
-            self._refresh_worker_stage()
+            if error:
+                self.add_worker_activity(
+                    task_id, event_kind="model", status="failed",
+                    summary=f"执行模型调用失败：{self._friendly_provider_error(error)}",
+                    meta=f"{provider.upper()} · {duration}",
+                )
+            else:
+                self.add_worker_thought(task_id, response, duration_ms)
         else:
             stage.append_output(text)
 
@@ -1483,9 +1766,6 @@ class TaskPanel(QWidget):
                     f"    {result_style['icon']} 验收：{result.get('command', '') or '本地检查'} · "
                     f"{result_style['text']}"
                 )
-        if self._worker_outputs:
-            lines.append("\n模型输出：")
-            lines.extend(self._worker_outputs[-10:])
         stage.set_output(
             "\n".join(lines),
             expand=overall in {"running", "failed", "needs_attention", "interrupted"},

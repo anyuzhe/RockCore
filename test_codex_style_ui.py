@@ -532,6 +532,138 @@ def test_checkpoint_progress_keeps_original_plan_step_numbers():
     panel.close()
 
 
+def test_worker_activity_timeline_updates_started_tool_in_place():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-ACTIVITY",
+        "user_request": "修改页面",
+        "status": "executing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{
+        "task_id": "T001", "title": "实现页面", "status": "running",
+    }])
+
+    activity_id = panel.add_worker_activity(
+        "T001", event_kind="tool_started", tool="read_file",
+        path="src/main.js", turn=2, status="started",
+        arguments={"path": "src/main.js"},
+    )
+    item = panel.worker_activity.item(activity_id)
+    assert item is not None
+    assert item.indicator.is_spinning
+    assert item.summary.text() == "正在读取 src/main.js"
+
+    completed_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="read_file",
+        path="src/main.js", turn=2, status="success",
+        arguments={"path": "src/main.js"},
+        result={"status": "success", "content": "const app = true;"},
+        duration_ms=443,
+    )
+
+    assert completed_id == activity_id
+    assert len(panel.worker_activity._items) == 1
+    assert not item.indicator.is_spinning
+    assert item.summary.text() == "已读取 src/main.js"
+    assert "443ms" in item.meta.text()
+    assert not item.toggle.isHidden()
+    panel.close()
+
+
+def test_worker_model_progress_is_readable_activity_not_task_dump():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-THOUGHT",
+        "user_request": "修复交互",
+        "status": "executing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{
+        "task_id": "T001", "title": "修复交互", "status": "running",
+    }])
+
+    panel.add_model_output(
+        agent_type="worker", provider="deepseek",
+        response="我已经定位事件绑定，接下来会修改按钮状态并运行验证。",
+        error=None, duration_ms=1200, task_id="T001",
+    )
+
+    activities = list(panel.worker_activity._items.values())
+    assert activities
+    assert "接下来会修改按钮状态" in activities[-1].summary.text()
+    assert activities[-1].meta.text().startswith("执行思路")
+    assert "模型输出：" not in panel.stages["worker"].output.toPlainText()
+    panel.close()
+
+
+def test_historical_worker_tools_restore_as_activity_timeline():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-HISTORY-ACTIVITY",
+        "user_request": "修复页面",
+        "status": "done",
+        "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{
+        "task_id": "T001", "title": "修复页面", "status": "done",
+        "worker_activities": [{
+            "task_id": "T001", "tool": "apply_patch", "path": "index.html",
+            "status": "success", "arguments": {"path": "index.html"},
+            "result": {"status": "success"}, "duration_ms": 18,
+            "created_at": "2026-08-13T10:01:00Z",
+        }],
+    }])
+
+    assert panel.worker_activity.has_items
+    item = next(iter(panel.worker_activity._items.values()))
+    assert item.summary.text() == "已编辑 index.html"
+    assert "18ms" in item.meta.text()
+    panel.close()
+
+
+def test_worker_activity_treats_concrete_tool_success_status_as_complete():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-WRITTEN", "user_request": "写文件",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "写文件", "status": "running"}])
+
+    activity_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="write_file",
+        path="index.html", turn=1, status="written",
+        result={"status": "written", "path": "index.html"},
+    )
+
+    item = panel.worker_activity.item(activity_id)
+    assert item.summary.text() == "已编辑 index.html"
+    assert not item.indicator.is_spinning
+    panel.close()
+
+
+def test_worker_activity_names_search_query_and_validation_command():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-TARGETS", "user_request": "检查实现",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "检查", "status": "running"}])
+
+    search_id = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="search_code",
+        path="PlayerTank", status="success",
+    )
+    command_id = panel.add_worker_activity(
+        "T001", event_kind="tool_started", tool="run_command",
+        path="pytest -q", status="started",
+    )
+
+    assert panel.worker_activity.item(search_id).summary.text() == "已搜索 PlayerTank"
+    assert panel.worker_activity.item(command_id).summary.text() == "正在验证 pytest -q"
+    panel.close()
+
+
 def test_successful_model_fallback_and_terminal_statuses_are_explicit():
     _app()
     window = MainWindow(None)
@@ -561,6 +693,51 @@ def test_successful_model_fallback_and_terminal_statuses_are_explicit():
     assert window.task_panel.job_status_label.text() == "待继续"
     assert "待继续" in window.project_panel.job_list.item(0).text()
     assert "待继续" in window.status_label.text()
+    window.close()
+
+
+def test_main_window_routes_tool_and_validation_events_to_activity_timeline():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-EVENT-ACTIVITY",
+        "user_request": "修复页面",
+        "status": "executing",
+        "created_at": "2026-08-13T10:00:00Z",
+    }
+    window.task_panel.set_workflow(job, tasks=[{
+        "task_id": "T001", "title": "修复页面", "status": "running",
+    }])
+    window._selected_job_id = job["job_id"]
+
+    window._on_event("worker_tool_started", {
+        "job_id": job["job_id"], "task_id": "T001", "tool": "read_file",
+        "path": "index.html", "turn": 1, "status": "started",
+        "arguments": {"path": "index.html"},
+    })
+    started = next(iter(window.task_panel.worker_activity._items.values()))
+    assert started.indicator.is_spinning
+
+    window._on_event("worker_tool_completed", {
+        "job_id": job["job_id"], "task_id": "T001", "tool": "read_file",
+        "path": "index.html", "turn": 1, "status": "success",
+        "arguments": {"path": "index.html"},
+        "result": {"status": "success"}, "duration_ms": 25,
+    })
+    assert not started.indicator.is_spinning
+    assert started.summary.text() == "已读取 index.html"
+
+    window._on_event("test_running", {
+        "job_id": job["job_id"], "task_id": "T001", "command": "pytest -q",
+    })
+    validation = window.task_panel.worker_activity.item("T001-validation")
+    assert validation.indicator.is_spinning
+    window._on_event("test_result", {
+        "job_id": job["job_id"], "task_id": "T001", "status": "passed",
+        "output": "1 passed",
+    })
+    assert not validation.indicator.is_spinning
+    assert validation.summary.text() == "验收通过"
     window.close()
 
 

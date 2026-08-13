@@ -3110,7 +3110,23 @@ class Engine:
                     max_turns=progress.get("max_turns", 0),
                     changes=live_change_summary,
                 )
-                if progress.get("event_kind") == "tool_completed":
+                event_kind = progress.get("event_kind")
+                if event_kind == "tool_started":
+                    await self.event_bus.publish(
+                        "worker_tool_started",
+                        job_id=job.job_id,
+                        task_id=task_id,
+                        task_index=task_position_by_id.get(task_id, 1),
+                        task_total=task_total,
+                        phase=phase,
+                        tool=progress.get("tool", ""),
+                        path=progress.get("path", ""),
+                        turn=progress.get("turn", 0),
+                        max_turns=progress.get("max_turns", 0),
+                        status="started",
+                        arguments=progress.get("arguments") or {},
+                    )
+                elif event_kind == "tool_completed":
                     await self.event_bus.publish(
                         "worker_tool_completed",
                         job_id=job.job_id,

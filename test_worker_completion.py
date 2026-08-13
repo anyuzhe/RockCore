@@ -634,7 +634,22 @@ def test_worker_reports_successful_tool_progress():
         ).run(task, project_root=".")
 
         assert result["status"] == "completed"
-        assert updates == [{
+        assert [update["event_kind"] for update in updates] == [
+            "tool_started", "tool_completed",
+        ]
+        assert updates[0] == {
+            "phase": "正在修改文件",
+            "tool": "write_file",
+            "path": "game.js",
+            "turn": 1,
+            "max_turns": 3,
+            "event_kind": "tool_started",
+            "status": "started",
+            "arguments": {"path": "game.js", "content": "updated"},
+            "result": {},
+            "duration_ms": 0,
+        }
+        assert updates[1] == {
             "phase": "正在修改文件",
             "tool": "write_file",
             "path": "game.js",
@@ -648,7 +663,7 @@ def test_worker_reports_successful_tool_progress():
                 "content": "ok",
             },
             "duration_ms": 0,
-        }]
+        }
 
     asyncio.run(scenario())
 

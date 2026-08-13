@@ -236,6 +236,22 @@ async def main():
         QFrame#workflowStage {
             background: transparent; border-bottom: 1px solid #e2ded7;
         }
+        QWidget#executionActivityTimeline { background: transparent; }
+        QFrame#executionActivityItem {
+            background: transparent; border: none;
+        }
+        QLabel#activitySummary { color: #34312d; font-size: 12px; }
+        QLabel#activityMeta { color: #8a847c; font-size: 10px; }
+        QToolButton#activityDisclosureButton {
+            background: transparent; color: #817b73; border: none; padding: 3px;
+        }
+        QToolButton#activityDisclosureButton:hover {
+            background: #eeeae4; color: #25231f; border-radius: 4px;
+        }
+        QPlainTextEdit#activityDetails {
+            background: #f4f2ee; color: #514c46; border: 1px solid #e2ded7;
+            border-radius: 5px; padding: 7px;
+        }
         QWidget#workerProgressWrap { background: #fbfaf8; }
         QFrame#workerProgressCard {
             background: #ffffff; border: 1px solid #dedad3; border-radius: 14px;
