@@ -84,6 +84,11 @@ try {
     if ($Smoke.ExitCode -ne 0) {
         throw "Packaged startup smoke test failed with exit code $($Smoke.ExitCode)"
     }
+    $PythonSmoke = Start-Process -FilePath $AppExe `
+        -ArgumentList "--python-validation-smoke-test" -Wait -PassThru
+    if ($PythonSmoke.ExitCode -ne 0) {
+        throw "Packaged Python validation smoke test failed with exit code $($PythonSmoke.ExitCode)"
+    }
 } finally {
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
     $env:PATH = $PreviousPath

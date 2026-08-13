@@ -457,6 +457,32 @@ def test_test_authoring_task_still_uses_worker():
     assert not TestManager.should_validate_locally(task)
 
 
+def test_compound_acceptance_test_authoring_task_uses_worker():
+    task = SimpleNamespace(
+        task_type="testing",
+        title="编写并运行工作日志核心验收测试",
+        description="使用临时数据库验证界面关键流程并执行语法检查",
+        acceptance_command="python -m pytest -q",
+        allowed_paths=["tests/**/*.py"],
+    )
+
+    assert TestManager.is_test_authoring_task(task)
+    assert not TestManager.should_validate_locally(task)
+
+
+def test_run_only_acceptance_test_stays_local():
+    task = SimpleNamespace(
+        task_type="testing",
+        title="执行工作日志验收测试",
+        description="运行既有自动化测试并记录结果，不修改文件",
+        acceptance_command="python -m pytest -q",
+        allowed_paths=["tests/**/*.py"],
+    )
+
+    assert not TestManager.is_test_authoring_task(task)
+    assert TestManager.should_validate_locally(task)
+
+
 def test_tool_schema_is_pruned_by_task_type(tmp_path):
     broker = ToolBroker(tmp_path, PolicyEngine())
     analysis = {

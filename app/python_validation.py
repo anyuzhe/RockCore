@@ -9,14 +9,17 @@ not failed merely because the target PC has no system Python on PATH.
 from __future__ import annotations
 
 import io
+import contextlib
 import multiprocessing
 import os
 import re
+import runpy
 import shlex
 import subprocess
 import sys
 import threading
 import tokenize
+import traceback
 import unittest
 from pathlib import Path, PureWindowsPath
 
@@ -49,7 +52,12 @@ def _executable_name(value: str) -> str:
 
 def _python_arguments(command: str) -> list[str] | None:
     values = _split_command(command)
-    if not values or _executable_name(values[0]) not in PYTHON_COMMANDS:
+    if not values:
+        return None
+    executable = _executable_name(values[0])
+    if executable not in PYTHON_COMMANDS and not re.fullmatch(
+        r"python\d+(?:\.\d+)*", executable
+    ):
         return None
     if any(value in _SHELL_OPERATORS for value in values[1:]):
         return None
@@ -58,6 +66,15 @@ def _python_arguments(command: str) -> list[str] | None:
         if re.fullmatch(r"-\d+(?:\.\d+)?(?:-\d+)?", arguments[0]):
             arguments = arguments[1:]
     return arguments
+
+
+def _pytest_arguments(command: str) -> list[str] | None:
+    values = _split_command(command)
+    if not values or _executable_name(values[0]) != "pytest":
+        return None
+    if any(value in _SHELL_OPERATORS for value in values[1:]):
+        return None
+    return values[1:]
 
 
 def _project_path(root: Path, value: str) -> Path:
@@ -154,9 +171,11 @@ def _run_unittest(arguments: list[str], root: Path) -> subprocess.CompletedProce
     before_modules = set(sys.modules)
     previous_cwd = Path.cwd()
     previous_path = list(sys.path)
+    previous_bytecode = sys.dont_write_bytecode
     try:
         os.chdir(root)
         sys.path.insert(0, str(root))
+        sys.dont_write_bytecode = True
         verbosity = 2 if "-v" in arguments or "--verbose" in arguments else 1
         runner = unittest.TextTestRunner(stream=stream, verbosity=verbosity)
         program = unittest.main(
@@ -179,6 +198,7 @@ def _run_unittest(arguments: list[str], root: Path) -> subprocess.CompletedProce
     finally:
         os.chdir(previous_cwd)
         sys.path[:] = previous_path
+        sys.dont_write_bytecode = previous_bytecode
         # Avoid leaking dynamically imported user modules into later projects.
         for name in set(sys.modules) - before_modules:
             module = sys.modules.get(name)
@@ -256,25 +276,222 @@ def _run_unittest_isolated(
         parent.close()
 
 
+def _pytest_worker(connection, arguments: list[str], root_text: str):
+    """Run pytest from RockCore's packaged runtime in a disposable process."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    previous_cwd = Path.cwd()
+    previous_path = list(sys.path)
+    previous_bytecode = sys.dont_write_bytecode
+    previous_qt = os.environ.get("QT_QPA_PLATFORM")
+    previous_plugin_setting = os.environ.get("PYTEST_DISABLE_PLUGIN_AUTOLOAD")
+    try:
+        import pytest
+
+        root = Path(root_text).resolve()
+        os.chdir(root)
+        sys.path.insert(0, str(root))
+        sys.dont_write_bytecode = True
+        # Desktop acceptance must also work on Windows machines without a
+        # display session or third-party pytest plugins installed globally.
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = int(pytest.main([*arguments, "-p", "no:cacheprovider"]))
+        connection.send((returncode, stdout.getvalue(), stderr.getvalue()))
+    except BaseException as error:
+        connection.send((
+            1,
+            stdout.getvalue(),
+            stderr.getvalue() + f"RockCore 内置 pytest 启动失败：{error}\n",
+        ))
+    finally:
+        os.chdir(previous_cwd)
+        sys.path[:] = previous_path
+        sys.dont_write_bytecode = previous_bytecode
+        if previous_qt is None:
+            os.environ.pop("QT_QPA_PLATFORM", None)
+        else:
+            os.environ["QT_QPA_PLATFORM"] = previous_qt
+        if previous_plugin_setting is None:
+            os.environ.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+        else:
+            os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = previous_plugin_setting
+        connection.close()
+
+
+def _run_pytest_isolated(
+    arguments: list[str], root: Path, timeout: int | float
+) -> subprocess.CompletedProcess:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_pytest_worker,
+        args=(child, arguments, str(root)),
+        name="RockCorePytestValidation",
+    )
+    process.start()
+    child.close()
+    command = ["embedded-python", "-m", "pytest", *arguments]
+    try:
+        if parent.poll(max(1.0, float(timeout))):
+            returncode, stdout, stderr = parent.recv()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+            prefix = "RockCore 内置 Python pytest 验收\n"
+            return subprocess.CompletedProcess(
+                command, int(returncode), prefix + str(stdout or ""),
+                str(stderr or ""),
+            )
+        process.terminate()
+        process.join(timeout=2)
+        return subprocess.CompletedProcess(
+            command, 124, "", f"RockCore 内置 pytest 超时（{timeout:g} 秒）",
+        )
+    except (EOFError, OSError) as error:
+        process.join(timeout=2)
+        return subprocess.CompletedProcess(
+            command, 1, "", f"无法读取 pytest 子进程结果：{error}",
+        )
+    finally:
+        parent.close()
+
+
+def _script_worker(connection, arguments: list[str], root_text: str):
+    """Run a Python script or ``-c`` check without a host interpreter."""
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    root = Path(root_text).resolve()
+    previous_cwd = Path.cwd()
+    previous_path = list(sys.path)
+    previous_argv = list(sys.argv)
+    returncode = 0
+    try:
+        os.chdir(root)
+        sys.path.insert(0, str(root))
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            if arguments[:1] == ["-c"] and len(arguments) >= 2:
+                sys.argv = ["-c", *arguments[2:]]
+                namespace = {"__name__": "__main__", "__file__": "<string>"}
+                exec(compile(arguments[1], "<string>", "exec"), namespace)
+            elif arguments and not arguments[0].startswith("-"):
+                script = _project_path(root, arguments[0])
+                sys.argv = [str(script), *arguments[1:]]
+                runpy.run_path(str(script), run_name="__main__")
+            else:
+                raise ValueError(
+                    "RockCore 内置 Python 不支持该验收参数；"
+                    "支持 pytest、unittest、py_compile、compileall、脚本和 -c"
+                )
+    except SystemExit as error:
+        returncode = int(error.code) if isinstance(error.code, int) else 1
+    except BaseException:
+        returncode = 1
+        with contextlib.redirect_stderr(stderr):
+            traceback.print_exc()
+    finally:
+        os.chdir(previous_cwd)
+        sys.path[:] = previous_path
+        sys.argv[:] = previous_argv
+    connection.send((returncode, stdout.getvalue(), stderr.getvalue()))
+    connection.close()
+
+
+def _run_script_isolated(
+    arguments: list[str], root: Path, timeout: int | float
+) -> subprocess.CompletedProcess:
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_script_worker,
+        args=(child, arguments, str(root)),
+        name="RockCorePythonScriptValidation",
+    )
+    process.start()
+    child.close()
+    command = ["embedded-python", *arguments]
+    try:
+        if parent.poll(max(1.0, float(timeout))):
+            returncode, stdout, stderr = parent.recv()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+            return subprocess.CompletedProcess(
+                command, int(returncode), str(stdout or ""), str(stderr or ""),
+            )
+        process.terminate()
+        process.join(timeout=2)
+        return subprocess.CompletedProcess(
+            command, 124, "", f"RockCore 内置 Python 脚本验收超时（{timeout:g} 秒）",
+        )
+    except (EOFError, OSError) as error:
+        process.join(timeout=2)
+        return subprocess.CompletedProcess(
+            command, 1, "", f"无法读取 Python 验收子进程结果：{error}",
+        )
+    finally:
+        parent.close()
+
+
 def run_embedded_python_command(
     command: str, project_root: str | os.PathLike[str], *,
     timeout: int | float = 120,
 ) -> subprocess.CompletedProcess | None:
-    """Run a supported Python validation command, otherwise return ``None``."""
+    """Run Python validation with RockCore, never with a host interpreter.
+
+    ``None`` means the command is not Python-related. Every recognized Python
+    or pytest command is handled here, including a clear failure for unsupported
+    modules, so callers cannot accidentally fall back to ``python`` on PATH.
+    """
+    root = Path(project_root).resolve()
+    values = _split_command(command)
+    if values:
+        executable = _executable_name(values[0])
+        python_related = (
+            executable in PYTHON_COMMANDS
+            or executable == "pytest"
+            or bool(re.fullmatch(r"python\d+(?:\.\d+)*", executable))
+        )
+        if python_related and any(
+            value in _SHELL_OPERATORS for value in values[1:]
+        ):
+            return subprocess.CompletedProcess(
+                ["embedded-python"], 2, "",
+                "RockCore 内置 Python 验收不接受 shell 组合操作；"
+                "请将每条验收命令分别执行。",
+            )
+    pytest_arguments = _pytest_arguments(command)
+    if pytest_arguments is not None:
+        return _run_pytest_isolated(pytest_arguments, root, timeout)
+
     arguments = _python_arguments(command)
     if arguments is None:
         return None
-    while arguments and arguments[0] in {"-B", "-E", "-I", "-s", "-S"}:
+    while arguments and arguments[0] in {"-B", "-E", "-I", "-s", "-S", "-u"}:
         arguments = arguments[1:]
-    if len(arguments) < 2 or arguments[0] != "-m":
-        return None
-    module = arguments[1].lower()
-    module_arguments = arguments[2:]
-    root = Path(project_root).resolve()
-    if module == "py_compile":
-        return _run_py_compile(module_arguments, root)
-    if module == "compileall":
-        return _run_compileall(module_arguments, root)
-    if module == "unittest":
-        return _run_unittest_isolated(module_arguments, root, timeout)
-    return None
+    if arguments[:1] in (["--version"], ["-V"]):
+        return subprocess.CompletedProcess(
+            ["embedded-python", *arguments], 0,
+            f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} "
+            "(RockCore 内置)\n", "",
+        )
+    if len(arguments) >= 2 and arguments[0] == "-m":
+        module = arguments[1].lower()
+        module_arguments = arguments[2:]
+        if module == "py_compile":
+            return _run_py_compile(module_arguments, root)
+        if module == "compileall":
+            return _run_compileall(module_arguments, root)
+        if module == "unittest":
+            return _run_unittest_isolated(module_arguments, root, timeout)
+        if module == "pytest":
+            return _run_pytest_isolated(module_arguments, root, timeout)
+        return subprocess.CompletedProcess(
+            ["embedded-python", *arguments], 2, "",
+            f"RockCore 内置 Python 不支持验收模块：{module}。"
+            "请使用 pytest、unittest、py_compile 或 compileall。",
+        )
+    return _run_script_isolated(arguments, root, timeout)

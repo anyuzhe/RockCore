@@ -184,6 +184,27 @@ def test_windows_executable_paths_are_recognized_as_allowed_commands():
     assert TestManager._is_shell_command(command)
 
 
+def test_windows_package_bundles_python_acceptance_runtime():
+    root = Path(__file__).resolve().parent
+    spec = (root / "build" / "RockCore.spec").read_text(encoding="utf-8")
+    build_requirements = (root / "requirements-build.txt").read_text(
+        encoding="utf-8"
+    )
+    runtime_requirements = (root / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    build_script = (root / "scripts" / "build_windows.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'collect_submodules("pytest")' in spec
+    assert 'collect_submodules("_pytest")' in spec
+    assert 'excludes=["tests"]' in spec
+    assert "-r requirements.txt" in build_requirements
+    assert "pytest>=8.2,<9" in runtime_requirements
+    assert "--python-validation-smoke-test" in build_script
+
+
 def test_windows_command_arguments_quote_paths_with_spaces():
     quoted = quote_command_arg(
         r"C:\Program Files\Python 311\python.exe", platform="win32"

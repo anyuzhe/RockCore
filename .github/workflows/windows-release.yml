@@ -27,7 +27,7 @@ jobs:
 
       - name: Install runtime and build dependencies
         shell: pwsh
-        run: python -m pip install --upgrade pip; python -m pip install -r requirements-build.txt "pytest>=8.2,<9"
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements-build.txt
 
       - name: Run Windows compatibility tests
         shell: pwsh

@@ -67,6 +67,11 @@ SHA256SUMS.txt
 
 正式版的配置、数据库和日志会保存到当前用户的应用数据目录，不会写入 `Program Files`。首次启动默认工作区为用户目录下的 `RockCore Projects`，也可以在设置中修改。
 
+Python 项目的语法检查、`unittest` 和 `pytest` 验收使用 RockCore 安装包内置的
+Python 运行时与 pytest，不要求用户另外安装 Python，也不依赖系统 `PATH`。
+项目自身额外引入的第三方依赖仍需由项目提供；缺失时会明确报告为项目依赖问题，
+不会误报成“找不到 Python”。
+
 ## 品牌资源
 
 当前内置标识位于 `assets/branding/`，应用侧栏、窗口标题、关于页和 Windows 程序图标统一使用“RockCore · 岩创科技”。如果有公司的正式 Logo 原文件，可直接替换 `rockinnov_logo.png` 和 `rockcore.ico`；`rockinnov_logo.svg` 是当前内置标识的矢量源文件，`scripts/make_brand_assets.py` 用于重新生成默认衍生资源。

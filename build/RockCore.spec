@@ -26,6 +26,10 @@ hiddenimports += collect_submodules("docx")
 hiddenimports += collect_submodules("pptx")
 hiddenimports += collect_submodules("reportlab")
 hiddenimports += collect_submodules("unittest")
+# Project acceptance must not depend on a separately installed host Python.
+# Bundle pytest and its internal modules with the RockCore runtime instead.
+hiddenimports += collect_submodules("pytest")
+hiddenimports += collect_submodules("_pytest")
 
 a = Analysis(
     [str(APP)],
@@ -40,7 +44,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pytest", "tests"],
+    excludes=["tests"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

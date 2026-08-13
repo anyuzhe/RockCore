@@ -1,19 +1,17 @@
 """TestManager — runs acceptance tests and records results."""
 
 import logging
-import os
 import fnmatch
 import hashlib
 import ast
 import json
 import subprocess
-import sys
 import time
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from app.subprocess_utils import command_basename, quote_command_arg, run_process
+from app.subprocess_utils import command_basename, run_process
 from app.text_utils import read_text_compatible
 from app.python_validation import run_embedded_python_command
 from .event_bus import EventBus
@@ -193,11 +191,30 @@ class TestManager:
         )).lower()
         markers = (
             "write test", "add test", "create test", "update test",
-            "modify test", "implement test", "test coverage",
+            "modify test", "implement test", "author test", "test coverage",
+            "write and run test", "create and run test",
             "编写测试", "新增测试", "添加测试", "创建测试", "修改测试",
-            "补充测试", "测试用例",
+            "补充测试", "测试用例", "实现测试",
         )
-        return any(marker in text for marker in markers)
+        if any(marker in text for marker in markers):
+            return True
+        # Allow words between the action and object, e.g.
+        # “编写并运行工作日志核心验收测试”, without treating a run-only
+        # “执行验收测试” task as authoring work.
+        chinese_actions = (
+            "编写", "新增", "添加", "创建", "修改", "补充", "实现", "生成",
+        )
+        chinese_test_objects = ("测试", "测试用例", "测试脚本")
+        action_text = text
+        for negated in (
+            "不修改", "无需修改", "不要修改", "不新增", "无需新增",
+            "不创建", "无需创建", "不编写", "无需编写",
+        ):
+            action_text = action_text.replace(negated, "")
+        return (
+            any(action in action_text for action in chinese_actions)
+            and any(subject in text for subject in chinese_test_objects)
+        )
 
     @classmethod
     def should_validate_locally(cls, task: Any) -> bool:
@@ -235,9 +252,10 @@ class TestManager:
             or (root_path / "tests").is_dir()
             or list(root_path.glob("test_*.py"))
         ):
-            if getattr(sys, "frozen", False):
-                return "python -m unittest discover -v"
-            return f"{quote_command_arg(sys.executable)} -m pytest -q"
+            # This is deliberately a logical command rather than sys.executable:
+            # app.python_validation runs it with RockCore's packaged interpreter
+            # and bundled pytest even when the target PC has no Python on PATH.
+            return "python -m pytest -q"
         if (root_path / "Cargo.toml").is_file():
             return "cargo test"
         if (root_path / "go.mod").is_file():
@@ -521,9 +539,15 @@ class TestManager:
             checked.append(relative)
             issues.extend(result["issues"])
 
-        # A review task verifies accumulated job changes; it does not need to edit again.
+        # Review and run-only validation tasks verify accumulated job state and
+        # do not need to edit again. Only authoring/coding work must prove a new
+        # artifact relative to its own baseline.
         changed = diff["changed"]
-        if baseline_snapshot is not None and not changed:
+        require_changes = (
+            getattr(task, "task_type", "") == "coding"
+            or self.is_test_authoring_task(task)
+        )
+        if baseline_snapshot is not None and not changed and require_changes:
             issues.append("No file changes detected from the job baseline")
 
         test_command = ""

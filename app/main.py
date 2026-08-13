@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Ensure project root is on Python path
@@ -34,6 +35,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _run_packaged_python_validation_smoke_test():
+    """Prove the installed app can execute pytest without host Python."""
+    from app.python_validation import run_embedded_python_command
+
+    with tempfile.TemporaryDirectory(prefix="rockcore-validation-") as folder:
+        root = Path(folder)
+        (root / "test_embedded_runtime.py").write_text(
+            "def test_packaged_runtime():\n    assert 6 * 7 == 42\n",
+            encoding="utf-8",
+        )
+        return run_embedded_python_command(
+            "python -m pytest -q test_embedded_runtime.py",
+            root,
+            timeout=30,
+        )
+
+
 async def main():
     configure_runtime_logging()
     bundled_git = configure_bundled_git()
@@ -50,6 +68,15 @@ async def main():
                 + (git_check.stderr.strip() or f"exit {git_check.returncode}")
             )
         logger.info("Bundled Git ready: %s", git_check.stdout.strip())
+    if "--python-validation-smoke-test" in sys.argv:
+        result = _run_packaged_python_validation_smoke_test()
+        if result is None or result.returncode != 0:
+            detail = "no embedded result" if result is None else (
+                result.stderr.strip() or result.stdout.strip()
+            )
+            raise RuntimeError("内置 Python/pytest 验收不可用：" + detail)
+        logger.info("Packaged Python validation smoke test passed")
+        return
     from storage.database import init_database
     from orchestrator.engine import Engine
     from orchestrator.model_router import ModelRouter
