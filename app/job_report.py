@@ -690,6 +690,7 @@ class JobReportService:
             "review_complete": "审核完成", "task_repairing": "开始修复",
             "job_done": "任务完成", "job_failed": "任务失败",
             "job_cancelled": "任务停止", "job_finished": "任务结束",
+            "job_report_started": "审计报告开始生成",
             "job_needs_attention": "等待用户处理", "model_chat": "模型调用",
             "job_rolled_back": "需求已回退", "job_rollback_started": "开始回退",
             "job_rollback_failed": "回退未完成",

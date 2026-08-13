@@ -1810,6 +1810,11 @@ class MainWindow(QMainWindow):
             self._capture_diff()
             if is_selected:
                 self._reload_selected_workflow()
+        elif event_type == "job_report_started":
+            if is_selected:
+                self.task_panel.set_report_state(
+                    generating=True, available=True,
+                )
         elif event_type == "job_report_ready":
             if is_selected:
                 self.task_panel.set_report_state(
@@ -1817,7 +1822,10 @@ class MainWindow(QMainWindow):
                 )
         elif event_type == "job_report_failed":
             if is_selected:
-                self.task_panel.set_report_state(available=True)
+                self.task_panel.set_report_state(
+                    available=True,
+                    error=str(data.get("error") or "未知错误"),
+                )
                 self.task_panel.log(
                     f"任务报告生成失败：{data.get('error', '未知错误')}", "log",
                 )

@@ -432,6 +432,7 @@ class TaskPanel(QWidget):
         ("planner", "执行计划", "动态步骤与验收条件"),
         ("worker", "工作过程", "读取、修改与即时验证"),
         ("reviewer", "验证结果", "确定性检查与按需审核"),
+        ("report", "审计报告", "生成并保存完整执行记录"),
     )
 
     def __init__(self, parent=None):
@@ -871,7 +872,10 @@ class TaskPanel(QWidget):
         title, subtitle = metadata[agent_type]
         stage = WorkflowStage(key, title, subtitle)
         self.repair_stages[key] = stage
-        self.trace_layout.addWidget(stage)
+        # Repair rounds belong immediately after the Reviewer. The audit
+        # report is always the final workflow stage, after every repair pass.
+        report_index = self.trace_layout.indexOf(self.stages["report"])
+        self.trace_layout.insertWidget(report_index, stage)
         return stage
 
     def _stage_for(self, key: str, repair_round: int = 0) -> WorkflowStage | None:
@@ -2094,8 +2098,7 @@ class TaskPanel(QWidget):
 
     def _request_report(self):
         if self._current_job:
-            self.report_btn.setEnabled(False)
-            self.report_btn.setText("正在生成…")
+            self.set_report_state(generating=True, available=True)
             self.report_requested.emit(self._current_job)
 
     def _request_replay(self):
@@ -2155,7 +2158,7 @@ class TaskPanel(QWidget):
         self.evidence_frame.show()
 
     def set_report_state(self, *, path: str = "", generating: bool = False,
-                         available: bool = True):
+                         available: bool = True, error: str = ""):
         """Expose an existing report or an on-demand generator for old Jobs."""
         if not self._current_job:
             self.report_btn.hide()
@@ -2164,6 +2167,36 @@ class TaskPanel(QWidget):
         self.report_btn.setVisible(bool(available or path or generating))
         self.report_btn.setText("正在生成…" if generating else "查看报告")
         self.report_btn.setEnabled(bool(available or path) and not generating)
+        report_stage = self.stages["report"]
+        if generating:
+            report_stage.set_status("running")
+            report_stage.set_output(
+                "正在汇总需求、各阶段输出、模型调用、工具执行、代码变更、"
+                "验收结果和运行时间。",
+                expand=True,
+            )
+        elif path:
+            report_stage.set_status("success")
+            report_stage.set_output(
+                f"PDF 审计报告已生成：\n{path}", expand=False,
+            )
+            self._set_result_evidence(
+                str(self._current_job.get("status") or ""),
+                self._current_job,
+                self._tasks,
+            )
+        elif error:
+            report_stage.set_status("failed")
+            report_stage.set_output(
+                f"自动生成失败：{error}\n可点击“查看报告”重新生成。",
+                expand=True,
+            )
+        elif str(self._current_job.get("status") or "") in TERMINAL_JOB_STATUSES:
+            report_stage.set_status("pending")
+            report_stage.set_output(
+                "尚未生成审计报告；可点击“查看报告”立即生成。",
+                expand=False,
+            )
 
     def _request_attention_resume(self):
         if (

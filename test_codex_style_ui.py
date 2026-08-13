@@ -556,6 +556,7 @@ def test_review_repairs_are_appended_in_conversation_order():
         "理解需求", "安全与范围", "执行计划", "工作过程", "验证结果",
         "策划者", "执行者", "审核者",
         "策划者", "执行者", "审核者",
+        "审计报告",
     ]
     assert stages[5].subtitle_label.text() == "第 1 轮 · 判断与修复计划"
     assert stages[8].subtitle_label.text() == "第 2 轮 · 判断与修复计划"

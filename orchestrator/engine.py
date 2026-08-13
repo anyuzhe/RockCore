@@ -568,6 +568,9 @@ class Engine:
         job_id = str(data.get("job_id") or "")
         if not job_id:
             return
+        await self.event_bus.publish(
+            "job_report_started", job_id=job_id, trigger="automatic",
+        )
         try:
             path = await asyncio.to_thread(self.job_reports.generate, job_id)
             # Do not publish another durable event after the report was built:
@@ -583,11 +586,20 @@ class Engine:
 
     async def generate_job_report(self, job_id: str) -> str:
         """Regenerate one report on demand, including historical Jobs."""
-        path = await asyncio.to_thread(self.job_reports.generate, job_id)
-        await self.event_bus.publish_transient(
-            "job_report_ready", job_id=job_id, path=str(path),
+        await self.event_bus.publish(
+            "job_report_started", job_id=job_id, trigger="manual",
         )
-        return str(path)
+        try:
+            path = await asyncio.to_thread(self.job_reports.generate, job_id)
+            await self.event_bus.publish_transient(
+                "job_report_ready", job_id=job_id, path=str(path),
+            )
+            return str(path)
+        except Exception as error:
+            await self.event_bus.publish_transient(
+                "job_report_failed", job_id=job_id, error=str(error),
+            )
+            raise
 
     async def replay_job_events(self, job_id: str, *, speed: float = 0.0) -> int:
         """Replay a durable Job timeline into the UI without any model call."""

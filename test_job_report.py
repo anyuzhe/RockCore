@@ -71,6 +71,9 @@ def test_job_report_persists_events_redacts_secrets_and_generates_pdf(tmp_path):
     assert report_path == project_root / ".ai" / "reports" / "JOB-REPORT-001.pdf"
     assert report_path.is_file() and report_path.stat().st_size > 1000
     assert len(PdfReader(str(report_path)).pages) >= 1
+    report_events = engine.event_bus.get_history()
+    assert any(event["type"] == "job_report_started" for event in report_events)
+    assert any(event["type"] == "job_report_ready" for event in report_events)
 
     event_path = report_path.with_suffix(".events.jsonl")
     log_text = event_path.read_text(encoding="utf-8")
@@ -110,8 +113,29 @@ def test_terminal_job_exposes_report_button_and_signal():
     panel.report_btn.click()
     assert emitted and emitted[0]["job_id"] == "JOB-REPORT-UI"
     assert panel.report_btn.text() == "正在生成…"
+    assert panel.stages["report"]._status == "running"
     panel.set_report_state(path="/tmp/report.pdf", available=True)
     assert panel.report_btn.text() == "查看报告"
+    assert panel.stages["report"]._status == "success"
+    assert "/tmp/report.pdf" in panel.stages["report"].output.toPlainText()
+    panel.close()
+
+
+def test_report_failure_is_visible_in_workflow_and_can_be_retried():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-REPORT-FAILED",
+        "user_request": "生成报告",
+        "status": "done",
+        "created_at": "2026-08-13T01:00:00Z",
+    })
+
+    panel.set_report_state(available=True, error="PDF renderer unavailable")
+
+    assert panel.stages["report"]._status == "failed"
+    assert "PDF renderer unavailable" in panel.stages["report"].output.toPlainText()
+    assert panel.report_btn.isEnabled()
     panel.close()
 
 
