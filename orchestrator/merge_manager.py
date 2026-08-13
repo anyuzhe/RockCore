@@ -324,6 +324,93 @@ class MergeManager:
         logger.info("Excluded RockCore runtime files from task commit: %s", runtime_paths)
         return True, ""
 
+    def _protect_target_runtime_paths(self) -> dict:
+        """Temporarily hide dirty RockCore state from a target-branch merge.
+
+        Event logs are tracked in older projects and are appended while a job
+        runs. Git refuses to merge any branch when those files are dirty, even
+        though they are explicitly excluded from task output. Preserve their
+        bytes and index state, restore the target to HEAD for the merge, then
+        put the runtime state back in ``_restore_target_runtime_paths``.
+        """
+        status = run_process(
+            ["git", "status", "--porcelain=v1", "-z"],
+            capture_output=True, text=True, cwd=self.project_root,
+        )
+        if status.returncode != 0:
+            return {"status": "failed", "error": self._process_output(status)}
+
+        records = []
+        for entry in status.stdout.split("\0"):
+            if len(entry) < 4 or entry[2] != " ":
+                continue
+            relative = entry[3:]
+            if not self._is_runtime_path(relative):
+                continue
+            path = (self.project_root / relative).resolve()
+            try:
+                path.relative_to(self.project_root)
+                data = path.read_bytes() if path.is_file() else None
+                records.append({
+                    "path": relative,
+                    "data": data,
+                    "mode": entry[:2],
+                    "staged": entry[0] not in {" ", "?"},
+                    "untracked": entry[:2] == "??",
+                })
+            except (OSError, ValueError):
+                continue
+
+        for record in records:
+            relative = record["path"]
+            if record["staged"]:
+                unstaged = run_process(
+                    ["git", "restore", "--staged", "--", relative],
+                    capture_output=True, text=True, cwd=self.project_root,
+                )
+                if unstaged.returncode != 0:
+                    self._restore_target_runtime_paths({"records": records})
+                    return {"status": "failed", "error": self._process_output(unstaged)}
+            if record["untracked"]:
+                path = self.project_root / relative
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError as error:
+                        self._restore_target_runtime_paths({"records": records})
+                        return {"status": "failed", "error": str(error)}
+            else:
+                restored = run_process(
+                    ["git", "restore", "--worktree", "--", relative],
+                    capture_output=True, text=True, cwd=self.project_root,
+                )
+                if restored.returncode != 0:
+                    self._restore_target_runtime_paths({"records": records})
+                    return {"status": "failed", "error": self._process_output(restored)}
+        return {"status": "protected", "records": records}
+
+    def _restore_target_runtime_paths(self, protection: dict) -> None:
+        """Restore runtime bytes and their pre-merge staged/unstaged state."""
+        for record in protection.get("records") or []:
+            relative = str(record.get("path") or "")
+            data = record.get("data")
+            if not relative or data is None:
+                continue
+            path = (self.project_root / relative).resolve()
+            try:
+                path.relative_to(self.project_root)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                if record.get("staged"):
+                    staged = run_process(
+                        ["git", "add", "--", relative],
+                        capture_output=True, text=True, cwd=self.project_root,
+                    )
+                    if staged.returncode != 0:
+                        logger.warning("Could not restore staged runtime path %s: %s", relative, self._process_output(staged))
+            except (OSError, ValueError) as error:
+                logger.warning("Could not restore runtime path %s: %s", relative, error)
+
     def _neutralize_inherited_runtime_paths(
         self, worktree_path: str,
     ) -> tuple[bool, str, list[str]]:
@@ -654,7 +741,14 @@ class MergeManager:
                     details=preflight,
                 )
 
+            runtime_protection = self._protect_target_runtime_paths()
+            if runtime_protection.get("status") == "failed":
+                return self._integration_failure(
+                    task_id, "protect_runtime_state",
+                    str(runtime_protection.get("error") or "Could not protect runtime state"),
+                )
             merge_result = await self.git_tools.merge_branch(branch, self.target_branch)
+            self._restore_target_runtime_paths(runtime_protection)
             if merge_result.get("status") == "conflict":
                 self._restore_preflight_backups(preflight)
                 return await self._handle_conflict(task_id, merge_result)

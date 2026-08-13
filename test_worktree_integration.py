@@ -101,6 +101,34 @@ def test_runtime_reports_are_excluded_from_task_merge(tmp_path):
     ) == "main report\n"
 
 
+def test_dirty_tracked_runtime_report_does_not_block_task_merge(tmp_path):
+    project = _initialize_project(tmp_path)
+    report = project / ".ai" / "reports" / "JOB-DIRTY.events.jsonl"
+    report.parent.mkdir(parents=True)
+    report.write_text("baseline\n", encoding="utf-8")
+    assert _git(project, "add", ".ai/reports/JOB-DIRTY.events.jsonl").returncode == 0
+    assert _git(
+        project, "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "report baseline",
+    ).returncode == 0
+    report.write_text("baseline\nruntime event\n", encoding="utf-8")
+    manager = MergeManager(str(project), worktrees_dir=str(tmp_path / "worktrees"))
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-DIRTY")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("task output\n", encoding="utf-8")
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "merged"
+    assert (project / "output.txt").read_text(encoding="utf-8") == "task output\n"
+    assert report.read_text(encoding="utf-8") == "baseline\nruntime event\n"
+    status = _git(project, "status", "--porcelain").stdout
+    assert ".ai/reports/JOB-DIRTY.events.jsonl" in status
+
+
 def test_untracked_runtime_report_is_removed_from_task_worktree(tmp_path):
     project = _initialize_project(tmp_path)
     report = project / ".ai" / "reports" / "JOB-UNTRACKED.events.jsonl"
