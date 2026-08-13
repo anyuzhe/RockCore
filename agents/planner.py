@@ -17,7 +17,7 @@ class PlannerOutputTruncatedError(RuntimeError):
 TRUNCATED_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner agent in an AI Engineering Studio.
-Your role is to create a detailed task plan that respects the Constitution.
+Your role is to create a concise execution-stage plan that respects the Constitution.
 
 Rules:
 1. Each task must be concrete and executable
@@ -27,9 +27,10 @@ Rules:
 3. Tasks can depend on other tasks
 4. Each task must specify allowed file paths
 5. Do NOT suggest modifying protected paths
-6. Keep tasks small and focused — one task should do one thing
-7. Maximum 18 tasks per plan. A complex feature should use the available task
-   count instead of hiding many subsystems inside one oversized Worker task.
+6. Plan coherent execution stages, not one task per tiny behavior. Target 3-6
+   tasks for substantial work and use fewer for small work.
+7. Maximum 8 tasks per plan. A task may cover tightly coupled changes that share
+   the same runtime files and deterministic validation.
 8. ALL file paths MUST be relative to project_root. NEVER output absolute paths.
    Correct: "index.html", "src/main.py"
    WRONG: "/Users/xxx/project/index.html", "C:\\Users\\xxx\\..."
@@ -39,13 +40,13 @@ Rules:
     when one exists; otherwise leave acceptance_command empty for local validation.
 11. Analysis tasks are read-only by default. Their final written analysis is the
     deliverable, so do not require them to create or modify project files.
-12. Keep each coding task to at most 2-3 independently verifiable behaviors. Split
-    state logic, UI wiring, persistence/restart, and integration when they are
-    substantial, even if they touch the same file.
+12. Split only at stable boundaries such as backend/frontend, data migration,
+    or independently testable runtime stages. Keep same-file implementation and
+    wiring together so a Worker can finish with one continuous context.
 13. Dependencies must list only direct prerequisites. Do not repeat every transitive
     dependency on all later tasks.
-14. Use at most one read-only analysis task for a small or single-page project.
-    Searching and reading the identified code sections belong in the same task.
+14. The supplied Active Project Surface is deterministic preflight evidence. Do
+    not create an analysis task merely to rediscover entrypoints or inventory.
 15. Ground allowed_paths in the Project Knowledge file inventory. Never invent
     conventional src/, app/, components/, pages/, or data/ directories when the
     repository map shows a different structure.
@@ -68,17 +69,15 @@ Rules:
     Do not label such work coding and do not require a file change. If the user also
     requests a repair, implementation, or saved report artifact, keep the relevant
     task as coding (or split analysis then coding when that is genuinely useful).
-23. Build a coverage map before answering: every explicit user requirement and
+23. Build a coverage map internally before answering: every explicit user requirement and
     acceptance criterion must belong to at least one task. Do not silently omit
     visual, interaction, state, compatibility, error-path, or restart behavior.
-24. One coding task should normally cover one independently verifiable feature,
-    component, scene, workflow state, or repair. Split different pages/scenes,
-    game systems, persistence, UI wiring, and platform compatibility into separate
-    tasks even when they share files; add a final integration/testing task.
+24. Group related behaviors into an implementation stage when they share files,
+    state, and verification. Avoid long serial chains of Workers editing the same file.
 25. Never use an umbrella task such as "implement the remaining systems", "finish
     zones 1-8", or "complete A/B/C/D". A task naming three or more substantial
     subsystems, scenes, regions, or user-visible behaviors must be decomposed.
-26. Keep prerequisite discovery focused, then let each implementation task state
+26. Let each implementation stage state
     its exact inputs, outputs, and deterministic acceptance evidence. The plan is
     complete only when the union of tasks fully satisfies the user's request.
 
@@ -166,6 +165,30 @@ class PlannerAgent:
             if memory_context:
                 memory_context = f"\n\nProject Knowledge:\n{memory_context}\n"
 
+        surface = dict(getattr(job, "_rockcore_project_surface", None) or {})
+        surface_context = ""
+        if surface:
+            prompt_surface = {
+                "version": surface.get("version", 1),
+                "entrypoints": list(surface.get("entrypoints") or [])[:12],
+                "active_files": list(surface.get("active_files") or [])[:120],
+                "support_files": list(surface.get("support_files") or [])[:80],
+                "legacy_files": list(surface.get("legacy_files") or [])[:60],
+                "duplicate_symbols": list(
+                    surface.get("duplicate_symbols") or []
+                )[:30],
+                "commands": dict(surface.get("commands") or {}),
+                "ambiguities": list(surface.get("ambiguities") or [])[:12],
+                "confidence": surface.get("confidence", 0.0),
+            }
+            surface_context = (
+                "\n\nActive Project Surface (deterministic; treat as authoritative):\n"
+                + json.dumps(prompt_surface, ensure_ascii=False, indent=2)
+                + "\nUse active_files by default and support_files for tests/config. "
+                  "Do not target legacy_files unless "
+                  "the request explicitly requires resolving a listed ambiguity.\n"
+            )
+
         constitution_text = "No constitution defined."
         if constitution:
             constitution_text = f"""
@@ -200,13 +223,15 @@ User Request: {job.user_request}{image_context}
 Constitution:
 {constitution_text}
 {memory_context}
+{surface_context}
 Skill Catalog:
 {skill_catalog}
 
 Create a plan with concrete, executable tasks.
 Each task should have a clear purpose and acceptance criteria.
 Tasks must NOT modify protected paths.
-Analysis tasks should come before coding tasks.
+Do not add an inventory/architecture-analysis task when Active Project Surface
+already identifies the runtime. Prefer 3-6 coherent stages, maximum 8.
 Testing tasks should come after coding tasks.
 
 Output ONLY valid JSON."""

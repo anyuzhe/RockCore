@@ -27,6 +27,7 @@ class ContextManager:
         self.repo_map = RepoMap(
             str(self.project_root), state_dir=self.state_dir
         )
+        self.project_surface: dict[str, Any] = {}
 
     async def initialize(self):
         """Initialize the context manager and build the repo map."""
@@ -50,33 +51,70 @@ class ContextManager:
         self.repo_map = RepoMap(
             str(new_root_path), state_dir=self.state_dir
         )
+        self.project_surface = {}
         self.repo_map.update()
         logger.info(f"ContextManager switched to project: {new_root}")
+
+    def set_project_surface(self, surface: dict | None):
+        """Set the deterministic runtime surface shared by Planner and Worker."""
+        self.project_surface = dict(surface or {})
 
     async def build_task_context(self, task) -> str:
         """Build optimized context for a specific task."""
         parts = []
 
-        # Project memory summary
+        surface = dict(
+            getattr(task, "_rockcore_project_surface", None)
+            or self.project_surface
+            or {}
+        )
+        if surface:
+            active = list(surface.get("active_files") or [])
+            support = list(surface.get("support_files") or [])
+            legacy = list(surface.get("legacy_files") or [])
+            entrypoints = [
+                str(item.get("path"))
+                for item in (surface.get("entrypoints") or [])
+                if isinstance(item, dict) and item.get("path")
+            ]
+            lines = ["=== Active Project Surface ==="]
+            if entrypoints:
+                lines.append("Entrypoints: " + ", ".join(entrypoints[:8]))
+            if active:
+                lines.append("Runtime files (authoritative):")
+                lines.extend(f"- {path}" for path in active[:30])
+            if support:
+                lines.append("Supporting tests/configuration:")
+                lines.extend(f"- {path}" for path in support[:20])
+            if legacy:
+                lines.append(
+                    "Unreferenced/legacy files (do not edit unless the task explicitly targets them):"
+                )
+                lines.extend(f"- {path}" for path in legacy[:20])
+            for ambiguity in (surface.get("ambiguities") or [])[:6]:
+                lines.append("Ambiguity: " + str(ambiguity))
+            parts.append("\n".join(lines))
+
+        # Project memory follows the active surface so the authoritative runtime
+        # cannot be truncated by older, lower-priority repository information.
         memory_summary = self.project_memory.get_context_summary()
         if memory_summary:
-            parts.append("=== Project Knowledge ===\n" + memory_summary[:1800])
+            parts.append("=== Project Knowledge ===\n" + memory_summary[:1200])
 
-        # Repository map summary
         if self.repo_map.is_loaded:
             parts.append(
                 "=== Repository Map ===\n"
-                + self.repo_map.get_context_summary()[:1800]
+                + self.repo_map.get_context_summary()[:1200]
             )
 
         # Task-specific file context
-        relevant_files = self._find_relevant_files(task)
+        relevant_files = self._find_relevant_files(task, surface=surface)
         if relevant_files:
             parts.append("=== Relevant Files ===\n" + "\n".join(f"- {f}" for f in relevant_files))
 
         return "\n\n".join(parts)[:4000]
 
-    def _find_relevant_files(self, task) -> list[str]:
+    def _find_relevant_files(self, task, surface: dict | None = None) -> list[str]:
         """Find files relevant to a task based on task type and description."""
         relevant = set()
         exact_allowed = False
@@ -92,18 +130,29 @@ class ContextManager:
             except Exception as e:
                 logger.warning(f"Glob pattern '{pattern}' failed: {e}")
 
-        # For coding tasks, add source files
+        active_files = list((surface or {}).get("active_files") or [])
+        support_files = list((surface or {}).get("support_files") or [])
+
+        # Runtime reachability is authoritative when the task has a broad scope.
+        if active_files and not exact_allowed:
+            relevant.update(active_files[:24])
+
+        # For coding tasks, add source files only when no active surface exists.
         if task.task_type == "coding" and not exact_allowed:
-            source_files = self.repo_map.get_category_files("source")
-            relevant.update(source_files[:10])  # Limit to 10 source files
+            if not active_files:
+                source_files = self.repo_map.get_category_files("source")
+                relevant.update(source_files[:10])  # Limit to 10 source files
 
         # For testing tasks, add test files
         if task.task_type == "testing":
-            test_files = self.repo_map.get_category_files("test")
-            relevant.update(test_files[:10])
+            if support_files:
+                relevant.update(support_files[:16])
+            else:
+                test_files = self.repo_map.get_category_files("test")
+                relevant.update(test_files[:10])
 
         # For analysis tasks, add all source and config
-        if task.task_type == "analysis":
+        if task.task_type == "analysis" and not active_files:
             for cat in ("source", "config"):
                 relevant.update(self.repo_map.get_category_files(cat)[:15])
 
@@ -130,4 +179,9 @@ class ContextManager:
         parts.append(self.project_memory.get_context_summary())
         if self.repo_map.is_loaded:
             parts.append(self.repo_map.get_context_summary())
+        if self.project_surface:
+            parts.append(
+                "Active runtime files: "
+                + ", ".join(self.project_surface.get("active_files") or [])
+            )
         return "\n\n".join(parts)

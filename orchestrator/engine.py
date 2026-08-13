@@ -81,6 +81,7 @@ from .scheduler import Scheduler
 from .policy_engine import PolicyEngine
 from .model_router import ModelRouter
 from .cost_engine import BudgetExceededError
+from .project_resolver import ProjectResolver
 from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
@@ -1460,6 +1461,18 @@ class Engine:
             proj_config = load_project_config(proj_root)
             logger.info(f"Job {job_id}: mode={proj_config.mode}")
 
+            project_surface = await self._resolve_project_surface(
+                job, repos, proj_root
+            )
+            job._rockcore_project_surface = project_surface
+            for agent_type in ("planner", "worker"):
+                agent = self.get_agent(agent_type)
+                context_manager = getattr(agent, "context_manager", None)
+                if context_manager and hasattr(
+                    context_manager, "set_project_surface"
+                ):
+                    context_manager.set_project_surface(project_surface)
+
             if self.skill_manager:
                 self.skill_manager.configure(
                     proj_root, proj_config.skills, proj_config.plugins
@@ -1924,6 +1937,10 @@ class Engine:
             used_fallback = True
             plan_data = self._direct_plan_data(job, repos, proj_config)
 
+        self._ground_plan_in_project_surface(
+            plan_data, getattr(job, "_rockcore_project_surface", None)
+        )
+
         task_types_corrected = self._normalize_plan_task_types(
             plan_data, job.user_request
         )
@@ -1969,9 +1986,12 @@ class Engine:
         )
         quality_errors = [
             error for error in preliminary_errors
-            if str(error).startswith((
-                "continuation_quality:", "granularity_quality:",
-            ))
+            if (
+                str(error).startswith((
+                    "continuation_quality:", "granularity_quality:",
+                ))
+                or "execution-stage plans may contain at most 8" in str(error)
+            )
         ]
         if planner and quality_errors:
             await self.event_bus.publish(
@@ -1985,8 +2005,8 @@ class Engine:
                 + "\nCreate a concrete continuation plan. Name the remaining "
                   "artifact/files, preserve completed work, and include a "
                   "deterministic acceptance command or a concrete file scope."
-                  " Split every task that combines three or more independent "
-                  "features/scenes/systems, and cover every user requirement."
+                  " Return no more than 8 coherent execution stages. Group tightly "
+                  "coupled same-file behavior, while covering every requirement."
             )
             try:
                 revised = await planner.run(
@@ -1997,6 +2017,9 @@ class Engine:
                 return
             if revised.get("tasks"):
                 plan_data = revised
+                self._ground_plan_in_project_surface(
+                    plan_data, getattr(job, "_rockcore_project_surface", None)
+                )
                 self._optimize_plan(plan_data, effective_complexity)
                 self._serialize_overlapping_tasks(plan_data)
                 self._prune_transitive_dependencies(plan_data)
@@ -2102,7 +2125,8 @@ class Engine:
         description = self._request_with_context(job, repos, proj_config)
         task_type = self._request_task_type(job.user_request)
         title = self._effective_task_title(job, repos)
-        allowed_paths = ["*"]
+        surface = dict(getattr(job, "_rockcore_project_surface", None) or {})
+        allowed_paths = list(surface.get("active_files") or []) or ["*"]
         if getattr(job, "source_job_id", None):
             source = repos["job"].get_by_id(job.source_job_id)
             if source:
@@ -2147,6 +2171,86 @@ class Engine:
                 "acceptance_command": "",
             }],
         }
+
+    async def _resolve_project_surface(self, job, repos, project_root: str) -> dict:
+        """Resolve and persist the runtime surface before any model plans work."""
+        await self.event_bus.publish(
+            "project_resolving", job_id=job.job_id,
+            project_root=project_root,
+        )
+        try:
+            surface = await asyncio.to_thread(
+                ProjectResolver(project_root).resolve
+            )
+        except Exception as error:
+            logger.warning("Project resolver failed for %s: %s", job.job_id, error)
+            surface = {
+                "version": 1,
+                "entrypoints": [],
+                "active_files": [],
+                "support_files": [],
+                "legacy_files": [],
+                "duplicate_symbols": [],
+                "commands": {},
+                "ambiguities": [f"项目静态解析不可用：{error}"],
+                "confidence": 0.0,
+                "file_count": 0,
+            }
+        checkpoint = dict(getattr(job, "last_checkpoint", None) or {})
+        checkpoint["project_surface"] = surface
+        checkpoint["updated_at"] = datetime.now().astimezone().isoformat()
+        repos["job"].update_checkpoint(job.job_id, checkpoint)
+        job.last_checkpoint = checkpoint
+        await self.event_bus.publish(
+            "project_resolved",
+            job_id=job.job_id,
+            entrypoints=surface.get("entrypoints") or [],
+            active_files=surface.get("active_files") or [],
+            legacy_files=surface.get("legacy_files") or [],
+            ambiguities=surface.get("ambiguities") or [],
+            commands=surface.get("commands") or {},
+            confidence=surface.get("confidence", 0.0),
+        )
+        return surface
+
+    @classmethod
+    def _ground_plan_in_project_surface(cls, plan_data: dict,
+                                        surface: dict | None) -> bool:
+        """Replace model-wide globs with the files reachable from real entries."""
+        active = [
+            str(path).replace("\\", "/").lstrip("./")
+            for path in ((surface or {}).get("active_files") or [])
+            if str(path).strip()
+        ]
+        if not active:
+            return False
+        changed = False
+        for task in plan_data.get("tasks") or []:
+            if str(task.get("type") or "coding") == "action":
+                continue
+            paths = [str(path) for path in (task.get("allowed_paths") or [])]
+            broad = not paths or any(
+                cls._is_project_wide_plan_path(path) for path in paths
+            )
+            if not broad:
+                continue
+            concrete = [
+                path.replace("\\", "/").lstrip("./")
+                for path in paths if not cls._is_project_wide_plan_path(path)
+            ]
+            narrowed = list(dict.fromkeys(active + concrete))[:80]
+            if narrowed != paths:
+                task["allowed_paths"] = narrowed
+                changed = True
+        return changed
+
+    @staticmethod
+    def _is_project_wide_plan_path(path: str) -> bool:
+        normalized = str(path or "").replace("\\", "/").strip()
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = normalized.rstrip("/")
+        return normalized in {"", ".", "*", "**", "**/*", "**/**"}
 
     def _create_tasks_from_plan(self, job, repos, plan_data: dict,
                                 order_offset: int = 0):
@@ -2838,6 +2942,25 @@ class Engine:
             t = task_data["_db_task"]
             nonlocal repos, job, worker
 
+            project_surface = dict(
+                getattr(job, "_rockcore_project_surface", None)
+                or (getattr(job, "last_checkpoint", None) or {}).get(
+                    "project_surface"
+                )
+                or {}
+            )
+            t._rockcore_project_surface = project_surface
+            shared_context = self._execution_continuation_context(
+                job, t, completed_task_results
+            )
+            if shared_context:
+                existing_context = str(
+                    getattr(t, "_rockcore_initial_recovery_context", "") or ""
+                )
+                t._rockcore_initial_recovery_context = "\n\n".join(
+                    item for item in (existing_context, shared_context) if item
+                )
+
             analysis_reports = self._collect_analysis_dependency_reports(
                 task_id, task_data_by_id, completed_task_results
             )
@@ -3161,7 +3284,7 @@ class Engine:
                 # task with focused context, rather than presenting it as a new
                 # plan step or rerunning completed upstream tasks.
                 if resumed_validation:
-                    t._rockcore_initial_recovery_context = (
+                    resumed_context = (
                         "A saved checkpoint artifact was validated before retry. "
                         "Reuse the saved reads and edit only the concrete failing "
                         "parts; do not scan the project again.\nValidation:\n"
@@ -3173,6 +3296,14 @@ class Engine:
                         + self._worker_retry_evidence(
                             dict(t.result_data or {})
                         )
+                    )
+                    t._rockcore_initial_recovery_context = "\n\n".join(
+                        item for item in (
+                            str(getattr(
+                                t, "_rockcore_initial_recovery_context", ""
+                            ) or ""),
+                            resumed_context,
+                        ) if item
                     )
                 result = await self._execute_single_task_with_escalation(
                     t, job, repos, task_worker, task_worktree_root,
@@ -5869,6 +6000,24 @@ class Engine:
                 "skills": item.skills or [],
             } for item in tasks],
         })
+        existing_checkpoint["execution_context"] = {
+            "completed_tasks": [{
+                "task_id": item.task_id,
+                "title": item.title,
+                "summary": (item.result_summary or "")[:1200],
+                "changed_files": list(dict.fromkeys(
+                    str(path) for path in (
+                        ((item.result_data or {}).get("changes") or {}).get(
+                            "changed"
+                        ) or []
+                    )
+                ))[:30],
+            } for item in tasks if item.status == "done"],
+            "next_task": next((
+                item.task_id for item in tasks
+                if item.status in {"pending", "blocked", "interrupted"}
+            ), ""),
+        }
         runtime_checkpoint = dict(
             getattr(task, "_rockcore_runtime_checkpoint", None) or {}
         )
@@ -5885,6 +6034,63 @@ class Engine:
             self.model_router.cost_engine.get_budget_snapshot(job.job_id)
         )
         repos["job"].update_checkpoint(job.job_id, existing_checkpoint)
+
+    @staticmethod
+    def _execution_continuation_context(job, task,
+                                        completed_results: dict[str, dict]) -> str:
+        """Carry compact project decisions forward without replaying chat history."""
+        checkpoint = dict(getattr(job, "last_checkpoint", None) or {})
+        surface = dict(
+            getattr(job, "_rockcore_project_surface", None)
+            or checkpoint.get("project_surface")
+            or {}
+        )
+        completed_by_id: dict[str, dict] = {}
+        for item in (
+            (checkpoint.get("execution_context") or {}).get("completed_tasks")
+            or []
+        ):
+            if isinstance(item, dict) and item.get("task_id"):
+                completed_by_id[str(item["task_id"])] = dict(item)
+        for task_id, result in completed_results.items():
+            if not isinstance(result, dict):
+                continue
+            changes = result.get("changes") or {}
+            completed_by_id[str(task_id)] = {
+                "task_id": str(task_id),
+                "summary": str(
+                    result.get("output") or result.get("content")
+                    or result.get("completion_note") or "completed"
+                )[:1200],
+                "changed_files": list(dict.fromkeys(
+                    str(path) for path in (changes.get("changed") or [])
+                ))[:30],
+            }
+        payload = {
+            "current_task": getattr(task, "task_id", ""),
+            "entrypoints": [
+                item.get("path") for item in (surface.get("entrypoints") or [])
+                if isinstance(item, dict) and item.get("path")
+            ],
+            "active_files": list(surface.get("active_files") or [])[:60],
+            "support_files": list(surface.get("support_files") or [])[:40],
+            "legacy_files": list(surface.get("legacy_files") or [])[:30],
+            "commands": dict(surface.get("commands") or {}),
+            "ambiguities": list(surface.get("ambiguities") or [])[:8],
+            "completed_tasks": list(completed_by_id.values())[-8:],
+        }
+        if not any(payload[key] for key in (
+            "entrypoints", "active_files", "completed_tasks", "ambiguities"
+        )):
+            return ""
+        return (
+            "=== SHARED EXECUTION CHECKPOINT ===\n"
+            "This is authoritative state from deterministic project resolution and "
+            "completed stages. Continue from it; do not rediscover unchanged files. "
+            "Files under legacy_files are outside the current runtime unless this "
+            "task explicitly resolves an ambiguity.\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2)
+        )
 
     async def _check_file_changes(self, project_root: str,
                                   baseline_snapshot: dict | None = None) -> bool:
@@ -6183,7 +6389,9 @@ Prefer these existing files when relevant:
             "title": self._effective_task_title(job, repos),
             "description": description,
             "type": task_type,
-            "allowed_paths": ["*"],
+            "allowed_paths": list((
+                getattr(job, "_rockcore_project_surface", None) or {}
+            ).get("active_files") or []) or ["*"],
             "skills": [],
         }
         selected_skills = (
@@ -6198,7 +6406,8 @@ Prefer these existing files when relevant:
         )
         repos["task"].create(
             task_id="T001", job_id=job.id, title=direct_task["title"],
-            task_type=task_type, description=description, allowed_paths=["*"],
+            task_type=task_type, description=description,
+            allowed_paths=direct_task["allowed_paths"],
             dependencies=[], acceptance_command="", order=0,
             skills=selected_skills,
         )

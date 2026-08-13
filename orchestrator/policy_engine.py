@@ -123,6 +123,10 @@ class PolicyEngine:
         errors = []
         protected = constitution.get("protected_paths", [])
         tasks = list(plan.get("tasks") or [])
+        if len(tasks) > 8:
+            errors.append(
+                f"Plan has {len(tasks)} tasks; execution-stage plans may contain at most 8"
+            )
         task_ids = [str(task.get("id") or "").strip() for task in tasks]
         known_ids = {task_id for task_id in task_ids if task_id}
 
