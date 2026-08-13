@@ -692,6 +692,8 @@ class CodexProvider(BaseProvider):
 
     def _get_sandbox_mode(self, agent_type: str) -> str:
         modes = {
+            "main_agent": "read-only",
+            "main_agent_summary": "read-only",
             "governor": "read-only",
             "reviewer": "read-only",
             "emergency_coder": "workspace-write",

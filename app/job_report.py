@@ -476,7 +476,7 @@ class JobReportService:
 
         story.append(Paragraph("三、裁决与策划", h1))
         phase_pairs = (
-            ("裁决者", "job_governing", {"job_governed"}),
+            ("需求理解与路由", "job_governing", {"job_governed"}),
             ("策划者", "job_planning", {"plan_ready", "plan_rejected"}),
             ("执行者", "job_executing", {"execution_complete"}),
             ("审核者", "job_reviewing", {"review_complete", "job_done"}),

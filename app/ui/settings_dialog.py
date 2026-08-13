@@ -329,7 +329,7 @@ class SettingsDialog(QDialog):
 
         role_form = QFormLayout()
         roles = [
-            ("governor", "裁决者 (Governor)"),
+            ("governor", "主控模型 (Main Agent)"),
             ("planner", "策划者 (Planner)"),
             ("worker", "执行者 (Worker)"),
             ("reviewer", "审核者 (Reviewer)"),

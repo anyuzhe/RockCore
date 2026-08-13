@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Agent type → model selection strategy
 ROUTING_STRATEGY = {
+    "main_agent": {"provider": "codex", "priority": "accuracy"},
+    "main_agent_summary": {"provider": "codex", "priority": "accuracy"},
     "governor": {"provider": "codex", "priority": "accuracy"},
     "planner": {"provider": "kimi", "priority": "reasoning"},
     "worker": {"provider": "deepseek", "priority": "speed"},

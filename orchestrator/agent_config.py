@@ -275,7 +275,7 @@ class ProjectAgentConfig:
 
     # ── Mode ──
     config_version: int = 9
-    # Auto uses Governor risk routing; rules are only a failure fallback.
+    # The historical governor profile now configures the model Main Agent.
     mode: str = "auto"  # "auto" | "fast" | "standard" | "strict" | "custom"
 
     # ── Agent profiles ──
@@ -510,7 +510,7 @@ class ProjectAgentConfig:
 
     @classmethod
     def fast_preset(cls) -> "ProjectAgentConfig":
-        """Fast mode: Worker only, no Governor/Planner/Reviewer."""
+        """Fast mode: Worker only, no model Main Agent/Planner/Reviewer."""
         return cls(
             mode="fast",
             governor=AgentProfile(enabled=False, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),
@@ -543,7 +543,7 @@ class ProjectAgentConfig:
 
     @classmethod
     def strict_preset(cls) -> "ProjectAgentConfig":
-        """Strict mode: full pipeline with Governor + Reviewer mandatory."""
+        """Strict mode: model Main Agent plus independent Reviewer."""
         return cls(
             mode="strict",
             governor=AgentProfile(enabled=True, provider="codex", model="gpt-5.6-sol", reasoning_effort="high"),

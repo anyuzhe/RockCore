@@ -425,6 +425,14 @@ class MainWindow(QMainWindow):
                     constitution = repos["constitution"].get_by_job(job.id)
                     plan = repos["plan"].get_by_job(job.id)
                     reviews = repos["review"].list_by_job(job.id)
+                    execution_session = dict(
+                        (job.last_checkpoint or {}).get("execution_session") or {}
+                    )
+                    persisted_turn = next((
+                        item for item in reversed(
+                            execution_session.get("turns") or []
+                        ) if item.get("job_id") == job.job_id
+                    ), {})
                     self._selected_job_id = job.job_id
                     task_dicts = [
                         {
@@ -468,6 +476,9 @@ class MainWindow(QMainWindow):
                         "created_at": as_utc_isoformat(job.created_at),
                         "turn_number": len(turns),
                         "turn_total": len(turns),
+                        "assistant_summary": str(
+                            persisted_turn.get("summary") or ""
+                        ),
                         "usage": self._job_usage(job),
                         "report_path": str(
                             self.engine.job_reports.report_path(
@@ -517,11 +528,21 @@ class MainWindow(QMainWindow):
                             task.result_summary for task in reversed(turn_tasks)
                             if task.result_summary
                         ), "")
+                        turn_session = dict(
+                            (turn.last_checkpoint or {}).get(
+                                "execution_session"
+                            ) or {}
+                        )
+                        public_entry = next((
+                            item for item in reversed(
+                                turn_session.get("turns") or []
+                            ) if item.get("job_id") == turn.job_id
+                        ), {})
                         public_turns.append({
                             "job_id": turn.job_id,
                             "user_request": turn.user_request,
                             "status": turn.status,
-                            "summary": summary,
+                            "summary": public_entry.get("summary") or summary,
                         })
                     self.task_panel.set_conversation(session_dict, public_turns)
                     if job.status in {"needs_attention", "interrupted"}:
@@ -1243,7 +1264,27 @@ class MainWindow(QMainWindow):
             self.project_panel.update_job_status(event_job_id, live_status)
 
         if event_type == "job_governing" and is_selected:
-            self.task_panel.update_stage("governor", "running", "正在分析需求目标与边界")
+            self.task_panel.update_stage(
+                "governor", "running", "主控模型正在理解需求并选择执行路径"
+            )
+        elif event_type == "main_agent_decided" and is_selected:
+            strategy = (
+                "先规划后执行"
+                if data.get("execution_strategy") == "planned"
+                else "聚焦执行"
+            )
+            self.task_panel.update_stage(
+                "governor", "success",
+                f"{data.get('summary') or '已理解当前需求'} · {strategy}",
+                {"next_action": data.get("next_action", "")},
+            )
+        elif event_type == "main_agent_fallback" and is_selected:
+            self.task_panel.update_stage(
+                "governor", "fallback", data.get("summary", "已切换到确定性流程"),
+                {"error": data.get("error", "")},
+            )
+        elif event_type == "main_agent_summary" and is_selected:
+            self.task_panel.agent_summary.setText(data.get("summary", ""))
         elif event_type == "governor_risk_assessed" and is_selected:
             risk_name = {
                 "low": "低", "medium": "中", "high": "高", "critical": "关键",
@@ -1255,10 +1296,11 @@ class MainWindow(QMainWindow):
                 "configured": "按项目配置",
             }.get(data.get("workflow_route", "configured"), "按项目配置")
             source_name = {
-                "governor": "裁决者风险评估",
-                "rules_fallback": "裁决者不可用，规则兜底",
+                "main_agent": "主控模型评估",
+                "governor": "兼容分析器评估",
+                "rules_fallback": "模型分析不可用，规则兜底",
                 "fast_mode_rules": "快速模式规则评估",
-            }.get(data.get("source", "governor"), "裁决者风险评估")
+            }.get(data.get("source", "main_agent"), "主控模型评估")
             self.task_panel.append_stage_output(
                 "governor",
                 f"{source_name}：{risk_name}风险（{data.get('risk_score', 0)} 分）"

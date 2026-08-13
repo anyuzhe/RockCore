@@ -166,7 +166,9 @@ def test_image_scope_promotes_broad_low_risk_work_to_planned_route(tmp_path):
 
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["planner", "worker", "skip-review"]
+        # With no Codex provider registered, the model Main Agent degrades to
+        # the legacy vision-capable Governor before continuing the plan.
+        assert calls == ["governor", "planner", "worker", "skip-review"]
 
     asyncio.run(scenario())
 

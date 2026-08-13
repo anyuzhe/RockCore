@@ -2,7 +2,7 @@
 """AI Engineering Studio — Entry Point.
 
 Architecture: ChatGPT Plus → Codex SDK + Kimi + DeepSeek V4
-  Codex SDK → Governor / Reviewer
+  Codex SDK → Main Agent / Reviewer
 """
 
 import asyncio
@@ -106,7 +106,7 @@ async def main():
     await context_manager.initialize()
 
     # ── Register providers ──
-    # Codex SDK: Governor + Reviewer
+    # Codex SDK: Main Agent + compatibility Governor + Reviewer
     from providers.codex_provider import CodexProvider
     codex_provider = CodexProvider(config.get("codex", {}))
     engine.model_router.register_provider("governor", codex_provider)
@@ -168,7 +168,7 @@ async def main():
     engine.register_agent("emergency_coder", EmergencyCoderAgent(engine.model_router, tool_broker))
 
     logger.info(
-        "Agents registered: Codex(Governor/Reviewer/Emergency) + "
+        "Agents registered: Codex(MainAgent/Reviewer/Emergency) + "
         "Kimi(Planner) + DeepSeek(Worker) + Skills + MCP + Memory"
     )
 

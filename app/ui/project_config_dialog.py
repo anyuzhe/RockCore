@@ -23,10 +23,10 @@ from skills.trust import approve_project_skills, revoke_project_skills
 
 PROVIDERS = ["codex", "kimi", "deepseek"]
 MODES = [
-    ("auto", "自动（裁决者评估后按低/中/高风险路由）"),
-    ("fast", "快速（仅执行者，跳过裁决/策划/审核）"),
-    ("standard", "标准（完整流程）"),
-    ("strict", "严格（完整流程 + 自动修复）"),
+    ("auto", "自动（主控按复杂度与风险选择执行路径）"),
+    ("fast", "快速（简单任务直接执行，跳过模型主控与顾问）"),
+    ("standard", "标准（模型主控 + 策划顾问 + 执行 + 验证）"),
+    ("strict", "严格（模型主控 + 独立审核 + 自动修复）"),
     ("custom", "自定义（手动选择阶段）"),
 ]
 
@@ -99,7 +99,7 @@ class ProjectConfigDialog(QDialog):
 
         self._agent_widgets = {}
         for agent_type, label, default_provider, default_model, default_effort in [
-            ("governor", "裁决者 (Governor)", "codex", "gpt-5.6-sol", "high"),
+            ("governor", "主控模型 (Main Agent)", "codex", "gpt-5.6-sol", "high"),
             ("planner", "策划者 (Planner)", "kimi", "kimi-k3", "default"),
             ("reviewer", "审核者 (Reviewer)", "codex", "gpt-5.6-sol", "high"),
             ("emergency_coder", "紧急修复 (Emergency)", "codex", "gpt-5.6-sol", "max"),

@@ -1251,6 +1251,8 @@ class Engine:
         if self.tool_broker:
             self.tool_broker.set_project_root(project_root)
         profiles = {
+            "main_agent": proj_config.governor,
+            "main_agent_summary": proj_config.governor,
             "governor": proj_config.governor,
             "planner": proj_config.planner,
             "worker": proj_config.worker,
@@ -1357,6 +1359,26 @@ class Engine:
                 calls=job.usage_calls,
                 billable_cost=job.usage_billable_cost,
             )
+            if proj_config.governor.enabled and proj_config.mode != "fast":
+                recovery_assessment = await self.main_agent.assess_turn(
+                    job, repos,
+                    fallback_risk=getattr(job, "risk_level", "medium"),
+                    resumed=True,
+                )
+                if recovery_assessment:
+                    await self.event_bus.publish(
+                        "phase_summary", phase="governor",
+                        agent_type="main_agent", status="success",
+                        summary=(
+                            recovery_assessment.get("summary")
+                            or "主控模型已读取检查点并确定恢复路径"
+                        ),
+                        details={
+                            "next_action": recovery_assessment.get(
+                                "next_action", ""
+                            )
+                        },
+                    )
 
             if self.skill_manager:
                 self.skill_manager.configure(
@@ -1623,7 +1645,9 @@ class Engine:
                 mode=proj_config.mode,
                 risk_route=initial_risk_route,
                 complexity=complexity,
-                has_attachments=bool(getattr(job, "attachments", None)),
+                has_attachments=bool(
+                    getattr(job, "attachments", None) or job.source_job_id
+                ),
                 governor_enabled=proj_config.governor.enabled,
                 planner_enabled=proj_config.planner.enabled,
                 reviewer_enabled=proj_config.reviewer.enabled,
@@ -1637,6 +1661,8 @@ class Engine:
             )
 
             profiles = {
+                "main_agent": proj_config.governor,
+                "main_agent_summary": proj_config.governor,
                 "governor": proj_config.governor,
                 "planner": proj_config.planner,
                 "worker": proj_config.worker,
@@ -1661,6 +1687,7 @@ class Engine:
             )
 
             governor_completed = False
+            main_agent_assessment = None
             if proj_config.mode == "fast":
                 # Text-only fast mode opts out of governance. Image requests
                 # still need one vision-capable pass so a text Worker receives
@@ -1684,10 +1711,33 @@ class Engine:
                 # strict and custom modes retain their explicit configuration.
                 use_model_governor = advisor_decision.governor
                 if use_model_governor:
-                    risk_assessment = await self._run_governor(
-                        job, repos, proj_config, fallback_precheck=precheck
+                    repos["job"].update_status(job.job_id, "governing")
+                    self.state_machine.transition(job.job_id, JobState.GOVERNING)
+                    await self.event_bus.publish(
+                        "job_governing", job_id=job.job_id
                     )
-                    governor_completed = True
+                    main_agent_assessment = await self.main_agent.assess_turn(
+                        job, repos, fallback_risk=precheck["level"]
+                    )
+                    if main_agent_assessment:
+                        self._persist_main_agent_constitution(
+                            job, repos, main_agent_assessment
+                        )
+                        risk_assessment = main_agent_assessment
+                        self.state_machine.transition(
+                            job.job_id, JobState.GOVERNED
+                        )
+                        await self.event_bus.publish(
+                            "job_governed", job_id=job.job_id
+                        )
+                        governor_completed = True
+                    else:
+                        risk_assessment = await self._run_governor(
+                            job, repos, proj_config,
+                            fallback_precheck=precheck,
+                            phase_started=True,
+                        )
+                        governor_completed = True
                 else:
                     await self._skip_phase(
                         job, repos, "governor",
@@ -1735,12 +1785,46 @@ class Engine:
                 mode=proj_config.mode,
                 risk_route=self._risk_route(assessed_risk),
                 complexity=complexity,
-                has_attachments=bool(getattr(job, "attachments", None)),
+                has_attachments=bool(
+                    getattr(job, "attachments", None) or job.source_job_id
+                ),
                 governor_enabled=proj_config.governor.enabled,
                 planner_enabled=proj_config.planner.enabled,
                 reviewer_enabled=proj_config.reviewer.enabled,
             )
             advisor_decision = final_advisor_decision
+            if main_agent_assessment:
+                advisor_decision = type(final_advisor_decision)(
+                    governor=True,
+                    planner=(
+                        proj_config.planner.enabled
+                        and bool(main_agent_assessment.get("use_planner"))
+                    ),
+                    reviewer=(
+                        proj_config.reviewer.enabled
+                        and (
+                            bool(main_agent_assessment.get("use_reviewer"))
+                            or assessed_risk == "high"
+                            or proj_config.mode == "strict"
+                        )
+                    ),
+                    reason="由主控模型根据当前会话选择顾问",
+                )
+                await self.event_bus.publish(
+                    "phase_summary",
+                    phase="governor", agent_type="main_agent",
+                    status="success",
+                    summary=(
+                        main_agent_assessment.get("summary")
+                        or "主控模型已理解当前需求并选择执行路径"
+                    ),
+                    details={
+                        "strategy": main_agent_assessment.get(
+                            "execution_strategy"
+                        ),
+                        "next_action": main_agent_assessment.get("next_action"),
+                    },
+                )
             self.main_agent.record_advisor_decision(
                 job, repos, final_advisor_decision
             )
@@ -1904,6 +1988,47 @@ class Engine:
             },
         )
 
+    def _persist_main_agent_constitution(self, job, repos,
+                                         assessment: dict) -> None:
+        """Persist the model owner's bounded decision for existing phases."""
+        if repos["constitution"].get_by_job(job.id):
+            return
+        inherited = self._inherited_image_understanding(job, repos)
+        observations = self._dedupe_text_values(
+            inherited["observations"]
+            + list(assessment.get("image_observations") or []),
+            limit=16,
+        )
+        repos["constitution"].create(
+            job_id=job.id,
+            goal=assessment.get("goal") or job.user_request,
+            constraints=list(assessment.get("constraints") or []),
+            acceptance_criteria=list(
+                assessment.get("acceptance_criteria")
+                or ["确定性验证通过"]
+            ),
+            risk=assessment.get("risk", "medium"),
+            protected_paths=list(assessment.get("protected_paths") or []),
+            requires_final_review=bool(
+                assessment.get("use_reviewer")
+                or assessment.get("risk") == "high"
+            ),
+            raw_output={
+                **dict(assessment),
+                "source": "main_agent",
+                "image_observations": observations,
+                "inherited_image_goals": inherited["goals"],
+            },
+        )
+        risk_cn = {
+            "low": "低", "medium": "中", "high": "高",
+        }.get(assessment.get("risk"), "中")
+        # The event is published by the caller to preserve async ordering.
+        logger.info(
+            "Main Agent understood %s: risk=%s strategy=%s",
+            job.job_id, risk_cn, assessment.get("execution_strategy"),
+        )
+
     @staticmethod
     def _normalized_risk_level(value, fallback: str = "medium") -> str:
         level = str(value or "").lower()
@@ -1923,11 +2048,13 @@ class Engine:
         return cls._normalized_risk_level(risk_level)
 
     async def _run_governor(self, job, repos, proj_config=None,
-                            fallback_precheck: dict | None = None) -> dict:
+                            fallback_precheck: dict | None = None,
+                            phase_started: bool = False) -> dict:
         """Have Governor classify risk and persist the resulting constitution."""
-        repos["job"].update_status(job.job_id, "governing")
-        self.state_machine.transition(job.job_id, JobState.GOVERNING)
-        await self.event_bus.publish("job_governing", job_id=job.job_id)
+        if not phase_started:
+            repos["job"].update_status(job.job_id, "governing")
+            self.state_machine.transition(job.job_id, JobState.GOVERNING)
+            await self.event_bus.publish("job_governing", job_id=job.job_id)
 
         precheck = fallback_precheck or {}
         fallback_risk = self._normalized_risk_level(
@@ -6820,6 +6947,16 @@ Prefer these existing files when relevant:
         checkpoint["execution_session"] = session
         repos["job"].update_checkpoint(job.job_id, checkpoint)
         repos["_session"].refresh(job)
+        if (
+            checkpoint.get("main_agent_assessment")
+            and job.status in {
+                "done", "failed", "cancelled", "interrupted",
+                "needs_attention", "rolled_back",
+            }
+        ):
+            model_summary = await self.main_agent.summarize_turn(job, repos)
+            if model_summary:
+                repos["_session"].refresh(job)
         if job.status == "done" and job.project:
             root = job.project.root_path
             output_files = self._project_output_files(root)

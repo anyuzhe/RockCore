@@ -376,7 +376,7 @@ class TaskPanel(QWidget):
 
     STAGES = (
         ("user", "理解需求", "目标与当前轮输入"),
-        ("governor", "安全与范围", "按需咨询裁决能力"),
+        ("governor", "安全与范围", "主控理解与确定性预检"),
         ("planner", "执行计划", "动态步骤与验收条件"),
         ("worker", "工作过程", "读取、修改与即时验证"),
         ("reviewer", "验证结果", "确定性检查与按需审核"),
@@ -1101,7 +1101,7 @@ class TaskPanel(QWidget):
         }:
             if fast_path or not constitution:
                 self.stages["governor"].set_status("skipped")
-                self.stages["governor"].set_output("简单任务使用快速流程，已跳过独立裁决。")
+                self.stages["governor"].set_output("简单任务使用确定性快速流程，已跳过模型主控。")
             if fast_path or not plan:
                 self.stages["planner"].set_status("skipped")
                 self.stages["planner"].set_output("简单任务使用单步执行，已跳过独立策划。")
@@ -1110,7 +1110,10 @@ class TaskPanel(QWidget):
                 self.stages["reviewer"].set_output("本次未启用独立审核阶段。")
 
         if status == "done":
-            self.agent_summary.setText("需求已完成。你可以查看执行过程、代码变更和验收结果，或继续提出修改。")
+            self.agent_summary.setText(
+                job.get("assistant_summary")
+                or "需求已完成。你可以查看执行过程、代码变更和验收结果，或继续提出修改。"
+            )
         elif status == "failed":
             if last_repair and last_repair.get("reason"):
                 self.agent_summary.setText(
@@ -1397,7 +1400,15 @@ class TaskPanel(QWidget):
                 task_usage["cost"] += equivalent_cost
                 if task_usage.get("billable_cost") is not None:
                     task_usage["billable_cost"] += api_cost
-        key = "worker" if agent_type.startswith("worker") else agent_type
+        # Concise Main Agent decisions are rendered from dedicated events.
+        # Do not expose raw structured JSON in the primary workflow.
+        if agent_type in {"main_agent", "main_agent_summary"}:
+            return
+        key = (
+            "worker" if agent_type.startswith("worker")
+            else "governor" if agent_type == "main_agent"
+            else agent_type
+        )
         repair_round = self._repair_round_from_task_id(task_id)
         if not repair_round and key in {"planner", "reviewer"}:
             repair_round = self._active_repair_round

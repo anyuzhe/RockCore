@@ -102,6 +102,8 @@ class CostEngine:
         "deepseek": "deepseek-v4-pro",
     }
     DEFAULT_MODEL_BY_AGENT = {
+        "main_agent": "gpt-5.6-sol",
+        "main_agent_summary": "gpt-5.6-sol",
         "governor": "gpt-5.6-sol",
         "reviewer": "gpt-5.6-sol",
         "emergency_coder": "gpt-5.6-sol",
@@ -256,7 +258,7 @@ class CostEngine:
             return budget
         task_input_tokens = max(0, int(task_input_tokens or 0))
         required_output_tokens = max(0, int(required_output_tokens or 0))
-        # Governor/Planner plus Reviewer and one repair cycle cannot be starved
+        # Main Agent/Planner plus Reviewer and one repair cycle cannot be starved
         # by Workers. These are soft safety allocations and never raise RMB.
         phase_input_reserve = 900_000
         phase_output_reserve = 250_000
@@ -296,7 +298,7 @@ class CostEngine:
         budget = self._ensure_job_budget(job_id)
         task_input_tokens = max(0, int(task_input_tokens or 0))
         # ``task_input_tokens`` is an absolute per-task allowance. Add job
-        # headroom for Governor/Planner/Reviewer rather than relying on the
+        # headroom for Main Agent/Planner/Reviewer rather than relying on the
         # generic one-million-token ceiling.
         required_input = task_input_tokens + 350_000
         output_headroom = max(
