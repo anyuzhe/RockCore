@@ -2,7 +2,10 @@
 
 import asyncio
 
-from app.python_validation import run_embedded_python_command
+from app.python_validation import (
+    run_embedded_python_command,
+    run_packaged_pytest_smoke_test,
+)
 from tools.shell_tools import ShellTools
 from tools.test_tools import TestTools
 
@@ -72,6 +75,20 @@ def test_embedded_pytest_runs_without_host_python(tmp_path):
     assert "1 passed" in result.stdout
     assert not (tmp_path / ".pytest_cache").exists()
     assert not (tmp_path / "__pycache__").exists()
+
+
+def test_packaged_pytest_smoke_runs_without_nested_process(tmp_path):
+    (tmp_path / "test_smoke.py").write_text(
+        "def test_smoke():\n    assert 21 * 2 == 42\n", encoding="utf-8"
+    )
+
+    result = run_packaged_pytest_smoke_test(
+        ["-q", "test_smoke.py"], tmp_path
+    )
+
+    assert result.returncode == 0
+    assert "1 passed" in result.stdout
+    assert not (tmp_path / ".pytest_cache").exists()
 
 
 def test_direct_pytest_command_uses_embedded_runtime(tmp_path):

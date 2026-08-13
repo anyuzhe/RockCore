@@ -49,6 +49,21 @@ function Invoke-ProcessWithTimeout {
     }
 }
 
+function Write-SmokeDiagnostics {
+    param([string]$DiagnosticPath)
+
+    $Paths = @($DiagnosticPath)
+    if ($env:APPDATA) {
+        $Paths += Join-Path $env:APPDATA "RockCore/rockcore.log"
+    }
+    foreach ($Path in $Paths) {
+        if ($Path -and (Test-Path $Path -PathType Leaf)) {
+            Write-Host "==> Diagnostic: $Path"
+            Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | Write-Host
+        }
+    }
+}
+
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
@@ -110,17 +125,32 @@ Invoke-Native "Verify packaged MinGit" $PackagedGit @("--version")
 Write-Host "==> Run packaged startup smoke test"
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
 $PreviousPath = $env:PATH
+$PreviousSmokeDiagnostic = $env:ROCKCORE_SMOKE_DIAGNOSTIC
+$SmokeRoot = if ($env:RUNNER_TEMP) {
+    $env:RUNNER_TEMP
+} else {
+    [System.IO.Path]::GetTempPath()
+}
+$SmokeDiagnostic = Join-Path $SmokeRoot "rockcore-python-smoke.log"
+if (Test-Path $SmokeDiagnostic) { Remove-Item $SmokeDiagnostic -Force }
+$env:ROCKCORE_SMOKE_DIAGNOSTIC = $SmokeDiagnostic
 $env:QT_QPA_PLATFORM = "offscreen"
 try {
     # Prove the app does not accidentally rely on Git installed on the runner.
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
     Invoke-ProcessWithTimeout "Packaged startup smoke test" $AppExe `
         @("--startup-smoke-test") 90
-    Invoke-ProcessWithTimeout "Packaged Python validation smoke test" $AppExe `
-        @("--python-validation-smoke-test") 90
+    try {
+        Invoke-ProcessWithTimeout "Packaged Python validation smoke test" $AppExe `
+            @("--python-validation-smoke-test") 90
+    } catch {
+        Write-SmokeDiagnostics $SmokeDiagnostic
+        throw
+    }
 } finally {
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
     $env:PATH = $PreviousPath
+    $env:ROCKCORE_SMOKE_DIAGNOSTIC = $PreviousSmokeDiagnostic
 }
 
 $Portable = Join-Path $Root "release/RockCore-$Version-Windows-x64-portable.zip"

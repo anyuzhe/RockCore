@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def _run_packaged_python_validation_smoke_test():
     """Prove the installed app can execute pytest without host Python."""
-    from app.python_validation import run_embedded_python_command
+    from app.python_validation import run_packaged_pytest_smoke_test
 
     with tempfile.TemporaryDirectory(prefix="rockcore-validation-") as folder:
         root = Path(folder)
@@ -43,11 +43,20 @@ def _run_packaged_python_validation_smoke_test():
             "def test_packaged_runtime():\n    assert 6 * 7 == 42\n",
             encoding="utf-8",
         )
-        return run_embedded_python_command(
-            "python -m pytest -q test_embedded_runtime.py",
-            root,
-            timeout=30,
+        return run_packaged_pytest_smoke_test(
+            ["-q", "test_embedded_runtime.py"], root
         )
+
+
+def _write_smoke_diagnostic(text: str):
+    """Persist GUI-subsystem smoke output where CI can always retrieve it."""
+    configured = os.environ.get("ROCKCORE_SMOKE_DIAGNOSTIC", "").strip()
+    target = Path(configured) if configured else app_data_dir() / "smoke-test.log"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(text or ""), encoding="utf-8", errors="replace")
+    except OSError:
+        logger.exception("Unable to write packaged smoke-test diagnostic")
 
 
 async def main():
@@ -444,6 +453,14 @@ if __name__ == "__main__":
         try:
             configure_runtime_logging()
             result = _run_packaged_python_validation_smoke_test()
+            diagnostic = (
+                f"returncode={getattr(result, 'returncode', 'missing')}\n"
+                "--- stdout ---\n"
+                f"{getattr(result, 'stdout', '') or ''}\n"
+                "--- stderr ---\n"
+                f"{getattr(result, 'stderr', '') or ''}\n"
+            )
+            _write_smoke_diagnostic(diagnostic)
             if result is None or result.returncode != 0:
                 detail = "no embedded result" if result is None else (
                     result.stderr.strip() or result.stdout.strip()
@@ -455,6 +472,11 @@ if __name__ == "__main__":
             raise
         except Exception as error:
             logger.exception("Packaged Python validation smoke test failed")
+            _write_smoke_diagnostic(
+                "unhandled_exception=1\n" + "".join(
+                    __import__("traceback").format_exception(error)
+                )
+            )
             print(str(error), file=sys.stderr)
             raise SystemExit(1)
     import qasync

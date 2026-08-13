@@ -276,8 +276,10 @@ def _run_unittest_isolated(
         parent.close()
 
 
-def _pytest_worker(connection, arguments: list[str], root_text: str):
-    """Run pytest from RockCore's packaged runtime in a disposable process."""
+def _run_pytest_in_process(
+    arguments: list[str], root: Path
+) -> subprocess.CompletedProcess:
+    """Run pytest in the current process and restore all mutable state."""
     stdout = io.StringIO()
     stderr = io.StringIO()
     previous_cwd = Path.cwd()
@@ -288,7 +290,7 @@ def _pytest_worker(connection, arguments: list[str], root_text: str):
     try:
         import pytest
 
-        root = Path(root_text).resolve()
+        root = Path(root).resolve()
         os.chdir(root)
         sys.path.insert(0, str(root))
         sys.dont_write_bytecode = True
@@ -298,13 +300,21 @@ def _pytest_worker(connection, arguments: list[str], root_text: str):
         os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             returncode = int(pytest.main([*arguments, "-p", "no:cacheprovider"]))
-        connection.send((returncode, stdout.getvalue(), stderr.getvalue()))
+        return subprocess.CompletedProcess(
+            ["embedded-python", "-m", "pytest", *arguments],
+            returncode,
+            stdout.getvalue(),
+            stderr.getvalue(),
+        )
     except BaseException as error:
-        connection.send((
+        traceback_text = "".join(traceback.format_exception(error))
+        return subprocess.CompletedProcess(
+            ["embedded-python", "-m", "pytest", *arguments],
             1,
             stdout.getvalue(),
-            stderr.getvalue() + f"RockCore 内置 pytest 启动失败：{error}\n",
-        ))
+            stderr.getvalue()
+            + f"RockCore 内置 pytest 启动失败：{error}\n{traceback_text}",
+        )
     finally:
         os.chdir(previous_cwd)
         sys.path[:] = previous_path
@@ -317,6 +327,31 @@ def _pytest_worker(connection, arguments: list[str], root_text: str):
             os.environ.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
         else:
             os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = previous_plugin_setting
+
+
+def run_packaged_pytest_smoke_test(
+    arguments: list[str], root: str | os.PathLike[str]
+) -> subprocess.CompletedProcess:
+    """Exercise bundled pytest without spawning another frozen executable.
+
+    The caller already is a dedicated short-lived smoke-test process. Running
+    pytest directly here avoids nesting PyInstaller multiprocessing during a
+    Windows package build, while normal project validations remain isolated.
+    """
+    return _run_pytest_in_process(arguments, Path(root))
+
+
+def _pytest_worker(connection, arguments: list[str], root_text: str):
+    """Run pytest from RockCore's packaged runtime in a disposable process."""
+    try:
+        result = _run_pytest_in_process(arguments, Path(root_text))
+        connection.send((result.returncode, result.stdout, result.stderr))
+    except BaseException as error:
+        connection.send((
+            1, "", "RockCore 内置 pytest 子进程失败："
+            + "".join(traceback.format_exception(error)),
+        ))
+    finally:
         connection.close()
 
 

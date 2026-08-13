@@ -239,6 +239,9 @@ def test_windows_build_smoke_tests_have_bounded_process_cleanup():
     assert "WaitForExit($TimeoutSeconds * 1000)" in build_script
     assert "taskkill.exe /PID $ProcessId /T /F" in build_script
     assert '-Wait -PassThru' not in build_script
+    assert "ROCKCORE_SMOKE_DIAGNOSTIC" in build_script
+    assert "Write-SmokeDiagnostics" in build_script
+    assert "rockcore.log" in build_script
     smoke_guard = 'if "--python-validation-smoke-test" in sys.argv:'
     assert entrypoint.index(smoke_guard) < entrypoint.index("import qasync")
 
