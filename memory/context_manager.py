@@ -7,6 +7,7 @@ from typing import Any
 from app.paths import project_state_dir
 from .project_memory import ProjectMemory
 from .repo_map import RepoMap
+from .instruction_resolver import InstructionResolver
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class ContextManager:
             str(self.project_root), state_dir=self.state_dir
         )
         self.project_surface: dict[str, Any] = {}
+        self.instructions = InstructionResolver(self.project_root)
 
     async def initialize(self):
         """Initialize the context manager and build the repo map."""
@@ -52,6 +54,7 @@ class ContextManager:
             str(new_root_path), state_dir=self.state_dir
         )
         self.project_surface = {}
+        self.instructions = InstructionResolver(self.project_root)
         self.repo_map.update()
         logger.info(f"ContextManager switched to project: {new_root}")
 
@@ -62,6 +65,18 @@ class ContextManager:
     async def build_task_context(self, task) -> str:
         """Build optimized context for a specific task."""
         parts = []
+
+        fixed_context = str(
+            getattr(task, "_rockcore_fixed_context", "") or ""
+        ).strip()
+        if fixed_context:
+            parts.append(fixed_context)
+
+        instruction_context = self.instructions.render(
+            self._instruction_working_directory(task)
+        )
+        if instruction_context:
+            parts.append(instruction_context)
 
         surface = dict(
             getattr(task, "_rockcore_project_surface", None)
@@ -112,7 +127,27 @@ class ContextManager:
         if relevant_files:
             parts.append("=== Relevant Files ===\n" + "\n".join(f"- {f}" for f in relevant_files))
 
-        return "\n\n".join(parts)[:4000]
+        # Fixed session state and repository rules must never disappear because
+        # lower-priority repository summaries are large. Each optional section
+        # is already bounded independently.
+        return "\n\n".join(parts)
+
+    def _instruction_working_directory(self, task) -> Path:
+        """Resolve the deepest concrete task path for nested instructions."""
+        candidates = []
+        for raw in (getattr(task, "allowed_paths", None) or []):
+            value = str(raw or "").replace("\\", "/").strip("/")
+            if not value or any(char in value for char in "*?["):
+                continue
+            candidate = (self.project_root / value).resolve()
+            if candidate.is_file() or candidate.suffix:
+                candidate = candidate.parent
+            try:
+                candidate.relative_to(self.project_root)
+            except ValueError:
+                continue
+            candidates.append(candidate)
+        return max(candidates, key=lambda path: len(path.parts), default=self.project_root)
 
     def _find_relevant_files(self, task, surface: dict | None = None) -> list[str]:
         """Find files relevant to a task based on task type and description."""
@@ -176,6 +211,9 @@ class ContextManager:
     def get_full_context(self) -> str:
         """Get full project context (for Planner)."""
         parts = []
+        instruction_context = self.instructions.render()
+        if instruction_context:
+            parts.append(instruction_context)
         parts.append(self.project_memory.get_context_summary())
         if self.repo_map.is_loaded:
             parts.append(self.repo_map.get_context_summary())

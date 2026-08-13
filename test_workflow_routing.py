@@ -84,7 +84,13 @@ def test_auto_mode_routes_low_risk_request_directly_to_worker(tmp_path):
         assert engine._classify_request("创建一个简单 HTML 页面") == "simple"
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["governor", "simple"]
+        assert calls == ["simple"]
+        summaries = engine.event_bus.get_history("phase_summary")
+        assert any(
+            item["data"].get("phase") == "governor"
+            and "确定性" in item["data"].get("summary", "")
+            for item in summaries
+        )
 
     asyncio.run(scenario())
 
@@ -160,7 +166,7 @@ def test_image_scope_promotes_broad_low_risk_work_to_planned_route(tmp_path):
 
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["governor", "planner", "worker", "skip-review"]
+        assert calls == ["planner", "worker", "skip-review"]
 
     asyncio.run(scenario())
 
@@ -204,7 +210,7 @@ def test_auto_mode_routes_medium_risk_through_planner_without_reviewer(tmp_path)
         engine._finalize = finalize
         await engine.run_job(result["job_id"], str(tmp_path))
 
-        assert calls == ["governor", "planner", "worker", "skip-reviewer"]
+        assert calls == ["planner", "worker", "skip-reviewer"]
 
     asyncio.run(scenario())
 
@@ -419,7 +425,7 @@ def test_planner_rejects_a_provider_truncated_response():
         asyncio.run(PlannerAgent(Router()).run(job))
 
 
-def test_truncated_plan_fails_before_tasks_are_created(tmp_path):
+def test_truncated_plan_pauses_before_tasks_are_created(tmp_path):
     class TruncatedPlanner:
         async def run(self, *_args, **_kwargs):
             raise PlannerOutputTruncatedError(
@@ -446,12 +452,13 @@ def test_truncated_plan_fails_before_tasks_are_created(tmp_path):
             await engine._run_planner(job, repos)
             repos["_session"].refresh(job)
 
-            assert job.status == "failed"
+            assert job.status == "interrupted"
             assert repos["task"].list_by_job(job.id) == []
-            failed = engine.event_bus.get_history("job_failed")[-1]["data"]
-            assert failed["failure_stage"] == "planner_output_truncated"
+            paused = engine.event_bus.get_history("job_interrupted")[-1]["data"]
+            assert paused["failure_stage"] == "planner_output_truncated"
+            assert job.last_checkpoint["phase"] == "planner"
             summary = engine.event_bus.get_history("phase_summary")[-1]["data"]
-            assert summary["status"] == "failed"
+            assert summary["status"] == "interrupted"
             assert "截断" in summary["summary"]
         finally:
             repos["_session"].close()

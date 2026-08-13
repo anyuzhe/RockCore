@@ -82,6 +82,9 @@ from .policy_engine import PolicyEngine
 from .model_router import ModelRouter
 from .cost_engine import BudgetExceededError
 from .project_resolver import ProjectResolver
+from .execution_session import (
+    normalize_session, render_fixed_context, update_checklist,
+)
 from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
@@ -351,6 +354,14 @@ class Engine:
                     )
                 }
             checkpoint["budget_progress"] = progress
+            session = normalize_session(
+                checkpoint.get("execution_session"),
+                session_id=(job.execution_session_id or job.job_id),
+                goal=job.user_request,
+            )
+            session["current_step"] = task_id
+            session["next_action"] = "Continue from the saved task checkpoint"
+            checkpoint["execution_session"] = session
             checkpoint["budget"] = (
                 self.model_router.cost_engine.get_budget_snapshot(job_id)
             )
@@ -369,6 +380,37 @@ class Engine:
             job = repos["job"].get_by_id(job_id)
             if not job:
                 return
+            checkpoint = dict(job.last_checkpoint or {})
+            session = normalize_session(
+                checkpoint.get("execution_session"),
+                session_id=(job.execution_session_id or job.job_id),
+                goal=job.user_request,
+            )
+            path = str(data.get("path") or "").replace("\\", "/")
+            tool_name = str(data.get("tool") or "")
+            result_data = dict(data.get("result") or {})
+            if tool_name in {"read_file", "search_in_file", "search_code", "read_log"}:
+                evidence_key = path or tool_name
+                session.setdefault("read_evidence", {})[evidence_key] = {
+                    "tool": tool_name,
+                    "source_version": str(result_data.get("source_version") or ""),
+                    "summary": str(
+                        result_data.get("count")
+                        if result_data.get("count") is not None
+                        else result_data.get("total_lines") or "read"
+                    )[:200],
+                }
+            if tool_name in {
+                "write_file", "apply_patch", "insert_before", "insert_after",
+                "write_docx", "write_pptx", "write_pdf", "promote_artifact",
+            } and path:
+                session["changed_files"] = list(dict.fromkeys(
+                    list(session.get("changed_files") or []) + [path]
+                ))[:100]
+            session["current_step"] = task_id
+            session["next_action"] = "Continue the current task without rediscovering unchanged files"
+            checkpoint["execution_session"] = session
+            repos["job"].update_checkpoint(job_id, checkpoint)
             task = repos["task"].get_by_job_and_id(job.id, task_id)
             if not task:
                 return
@@ -992,7 +1034,32 @@ class Engine:
             job = repos["job"].create(
                 job_id_str, project_id, user_request, risk_level, source_job_id,
                 safe_attachments,
+                execution_session_id=(
+                    (source_job.execution_session_id or source_job.job_id)
+                    if source_job
+                    else job_id_str
+                ),
             )
+            inherited_session = (
+                dict((source_job.last_checkpoint or {}).get("execution_session") or {})
+                if source_job else {}
+            )
+            session = normalize_session(
+                inherited_session,
+                session_id=job.execution_session_id,
+                goal=(inherited_session.get("goal") or user_request),
+            )
+            if source_job:
+                session["decisions"] = list(session.get("decisions") or []) + [{
+                    "kind": "follow_up",
+                    "job_id": job_id_str,
+                    "request": user_request[:1200],
+                }]
+                session["current_step"] = "planning"
+                session["next_action"] = "Plan only the requested continuation"
+            repos["job"].update_checkpoint(job_id_str, {
+                "execution_session": session,
+            })
             self._cancelled_job_ids.discard(job_id_str)
             self.state_machine.transition(job_id_str, JobState.CREATED)
 
@@ -1305,16 +1372,27 @@ class Engine:
                 precheck = self.model_router.risk_engine.precheck_request(
                     job.user_request, proj_root
                 )
-                await self._run_governor(
-                    job, repos, proj_config, fallback_precheck=precheck
-                )
+                if (
+                    proj_config.governor.enabled
+                    and (
+                        proj_config.mode != "auto"
+                        or self._risk_route(precheck.get("level")) == "high"
+                    )
+                ):
+                    await self._run_governor(
+                        job, repos, proj_config, fallback_precheck=precheck
+                    )
+                else:
+                    self._create_precheck_constitution(
+                        job, repos, precheck["level"]
+                    )
                 constitution = repos["constitution"].get_by_job(job.id)
 
             plan = repos["plan"].get_by_job(job.id)
             if not plan:
                 await self._run_planner(job, repos, proj_config)
                 repos["_session"].refresh(job)
-                if job.status in {"failed", "needs_attention"}:
+                if job.status in {"failed", "needs_attention", "interrupted"}:
                     return {"status": job.status}
 
             tasks = repos["task"].list_by_job(job.id)
@@ -1337,14 +1415,14 @@ class Engine:
             # If execution had already completed, the checkpoint belongs to
             # Reviewer (for example a production credential was missing).
             constitution = repos["constitution"].get_by_job(job.id)
-            auto_medium = (
-                proj_config.mode == "auto"
-                and self._risk_route(getattr(job, "risk_level", "medium"))
-                == "medium"
-            )
             if (
                 proj_config.reviewer.enabled
-                and not auto_medium
+                and (
+                    proj_config.mode == "strict"
+                    or self._risk_route(
+                        getattr(job, "risk_level", "medium")
+                    ) == "high"
+                )
                 and bool(getattr(constitution, "requires_final_review", True))
             ):
                 await self._run_reviewer(
@@ -1551,14 +1629,26 @@ class Engine:
                     }
                 workflow_route = "low"
             else:
-                if proj_config.governor.enabled:
+                # Auto mode uses deterministic risk/permission preflight. A
+                # model Governor is reserved for high-risk ambiguity; standard,
+                # strict and custom modes retain their explicit configuration.
+                use_model_governor = (
+                    proj_config.governor.enabled
+                    and (
+                        proj_config.mode != "auto"
+                        or self._risk_route(precheck.get("level")) == "high"
+                    )
+                )
+                if use_model_governor:
                     risk_assessment = await self._run_governor(
                         job, repos, proj_config, fallback_precheck=precheck
                     )
                     governor_completed = True
                 else:
                     await self._skip_phase(
-                        job, repos, "governor", "已按项目配置禁用"
+                        job, repos, "governor",
+                        "已由确定性风险与权限预检完成"
+                        if proj_config.governor.enabled else "已按项目配置禁用"
                     )
                     self._create_precheck_constitution(
                         job, repos, precheck["level"]
@@ -1567,7 +1657,7 @@ class Engine:
                         "risk": precheck["level"],
                         "risk_score": precheck["score"],
                         "risk_reasons": precheck["reasons"],
-                        "source": "rules_fallback",
+                        "source": "deterministic_precheck",
                     }
                     governor_completed = True
 
@@ -1641,7 +1731,7 @@ class Engine:
                 # ── Phase 2: Planner ──
                 if proj_config.planner.enabled:
                     await self._run_planner(job, repos, proj_config)
-                    if job.status in {"failed", "needs_attention"}:
+                    if job.status in {"failed", "needs_attention", "interrupted"}:
                         if worker and saved_turns is not None:
                             worker.max_turns = saved_turns
                         return
@@ -1676,7 +1766,14 @@ class Engine:
                     return
 
                 # ── Phase 4: Review ──
-                if proj_config.reviewer.enabled and not auto_medium:
+                use_model_reviewer = (
+                    proj_config.reviewer.enabled
+                    and (
+                        proj_config.mode == "strict"
+                        or assessed_risk == "high"
+                    )
+                )
+                if use_model_reviewer:
                     await self._run_reviewer(
                         job, repos,
                         proj_config=proj_config,
@@ -1685,8 +1782,8 @@ class Engine:
                 else:
                     await self._skip_review(
                         job, repos,
-                        "中风险任务已通过确定性验证，跳过模型审核"
-                        if auto_medium else "审核已按项目配置跳过",
+                        "确定性验证已通过；当前风险无需额外模型审核"
+                        if proj_config.reviewer.enabled else "审核已按项目配置跳过",
                     )
 
             if worker and saved_turns is not None:
@@ -1971,7 +2068,9 @@ class Engine:
             )
 
         self._optimize_plan(plan_data, effective_complexity)
-        self._serialize_overlapping_tasks(plan_data)
+        self._serialize_overlapping_tasks(
+            plan_data, getattr(job, "_rockcore_project_surface", None)
+        )
         self._prune_transitive_dependencies(plan_data)
         self._assign_plan_skills(plan_data)
 
@@ -2021,7 +2120,9 @@ class Engine:
                     plan_data, getattr(job, "_rockcore_project_surface", None)
                 )
                 self._optimize_plan(plan_data, effective_complexity)
-                self._serialize_overlapping_tasks(plan_data)
+                self._serialize_overlapping_tasks(
+                    plan_data, getattr(job, "_rockcore_project_surface", None)
+                )
                 self._prune_transitive_dependencies(plan_data)
                 self._assign_plan_skills(plan_data)
             else:
@@ -2065,6 +2166,31 @@ class Engine:
         repos["plan"].update_validation(
             plan.id, validated=len(errors) == 0, errors=errors
         )
+        checkpoint = dict(getattr(job, "last_checkpoint", None) or {})
+        session = normalize_session(
+            checkpoint.get("execution_session"),
+            session_id=(job.execution_session_id or job.job_id),
+            goal=(constitution.goal if constitution else job.user_request),
+        )
+        session["acceptance_criteria"] = list(
+            constitution.acceptance_criteria if constitution else []
+        )
+        session["constraints"] = list(
+            constitution.constraints if constitution else []
+        )
+        session["checklist"] = [{
+            "id": str(task.get("id") or ""),
+            "title": str(task.get("title") or ""),
+            "status": "pending",
+            "summary": "",
+        } for task in plan_data.get("tasks", [])]
+        session["current_step"] = (
+            session["checklist"][0]["id"] if session["checklist"] else ""
+        )
+        session["next_action"] = "Execute the first pending checklist item"
+        checkpoint["execution_session"] = session
+        repos["job"].update_checkpoint(job.job_id, checkpoint)
+        job.last_checkpoint = checkpoint
 
         if errors:
             logger.warning(f"Plan validation failed: {errors}")
@@ -2103,20 +2229,27 @@ class Engine:
         )
 
     async def _fail_truncated_plan(self, job, repos, error: Exception) -> None:
-        """Persist a provider-side plan truncation without fabricating tasks."""
+        """Pause a provider-side plan truncation without fabricating tasks."""
         message = str(error)
         logger.error("Planner output truncated for %s: %s", job.job_id, message)
-        repos["job"].update_status(job.job_id, "failed")
+        checkpoint = dict(job.last_checkpoint or {})
+        checkpoint.update({
+            "phase": "planner",
+            "next_action": "Retry the Planner response from this phase",
+            "planner_error": message,
+        })
+        repos["job"].update_checkpoint(job.job_id, checkpoint)
+        repos["job"].update_status(job.job_id, "interrupted")
         self._store_job_failure(repos, job.job_id, message)
-        self.state_machine.transition(job.job_id, JobState.FAILED)
+        self.state_machine.transition(job.job_id, JobState.WAITING_USER)
         await self.event_bus.publish(
             "phase_summary",
-            phase="planner", agent_type="planner", status="failed",
-            summary="策划者输出被服务端截断，未生成完整计划",
+            phase="planner", agent_type="planner", status="interrupted",
+            summary="策划者输出被服务端截断；已保存阶段，可继续重试完整响应",
             details={"error": message},
         )
         await self.event_bus.publish(
-            "job_failed", job_id=job.job_id, error=message,
+            "job_interrupted", job_id=job.job_id, reason=message,
             failure_stage="planner_output_truncated",
         )
 
@@ -2602,9 +2735,14 @@ class Engine:
         return task_ref.sub(replace, value)
 
     @classmethod
-    def _serialize_overlapping_tasks(cls, plan_data: dict):
-        """Prevent concurrently-ready tasks from editing the same paths."""
+    def _serialize_overlapping_tasks(cls, plan_data: dict,
+                                     surface: dict | None = None):
+        """Serialize task pairs unless their file/runtime scopes are disjoint."""
         tasks = plan_data.get("tasks", [])
+        active = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in ((surface or {}).get("active_files") or [])
+        }
         for index, task in enumerate(tasks):
             dependencies = list(task.get("dependencies") or [])
             current_paths = task.get("allowed_paths") or []
@@ -2613,10 +2751,40 @@ class Engine:
                 if not previous_id or previous_id in dependencies:
                     continue
                 previous_paths = previous.get("allowed_paths") or []
-                if any(
+                broad_or_unknown = (
+                    not current_paths or not previous_paths
+                    or any(cls._is_broad_plan_path(path) for path in current_paths)
+                    or any(cls._is_broad_plan_path(path) for path in previous_paths)
+                )
+                analysis_feeds_implementation = (
+                    str(previous.get("type") or "") in {"analysis", "review"}
+                    and str(task.get("type") or "coding") in {
+                        "coding", "testing", "action",
+                    }
+                )
+                current_concrete = {
+                    str(path).replace("\\", "/").lstrip("./")
+                    for path in current_paths
+                    if not cls._is_broad_plan_path(path)
+                }
+                previous_concrete = {
+                    str(path).replace("\\", "/").lstrip("./")
+                    for path in previous_paths
+                    if not cls._is_broad_plan_path(path)
+                }
+                shared_runtime_closure = bool(
+                    active
+                    and current_concrete.intersection(active)
+                    and previous_concrete.intersection(active)
+                )
+                path_overlap = any(
                     cls._path_patterns_overlap(left, right)
                     for left in current_paths
                     for right in previous_paths
+                )
+                if (
+                    broad_or_unknown or analysis_feeds_implementation
+                    or shared_runtime_closure or path_overlap
                 ):
                     dependencies.append(previous_id)
             task["dependencies"] = dependencies
@@ -2942,6 +3110,25 @@ class Engine:
             t = task_data["_db_task"]
             nonlocal repos, job, worker
 
+            # Event handlers persist checkpoints through their own SQLAlchemy
+            # sessions. Refresh here so a later checklist item always receives
+            # the newest fixed context instead of the Job object captured when
+            # the execution phase started.
+            repos["_session"].expire(job, ["last_checkpoint"])
+            latest_checkpoint = dict(job.last_checkpoint or {})
+            latest_session = normalize_session(
+                latest_checkpoint.get("execution_session"),
+                session_id=(job.execution_session_id or job.job_id),
+                goal=job.user_request,
+            )
+            t.status = "running"
+            update_checklist(latest_session, all_job_tasks)
+            latest_session["current_step"] = task_id
+            latest_session["next_action"] = f"Execute {task_id}: {t.title}"
+            latest_checkpoint["execution_session"] = latest_session
+            repos["job"].update_checkpoint(job.job_id, latest_checkpoint)
+            job.last_checkpoint = latest_checkpoint
+
             project_surface = dict(
                 getattr(job, "_rockcore_project_surface", None)
                 or (getattr(job, "last_checkpoint", None) or {}).get(
@@ -2950,6 +3137,7 @@ class Engine:
                 or {}
             )
             t._rockcore_project_surface = project_surface
+            t._rockcore_fixed_context = render_fixed_context(latest_session)
             shared_context = self._execution_continuation_context(
                 job, t, completed_task_results
             )
@@ -4649,6 +4837,16 @@ class Engine:
 
         # User-resolvable provider/budget failures must remain resumable even
         # when automatic repair is disabled for this project.
+        if model_configuration_terminal:
+            return {
+                "status": "needs_user_action",
+                "error": f"模型配置不可用：{last_error}",
+                "failure_stage": "model_configuration",
+                "checkpoint": {
+                    "reason": last_error,
+                    "next_action": "Choose an available model and resume this task",
+                },
+            }
         if self._is_user_action_required(last_error):
             return {
                 "status": "needs_user_action",
@@ -4672,13 +4870,6 @@ class Engine:
         await self.event_bus.publish("task_repairing", job_id=job.job_id,
                                       task_id=task.task_id, error=last_error,
                                       attempts=primary_attempts)
-        if model_configuration_terminal:
-            return {
-                "status": "failed",
-                "error": f"模型配置不可用：{last_error}",
-                "failure_stage": "model_configuration",
-            }
-
         checkpoint_progress = dict(
             getattr(task, "_rockcore_document_progress", {}) or {}
         )
@@ -4716,6 +4907,17 @@ class Engine:
                     else "turn_limit_continuation"
                 ),
                 "checkpoint": {"reason": last_error},
+            }
+
+        if self._is_transient_provider_error(last_error):
+            return {
+                "status": "needs_continuation",
+                "error": last_error,
+                "failure_stage": "provider_interruption",
+                "checkpoint": {
+                    "reason": last_error,
+                    "next_action": "Resume this task when the provider is available",
+                },
             }
 
         # Non-budget/model failures with no usable artifact remain failures.
@@ -5104,12 +5306,21 @@ class Engine:
             and ("model" in normalized or "404" in normalized)
         )
 
+    @staticmethod
+    def _is_transient_provider_error(error: str) -> bool:
+        normalized = str(error or "").lower()
+        return any(marker in normalized for marker in (
+            "timed out", "timeout", "rate limit", "too many requests",
+            "overloaded", "service unavailable", "connection error",
+            "context length", "context window", "maximum context",
+        ))
+
     @classmethod
     def _is_user_action_required(cls, error: str) -> bool:
         """Reserve needs_attention for an action only the user can perform."""
         normalized = str(error or "").lower()
         if cls._is_model_configuration_error(error):
-            return False
+            return True
         # Git/worktree mechanics are RockCore implementation details. They may
         # fail the run and preserve a checkpoint, but must never require a user
         # who does not know Git to repair repository internals.
@@ -5130,6 +5341,7 @@ class Engine:
             "insufficient_quota", "quota exceeded", "billing",
             "billable api hard cost", "cost limit would be exceeded",
             "permission denied", "access denied",
+            "context length", "context window", "maximum context",
             "需要用户", "只能由用户", "用户提供", "需要授权",
         )
         return any(marker in normalized for marker in markers)
@@ -5634,7 +5846,9 @@ class Engine:
         plan_data = self._namespace_repair_plan(
             decision.get("plan") or {}, round_number
         )
-        self._serialize_overlapping_tasks(plan_data)
+        self._serialize_overlapping_tasks(
+            plan_data, getattr(job, "_rockcore_project_surface", None)
+        )
         self._prune_transitive_dependencies(plan_data)
         self._assign_plan_skills(plan_data)
         repair_record["plan"] = plan_data
@@ -5896,7 +6110,7 @@ class Engine:
             return (
                 "model_configuration",
                 "模型配置不可用。请在设置中选择供应商当前开放的模型 ID；"
-                "RockCore 已自动尝试可用候选项，无需继续同一任务。",
+                "保存后点击继续，将恢复同一个执行任务。",
             )
         if cls._is_user_input_required(error):
             if "password" in normalized or "encrypted" in normalized:
@@ -6034,6 +6248,42 @@ class Engine:
                 if item.status in {"pending", "blocked", "interrupted"}
             ), ""),
         }
+        session = normalize_session(
+            existing_checkpoint.get("execution_session"),
+            session_id=(job.execution_session_id or job.job_id),
+            goal=job.user_request,
+        )
+        update_checklist(session, tasks)
+        changes = payload.get("changes") or {}
+        session["changed_files"] = list(dict.fromkeys(
+            list(session.get("changed_files") or [])
+            + [str(path) for path in (changes.get("changed") or [])]
+        ))[:100]
+        validation = payload.get("validation") or payload.get("test_result")
+        if validation:
+            session["validation"] = list(session.get("validation") or []) + [{
+                "task_id": task.task_id,
+                "status": str(validation.get("status") or ""),
+                "output": str(
+                    validation.get("output") or validation.get("error") or ""
+                )[:1600],
+            }]
+        if status in {"needs_attention", "interrupted", "failed"}:
+            session["recoverable_error"] = {
+                "task_id": task.task_id,
+                "status": status,
+                "reason": str(error or payload.get("error") or "")[:1600],
+                "next_action": (
+                    "Resolve the user-actionable condition and resume this same task"
+                    if status == "needs_attention"
+                    else "Resume this same task from its saved checkpoint"
+                    if status == "interrupted"
+                    else "Inspect the internal failure and run automatic repair"
+                ),
+            }
+        elif status == "done":
+            session["recoverable_error"] = {}
+        existing_checkpoint["execution_session"] = session
         runtime_checkpoint = dict(
             getattr(task, "_rockcore_runtime_checkpoint", None) or {}
         )

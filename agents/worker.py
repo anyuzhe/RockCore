@@ -200,7 +200,7 @@ Type: {task.task_type}
 Allowed Paths: {task.allowed_paths or 'all'}
 Acceptance Command: {task.acceptance_command or 'none'}
 Selected Skills: {', '.join(selected_skills) or 'none'}
-{task_memory_context[:4000]}
+{task_memory_context}
 """
 
         if task.task_type in {"analysis", "review"}:
@@ -245,7 +245,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "\n\nThis is a focused continuation after an earlier attempt. "
                 "Keep existing useful changes, avoid repeating broad exploration, "
                 "and finish the task now.\nRecovery guidance:\n"
-                + recovery_context[:12000]
+                + recovery_context
             )
         runtime_tools = getattr(self.tool_broker, "runtime_tools", None)
         if runtime_tools is not None:
@@ -416,13 +416,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     })
                     progress_warning_sent = True
 
-                compact_limit = (
-                    12_000 if token_ratio >= 0.92
-                    else 16_000 if token_ratio >= 0.85
-                    else 20_000 if token_ratio >= 0.70
-                    else 32_000 if is_document_task
-                    else MAX_CONVERSATION_CHARS
-                )
+                # Compaction protects provider context windows, but it is not a
+                # shrinking task/token quota. Fixed requirements remain intact;
+                # only completed historical tool exchanges are summarized.
+                compact_limit = 96_000 if is_document_task else 64_000
                 # Provider tool protocols require every assistant tool-call batch
                 # to be followed immediately by all matching tool results. Repair
                 # legacy/interrupted histories before compaction, then validate the
@@ -1347,92 +1344,85 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
     @staticmethod
     def _compact_messages(messages: list[dict],
                           max_chars: int = MAX_CONVERSATION_CHARS) -> list[dict]:
-        """Bound cumulative prompt growth while preserving tool-call pairs."""
+        """Summarize old tool history while preserving fixed context and pairs."""
         def size(message: dict) -> int:
             return len(json.dumps(message, ensure_ascii=False, default=str))
-
-        def trim_text(value: str, limit: int) -> str:
-            if len(value) <= limit:
-                return value
-            side = max(1, (limit - 80) // 2)
-            return (
-                value[:side]
-                + "\n...[compacted; re-read workspace for full content]...\n"
-                + value[-side:]
-            )
-
-        def compact_history_message(message: dict) -> dict:
-            # Round-trip to avoid mutating the caller's conversation objects.
-            compacted = json.loads(json.dumps(
-                message, ensure_ascii=False, default=str
-            ))
-            content = compacted.get("content")
-            if isinstance(content, str):
-                compacted["content"] = trim_text(content, 3_500)
-            for tool_call in compacted.get("tool_calls") or []:
-                function = tool_call.get("function") or {}
-                arguments = function.get("arguments")
-                if isinstance(arguments, str) and len(arguments) > 1_200:
-                    function["arguments"] = json.dumps({
-                        "note": "historical tool arguments compacted",
-                    })
-            return compacted
 
         if sum(size(message) for message in messages) <= max_chars:
             return messages
         if len(messages) <= 2:
             return messages
 
-        head = compact_history_message(messages[0])
-        head_content = head.get("content")
-        if isinstance(head_content, str):
-            head["content"] = trim_text(
-                head_content, max(256, max_chars // 2)
-            )
+        # Message zero contains the task, fixed ExecutionSession and layered
+        # instructions. It is deliberately never clipped.
+        head = json.loads(json.dumps(
+            messages[0], ensure_ascii=False, default=str
+        ))
         groups: list[list[dict]] = []
         index = 1
         while index < len(messages):
-            message = compact_history_message(messages[index])
+            message = json.loads(json.dumps(
+                messages[index], ensure_ascii=False, default=str
+            ))
             group = [message]
             index += 1
             if message.get("role") == "assistant" and message.get("tool_calls"):
                 while index < len(messages) and messages[index].get("role") == "tool":
-                    group.append(compact_history_message(messages[index]))
+                    group.append(json.loads(json.dumps(
+                        messages[index], ensure_ascii=False, default=str
+                    )))
                     index += 1
             groups.append(group)
 
-        note = {
-            "role": "user",
-            "content": (
-                "Earlier tool exchanges were compacted to keep this task within "
-                "its context budget. Keep using the established findings and "
-                "current workspace state; do not restart broad exploration."
-            ),
-        }
-        remaining = max_chars - size(head) - size(note)
+        remaining = max(0, max_chars - size(head) - 1200)
         selected: list[list[dict]] = []
         used = 0
-        for group in reversed(groups):
+        for reverse_index, group in enumerate(reversed(groups)):
             group_size = sum(size(message) for message in group)
-            if group_size > remaining:
-                # Never send an oversized or half-paired tool exchange. The
-                # compaction note tells the model to re-read authoritative
-                # workspace state when the latest tool output was enormous.
-                break
+            # Always retain the latest complete exchange even when immutable
+            # fixed context alone exceeds the soft compaction target.
+            if reverse_index and group_size > remaining - used:
+                continue
             selected.append(group)
             used += group_size
-            if used >= remaining:
-                break
         selected.reverse()
+        selected_ids = {id(group) for group in selected}
+        observations = []
+        for group in groups:
+            if id(group) in selected_ids:
+                continue
+            assistant = group[0]
+            calls = assistant.get("tool_calls") or []
+            results = {
+                str(item.get("tool_call_id") or ""): item
+                for item in group[1:] if item.get("role") == "tool"
+            }
+            for call in calls:
+                function = call.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except (TypeError, ValueError):
+                    arguments = {}
+                result_text = str(
+                    results.get(str(call.get("id") or ""), {}).get("content") or ""
+                )
+                observations.append({
+                    "tool": str(function.get("name") or "unknown"),
+                    "path": str(arguments.get("path") or ""),
+                    "result": result_text[:280],
+                })
+        note = {
+            "role": "user",
+            "content": "=== COMPRESSED TOOL HISTORY ===\n" + json.dumps({
+                "instruction": (
+                    "Reuse these completed observations. Do not repeat unchanged reads."
+                ),
+                "observations": observations[-40:],
+            }, ensure_ascii=False, default=str),
+        }
         compacted = [head, note] + [
             message for group in selected for message in group
         ]
-        # JSON framing adds a little overhead beyond content limits. The group
-        # selection above accounts for it without ever splitting a tool pair.
-        if sum(size(item) for item in compacted) > max_chars:
-            head["content"] = trim_text(
-                str(head.get("content") or ""), max(64, max_chars // 3)
-            )
         return compacted
 
     def _tool_definitions(self, task) -> list[dict]:

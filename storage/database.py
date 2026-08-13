@@ -42,10 +42,26 @@ def _migrate_schema(engine):
             connection.exec_driver_sql(
                 "ALTER TABLE jobs ADD COLUMN source_job_id VARCHAR(64)"
             )
+
+    if "execution_session_id" not in columns:
+        with engine.begin() as connection:
             connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_jobs_source_job_id "
-                "ON jobs (source_job_id)"
+                "ALTER TABLE jobs ADD COLUMN execution_session_id VARCHAR(64)"
             )
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE jobs SET execution_session_id = job_id "
+            "WHERE execution_session_id IS NULL OR execution_session_id = ''"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_execution_session_id "
+            "ON jobs (execution_session_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_source_job_id "
+            "ON jobs (source_job_id)"
+        )
 
     if "attachments" not in columns:
         with engine.begin() as connection:

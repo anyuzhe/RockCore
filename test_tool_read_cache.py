@@ -147,3 +147,44 @@ def test_read_errors_are_not_cached(tmp_path):
     assert available["content"] == "ready"
     assert "cache_hit" not in available
     assert calls == 2
+
+
+def test_unrelated_write_keeps_other_file_cache(tmp_path):
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+    broker = ToolBroker(tmp_path, PolicyEngine())
+
+    async def exercise():
+        await broker.execute(_task(), "read_file", {"path": "a.txt"})
+        await broker.execute(_task(), "read_file", {"path": "b.txt"})
+        await broker.execute(_task(), "write_file", {
+            "path": "a.txt", "content": "changed",
+        })
+        return await broker.execute(
+            _task(), "read_file", {"path": "b.txt"}
+        )
+
+    result = asyncio.run(exercise())
+    assert result["content"] == "b"
+    assert result["cache_hit"] is True
+
+
+def test_external_file_change_invalidates_versioned_cache(tmp_path):
+    source = tmp_path / "game.js"
+    source.write_text("old", encoding="utf-8")
+    broker = ToolBroker(tmp_path, PolicyEngine())
+
+    async def exercise():
+        first = await broker.execute(
+            _task(), "read_file", {"path": "game.js"}
+        )
+        source.write_text("new content", encoding="utf-8")
+        refreshed = await broker.execute(
+            _task(), "read_file", {"path": "game.js"}
+        )
+        return first, refreshed
+
+    first, refreshed = asyncio.run(exercise())
+    assert first["content"] == "old"
+    assert refreshed["content"] == "new content"
+    assert "cache_hit" not in refreshed

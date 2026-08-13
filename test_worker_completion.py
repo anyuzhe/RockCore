@@ -1245,7 +1245,13 @@ def test_worker_compacts_history_without_splitting_recent_tool_pair():
     assert compacted[0]["content"].startswith("ORIGINAL REQUIREMENTS")
     assert "recent-call" in ids
     assert ids == tool_response_ids
-    assert serialized_size <= 5_000
+    # Fixed requirements are immutable and may exceed the soft target by
+    # themselves; old tool payloads are summarized while the newest pair stays.
+    assert serialized_size < 10_000
+    assert any(
+        "COMPRESSED TOOL HISTORY" in str(message.get("content") or "")
+        for message in compacted
+    )
 
 
 def test_worker_repairs_interleaved_parallel_tool_results():

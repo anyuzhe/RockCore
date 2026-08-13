@@ -35,6 +35,8 @@ class Job(Base):
     attachments = Column(JSON, default=list, nullable=False)
     # The job whose result this request explicitly continues, if any.
     source_job_id = Column(String(64), nullable=True, index=True)
+    # Stable identity for one coherent conversation across follow-up jobs.
+    execution_session_id = Column(String(64), nullable=False, index=True)
     status = Column(String(32), default="created", index=True)
     risk_level = Column(String(16), default="medium")
     branch_name = Column(String(255), default="")

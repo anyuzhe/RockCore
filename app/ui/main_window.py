@@ -365,11 +365,20 @@ class MainWindow(QMainWindow):
 
         self._current_project = data
         self._selected_job_id = None
-        self._followup_source_job_id = None
+        self._followup_source_job_id = self._latest_project_job_id(data)
         self._sync_project_runtime_state()
         self._sync_current_queue_state()
-        self.followup_source_label.setText("新需求")
-        self.clear_followup_btn.setVisible(False)
+        if self._followup_source_job_id:
+            self.followup_source_label.setText(
+                f"继续 {self._followup_source_job_id}"
+            )
+            self.clear_followup_btn.setVisible(True)
+            self.input_text.setPlaceholderText(
+                "继续描述这个项目要补充、修改或修复的内容"
+            )
+        else:
+            self.followup_source_label.setText("首个需求")
+            self.clear_followup_btn.setVisible(False)
         self._update_send_state()
         running = self._current_running_job()
         self.status_label.setText(
@@ -432,6 +441,7 @@ class MainWindow(QMainWindow):
                         "attachments": list(getattr(job, "attachments", None) or []),
                         "status": job.status,
                         "source_job_id": job.source_job_id,
+                        "execution_session_id": job.execution_session_id,
                         "failure_code": getattr(job, "failure_code", "") or "",
                         "failure_reason": getattr(job, "failure_reason", "") or "",
                         "recovery_hint": getattr(job, "recovery_hint", "") or "",
@@ -659,10 +669,26 @@ class MainWindow(QMainWindow):
 
     def _clear_followup_source(self):
         self._followup_source_job_id = None
-        self.followup_source_label.setText("新需求")
+        self.followup_source_label.setText("独立会话")
         self.clear_followup_btn.setVisible(False)
         self.input_text.setPlaceholderText("描述你希望 RockCore 完成的工作")
-        self.status_label.setText("已切换为独立的新需求")
+        self.status_label.setText("已切换为这个项目的独立会话")
+
+    def _latest_project_job_id(self, project_data: dict | None) -> str | None:
+        """Return the default continuation anchor for a selected project."""
+        if not self.engine or not project_data:
+            return None
+        repos = self._get_repos()
+        try:
+            project = repos["project"].get_by_name(
+                str(project_data.get("name") or "")
+            )
+            if not project:
+                return None
+            latest = repos["job"].latest_by_project(project.id)
+            return latest.job_id if latest else None
+        finally:
+            self._close_repos(repos)
 
     def _start_new_request(self):
         self._selected_job_id = None
@@ -1742,6 +1768,7 @@ class MainWindow(QMainWindow):
                         "user_request": j.user_request,
                         "status": j.status,
                         "source_job_id": j.source_job_id,
+                        "execution_session_id": j.execution_session_id,
                         "failure_code": getattr(j, "failure_code", "") or "",
                         "failure_reason": getattr(j, "failure_reason", "") or "",
                         "recovery_hint": getattr(j, "recovery_hint", "") or "",

@@ -151,7 +151,7 @@ def test_provider_balance_error_requests_user_action_without_replanning(tmp_path
     asyncio.run(scenario())
 
 
-def test_exhausted_model_candidates_are_a_clear_terminal_failure(tmp_path):
+def test_exhausted_model_candidates_wait_for_configuration_and_resume(tmp_path):
     project_root = tmp_path / "project"
     project_root.mkdir()
 
@@ -191,14 +191,18 @@ def test_exhausted_model_candidates_are_a_clear_terminal_failure(tmp_path):
 
             repos["_session"].refresh(job)
             repos["_session"].refresh(task)
-            assert result["status"] == "failed"
-            assert job.status == "failed"
-            assert task.status == "model_configuration_failed"
-            failed = engine.event_bus.get_history("task_failed")[-1]["data"]
-            assert failed["failure_stage"] == "model_configuration"
-            assert "模型配置不可用" in failed["error"]
+            assert result["status"] == "needs_attention"
+            assert job.status == "needs_attention"
+            assert task.status == "needs_attention"
+            attention = engine.event_bus.get_history(
+                "task_needs_user_action"
+            )[-1]["data"]
+            assert attention["failure_stage"] == "model_configuration"
+            assert "模型配置不可用" in attention["reason"]
+            assert task.task_id in engine._resumable_task_ids([task])
+            session = job.last_checkpoint["execution_session"]
+            assert session["recoverable_error"]["task_id"] == "T001"
             assert not engine.event_bus.get_history("task_needs_continuation")
-            assert not engine.event_bus.get_history("task_needs_user_action")
         finally:
             repos["_session"].close()
 

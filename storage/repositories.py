@@ -49,10 +49,12 @@ class JobRepository:
     def create(self, job_id: str, project_id: int, user_request: str,
                risk_level: str = "medium",
                source_job_id: str | None = None,
-               attachments: list[dict] | None = None) -> Job:
+               attachments: list[dict] | None = None,
+               execution_session_id: str | None = None) -> Job:
         job = Job(job_id=job_id, project_id=project_id,
                   user_request=user_request, risk_level=risk_level,
                   source_job_id=source_job_id,
+                  execution_session_id=execution_session_id or job_id,
                   attachments=list(attachments or []))
         self.session.add(job)
         self.session.commit()
@@ -71,6 +73,11 @@ class JobRepository:
 
     def list_all(self) -> list[Job]:
         return self.session.query(Job).order_by(Job.created_at.desc()).all()
+
+    def latest_by_project(self, project_id: int) -> Optional[Job]:
+        return self.session.query(Job).filter(
+            Job.project_id == project_id
+        ).order_by(Job.created_at.desc()).first()
 
     def update_status(self, job_id: str, status: str) -> Optional[Job]:
         job = self.get_by_id(job_id)

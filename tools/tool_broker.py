@@ -6,6 +6,8 @@ import logging
 import inspect
 import os
 import time
+import hashlib
+from pathlib import Path
 from typing import Any
 
 from mcp_runtime.manager import MCPManager
@@ -508,15 +510,18 @@ class ToolBroker:
 
         cache_key = self._read_cache_key(requested_tool_name, args)
         if cache_key is not None and cache_key in self._read_cache:
-            result = copy.deepcopy(self._read_cache[cache_key])
-            result["tool"] = requested_tool_name
-            result["duration_ms"] = 0
-            result["cache_hit"] = True
-            if routed_to_runtime:
-                result["redirected_to_runtime"] = True
-            if ignored_arguments:
-                result["ignored_arguments"] = ignored_arguments
-            return result
+            entry = self._read_cache[cache_key]
+            if self._cache_entry_is_current(entry):
+                result = copy.deepcopy(entry["result"])
+                result["tool"] = requested_tool_name
+                result["duration_ms"] = 0
+                result["cache_hit"] = True
+                if routed_to_runtime:
+                    result["redirected_to_runtime"] = True
+                if ignored_arguments:
+                    result["ignored_arguments"] = ignored_arguments
+                return result
+            self._read_cache.pop(cache_key, None)
 
         # 2. Execute
         try:
@@ -534,13 +539,28 @@ class ToolBroker:
                 command_may_have_written = requested_tool_name in {
                     "run_command", "run_tests",
                 }
-                if mutating_mcp_succeeded or command_may_have_written or (
+                if mutating_mcp_succeeded or command_may_have_written:
+                    self._read_cache.clear()
+                elif (
                     requested_tool_name in _CACHE_INVALIDATING_TOOLS
                     or tool_name in _CACHE_INVALIDATING_TOOLS
                 ) and self._write_succeeded(result):
-                    self._read_cache.clear()
+                    changed_path = str(
+                        result.get("path") or args.get("path") or ""
+                    )
+                    if changed_path:
+                        self._invalidate_read_cache_for_path(changed_path)
+                    else:
+                        self._read_cache.clear()
                 elif cache_key is not None and self._result_is_cacheable(result):
-                    self._read_cache[cache_key] = copy.deepcopy(result)
+                    dependency = self._cache_dependency(
+                        requested_tool_name, args
+                    )
+                    self._read_cache[cache_key] = {
+                        "result": copy.deepcopy(result),
+                        "dependency": dependency,
+                        "version": self._dependency_version(dependency),
+                    }
                 result["tool"] = requested_tool_name
                 result["duration_ms"] = duration
                 if routed_to_runtime:
@@ -575,6 +595,81 @@ class ToolBroker:
             separators=(",", ":"),
         )
         return tool_name, serialized
+
+    def _cache_dependency(self, tool_name: str, args: dict) -> dict:
+        raw_path = str(args.get("path") or ".")
+        try:
+            resolved = (Path(self.project_root) / raw_path).resolve()
+            resolved.relative_to(Path(self.project_root).resolve())
+        except (OSError, ValueError):
+            resolved = Path(self.project_root).resolve()
+        return {
+            "kind": "tree" if tool_name == "search_code" else "file",
+            "path": str(resolved),
+            "glob_pattern": str(args.get("glob_pattern") or ""),
+        }
+
+    @staticmethod
+    def _dependency_version(dependency: dict) -> str:
+        path = Path(str(dependency.get("path") or ""))
+        try:
+            if dependency.get("kind") == "file":
+                stat = path.stat()
+                return f"{stat.st_mtime_ns}:{stat.st_size}"
+            entries = []
+            glob_pattern = str(dependency.get("glob_pattern") or "")
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [
+                    name for name in dirs
+                    if not name.startswith(".") and name not in {
+                        "node_modules", "__pycache__", ".venv", "venv",
+                        "env", "dist", "build",
+                    }
+                ]
+                for name in files:
+                    if glob_pattern:
+                        from fnmatch import fnmatch
+                        if not fnmatch(name, glob_pattern):
+                            continue
+                    candidate = Path(root) / name
+                    stat = candidate.stat()
+                    entries.append(
+                        f"{candidate.relative_to(path).as_posix()}:"
+                        f"{stat.st_mtime_ns}:{stat.st_size}"
+                    )
+            return hashlib.sha256(
+                "\n".join(sorted(entries)).encode("utf-8")
+            ).hexdigest()
+        except OSError:
+            return "missing"
+
+    def _cache_entry_is_current(self, entry: dict) -> bool:
+        dependency = dict(entry.get("dependency") or {})
+        return bool(dependency) and entry.get("version") == (
+            self._dependency_version(dependency)
+        )
+
+    def _invalidate_read_cache_for_path(self, raw_path: str):
+        try:
+            changed = (Path(self.project_root) / raw_path).resolve()
+            changed.relative_to(Path(self.project_root).resolve())
+        except (OSError, ValueError):
+            self._read_cache.clear()
+            return
+        stale = []
+        for key, entry in self._read_cache.items():
+            dependency = dict(entry.get("dependency") or {})
+            dependency_path = Path(str(dependency.get("path") or ""))
+            if dependency.get("kind") == "tree":
+                try:
+                    changed.relative_to(dependency_path)
+                except ValueError:
+                    continue
+                stale.append(key)
+            elif dependency_path == changed:
+                stale.append(key)
+        for key in stale:
+            self._read_cache.pop(key, None)
 
     @staticmethod
     def _result_is_cacheable(result: dict) -> bool:
