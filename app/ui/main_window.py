@@ -1657,13 +1657,12 @@ class MainWindow(QMainWindow):
                 f"正在验收：{data.get('command', '')}",
                 repair_round=task_repair_round,
             )
-            self.task_panel.add_worker_activity(
+            self.task_panel.add_validation_activity(
                 data.get("task_id", ""),
-                activity_id=f"{data.get('task_id', '')}-validation",
                 event_kind="validation_started",
+                command=str(data.get("command") or "项目结果"),
                 status="started",
-                summary="正在验证 " + (data.get("command") or "项目结果"),
-                meta=data.get("task_id", ""),
+                repair_round=task_repair_round,
             )
         elif event_type == "job_reviewing" and is_selected:
             self.task_panel.clear_worker_progress()
@@ -1760,22 +1759,14 @@ class MainWindow(QMainWindow):
             )
             if is_selected:
                 result_status = str(data.get("status") or "")
-                self.task_panel.add_worker_activity(
+                self.task_panel.add_validation_activity(
                     data.get("task_id", ""),
-                    activity_id=f"{data.get('task_id', '')}-validation",
                     event_kind="validation_completed",
                     status=(
                         "success" if result_status == "passed" else "failed"
                     ),
-                    summary=(
-                        "验收通过" if result_status == "passed"
-                        else "验收未通过"
-                    ),
-                    meta=data.get("task_id", ""),
-                    result={
-                        "status": result_status,
-                        "output": str(data.get("output") or "")[:3000],
-                    },
+                    output=str(data.get("output") or ""),
+                    repair_round=task_repair_round,
                 )
                 self.task_panel.append_stage_output(
                     "worker",

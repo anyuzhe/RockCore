@@ -396,6 +396,7 @@ class TaskPanel(QWidget):
         # Exploratory reads are one user-visible step. Keep individual calls
         # as expandable evidence instead of flooding the conversation feed.
         self._read_activity_groups: dict[str, dict] = {}
+        self._verification_activity_groups: dict[str, dict] = {}
         self._progress_sequence = 0
         self._usage = self._empty_usage()
         self._setup_ui()
@@ -980,6 +981,7 @@ class TaskPanel(QWidget):
             self._activity_counters = {}
             self._pending_tool_activities = {}
             self._read_activity_groups = {}
+            self._verification_activity_groups = {}
             self._progress_sequence = 0
             self.worker_activity.clear()
             for disclosure in (self.run_details, self.diff_details, self.test_details):
@@ -1178,6 +1180,7 @@ class TaskPanel(QWidget):
         self._activity_counters = {}
         self._pending_tool_activities = {}
         self._read_activity_groups = {}
+        self._verification_activity_groups = {}
         self._progress_sequence = 0
         self.worker_activity.clear()
         self.worker_progress_wrap.hide()
@@ -1305,6 +1308,13 @@ class TaskPanel(QWidget):
                 duration_ms=duration_ms, activity_id=activity_id,
                 repair_round=self._active_repair_round,
             )
+        if self._tool_kind(tool) == "verify":
+            return self._add_grouped_verification_activity(
+                task_id, event_kind=event_kind, tool=tool, path=path,
+                turn=turn, status=status, arguments=arguments, result=result,
+                duration_ms=duration_ms, activity_id=activity_id,
+                repair_round=self._active_repair_round,
+            )
         if not activity_id:
             counter = self._activity_counters.get(task_id, 0) + 1
             self._activity_counters[task_id] = counter
@@ -1401,6 +1411,74 @@ class TaskPanel(QWidget):
         QTimer.singleShot(0, self._scroll_to_bottom)
         return key
 
+    @staticmethod
+    def _verification_group_key(task_id: str, repair_round: int = 0) -> str:
+        return f"{task_id or 'task'}-verification-{int(repair_round or 0)}"
+
+    def _add_grouped_verification_activity(
+        self, task_id: str, *, event_kind: str, tool: str, path: str,
+        turn: int, status: str, arguments: dict | None,
+        result: dict | None, duration_ms: int, activity_id: str,
+        repair_round: int,
+    ) -> str:
+        """Combine repeated commands and final acceptance into one activity."""
+        key = self._verification_group_key(task_id, repair_round)
+        group = self._verification_activity_groups.setdefault(key, {
+            "entries": {}, "active": 0, "failed": 0, "passed": 0,
+            "duration_ms": 0,
+        })
+        target = str(path or "").strip() or "项目结果"
+        entry_key = str(activity_id or f"{tool}:{int(turn or 0)}:{target}")
+        if event_kind in {"tool_started", "validation_started"}:
+            group["active"] += 1
+        else:
+            group["active"] = max(0, group["active"] - 1)
+            if status in {"error", "rejected", "failed"}:
+                group["failed"] += 1
+            else:
+                group["passed"] += 1
+        group["duration_ms"] += max(0, int(duration_ms or 0))
+        group["entries"][entry_key] = {
+            "tool": tool or "acceptance", "path": target, "status": status,
+            "arguments": arguments or {}, "result": result or {},
+        }
+        total = len(group["entries"])
+        if group["active"]:
+            summary = f"正在验证项目（{total} 项）"
+        elif group["failed"]:
+            summary = f"项目验证完成（{total} 项），{group['failed']} 项未通过"
+        else:
+            summary = f"项目验证通过（{total} 项）"
+        meta_parts = []
+        if group["passed"]:
+            meta_parts.append(f"{group['passed']} 项通过")
+        if group["failed"]:
+            meta_parts.append(f"{group['failed']} 项未通过")
+        if group["duration_ms"]:
+            meta_parts.append(f"{group['duration_ms'] / 1000:.1f}s")
+        lines = []
+        raw_details = []
+        for item in group["entries"].values():
+            marker = "!" if item["status"] in {"error", "rejected", "failed"} else "✓"
+            lines.append(f"{marker} {item['path']} · {item['tool']}")
+            if item["arguments"] or item["result"]:
+                raw_details.append(self._activity_details(
+                    item["tool"], item["arguments"], item["result"]
+                ))
+        details = "\n".join(lines)
+        if raw_details:
+            details += "\n\n" + "\n\n".join(raw_details)
+        self.worker_activity.add_or_update(
+            key,
+            status=("running" if group["active"] else (
+                "failed" if group["failed"] else "success"
+            )),
+            summary=summary, meta=" · ".join(meta_parts),
+            details=details[:12000],
+        )
+        QTimer.singleShot(0, self._scroll_to_bottom)
+        return key
+
     def add_worker_thought(self, task_id: str, content: str,
                            duration_ms: int = 0):
         clean = self._normalize_model_output(content)
@@ -1425,6 +1503,7 @@ class TaskPanel(QWidget):
         self._activity_counters = {}
         self._pending_tool_activities = {}
         self._read_activity_groups = {}
+        self._verification_activity_groups = {}
         for index, activity in enumerate(activities or [], start=1):
             self.add_worker_activity(
                 str(activity.get("task_id") or ""),
@@ -1438,6 +1517,24 @@ class TaskPanel(QWidget):
                 result=activity.get("result") or {},
                 duration_ms=int(activity.get("duration_ms", 0) or 0),
             )
+
+    def add_validation_activity(
+        self, task_id: str, *, event_kind: str, command: str = "",
+        status: str = "started", output: str = "",
+        repair_round: int = 0,
+    ) -> str:
+        """Route deterministic acceptance through the verification group."""
+        return self._add_grouped_verification_activity(
+            task_id, event_kind=event_kind, tool="acceptance",
+            path=command or "最终验收", turn=0, status=status,
+            arguments={"command": command} if command else {},
+            result={
+                "status": status, "output": str(output or "")[:3000],
+            } if event_kind != "validation_started" else {},
+            duration_ms=0,
+            activity_id=f"{task_id or 'task'}-acceptance",
+            repair_round=repair_round,
+        )
 
     def add_model_output(self, agent_type: str, provider: str, response: str,
                          error: str | None, duration_ms: int,

@@ -700,7 +700,40 @@ def test_worker_activity_names_search_query_and_validation_command():
     )
 
     assert panel.worker_activity.item(search_id).summary.text() == "已读取项目文件（1 项）"
-    assert panel.worker_activity.item(command_id).summary.text() == "正在验证 pytest -q"
+    assert panel.worker_activity.item(command_id).summary.text() == "正在验证项目（1 项）"
+    panel.close()
+
+
+def test_worker_activity_groups_repeated_validation_commands():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-GROUPED-VALIDATION", "user_request": "检查脚本",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "检查", "status": "running"}])
+
+    first = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="run_command",
+        path="node --check js/main.js", turn=1, status="success",
+        result={"status": "success", "stdout": "OK"}, duration_ms=40,
+    )
+    second = panel.add_worker_activity(
+        "T001", event_kind="tool_completed", tool="run_command",
+        path="node --check js/player.js", turn=2, status="success",
+        result={"status": "success", "stdout": "OK"}, duration_ms=35,
+    )
+    final = panel.add_validation_activity(
+        "T001", event_kind="validation_completed", status="failed",
+        output="browser smoke failed",
+    )
+
+    assert first == second == final
+    assert len(panel.worker_activity._items) == 1
+    item = panel.worker_activity.item(first)
+    assert item.summary.text() == "项目验证完成（3 项），1 项未通过"
+    assert "2 项通过" in item.meta.text()
+    assert "node --check js/player.js · run_command" in item.details.toPlainText()
+    assert "最终验收 · acceptance" in item.details.toPlainText()
     panel.close()
 
 
@@ -770,14 +803,14 @@ def test_main_window_routes_tool_and_validation_events_to_activity_timeline():
     window._on_event("test_running", {
         "job_id": job["job_id"], "task_id": "T001", "command": "pytest -q",
     })
-    validation = window.task_panel.worker_activity.item("T001-validation")
+    validation = window.task_panel.worker_activity.item("T001-verification-0")
     assert validation.indicator.is_spinning
     window._on_event("test_result", {
         "job_id": job["job_id"], "task_id": "T001", "status": "passed",
         "output": "1 passed",
     })
     assert not validation.indicator.is_spinning
-    assert validation.summary.text() == "验收通过"
+    assert validation.summary.text() == "项目验证通过（1 项）"
     window.close()
 
 
