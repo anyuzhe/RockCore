@@ -415,13 +415,12 @@ class TaskPanel(QWidget):
         self._read_activity_groups: dict[str, dict] = {}
         self._verification_activity_groups: dict[str, dict] = {}
         self._worker_narrative_sequence: dict[str, int] = {}
-        self._processing_started_at: datetime | None = None
-        self._processing_completed_at: datetime | None = None
+        self._task_timings: dict[str, dict] = {}
         self._progress_sequence = 0
         self._usage = self._empty_usage()
-        self._processing_timer = QTimer(self)
-        self._processing_timer.setInterval(1000)
-        self._processing_timer.timeout.connect(self._refresh_processing_time)
+        self._task_timer = QTimer(self)
+        self._task_timer.setInterval(1000)
+        self._task_timer.timeout.connect(self._refresh_task_times)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -637,9 +636,6 @@ class TaskPanel(QWidget):
             self.stages[key] = stage
             self.trace_layout.addWidget(stage)
         self.stages["worker"].add_content_widget(self.worker_activity)
-        self.processing_time_label = QLabel("已处理 0秒")
-        self.processing_time_label.setObjectName("processingTimeLabel")
-        self.stages["worker"].layout().insertWidget(1, self.processing_time_label)
         self.repair_stages: dict[str, WorkflowStage] = {}
         agent_layout.addLayout(self.trace_layout)
 
@@ -1009,6 +1005,7 @@ class TaskPanel(QWidget):
             self._read_activity_groups = {}
             self._verification_activity_groups = {}
             self._worker_narrative_sequence = {}
+            self._task_timings = {}
             self._progress_sequence = 0
             self.worker_activity.clear()
             for disclosure in (self.run_details, self.diff_details, self.test_details):
@@ -1025,9 +1022,6 @@ class TaskPanel(QWidget):
             stage.reset()
 
         status = job.get("status", "created")
-        self._set_processing_time(
-            job.get("created_at"), job.get("completed_at"), status
-        )
         source = job.get("source_job_id")
         request = job.get("user_request", "")
         # The complete requirement is already shown in the conversation and
@@ -1160,6 +1154,8 @@ class TaskPanel(QWidget):
         )
         if historical_activities and (not same_job or not self.worker_activity.has_items):
             self.load_worker_activities(historical_activities)
+        if not same_job:
+            self.restore_task_timings(self._tasks)
 
         if reviews:
             # Reviews are loaded newest-first; the fixed stage represents the
@@ -1254,9 +1250,8 @@ class TaskPanel(QWidget):
         self._read_activity_groups = {}
         self._verification_activity_groups = {}
         self._worker_narrative_sequence = {}
-        self._processing_timer.stop()
-        self._processing_started_at = None
-        self.processing_time_label.setText("已处理 0秒")
+        self._task_timings = {}
+        self._task_timer.stop()
         self._progress_sequence = 0
         self.worker_activity.clear()
         self.worker_progress_wrap.hide()
@@ -1423,6 +1418,8 @@ class TaskPanel(QWidget):
             meta=meta,
             details=details if arguments or result else "",
         )
+        if activity_id == f"{task_id}-task" and task_id in self._task_timings:
+            self._refresh_task_time(task_id)
         QTimer.singleShot(0, self._scroll_to_bottom)
         return activity_id
 
@@ -1859,44 +1856,105 @@ class TaskPanel(QWidget):
             return f"{minutes}分钟 {seconds}秒"
         return f"{seconds}秒"
 
-    def _set_processing_time(self, created_at, completed_at, status: str):
+    @staticmethod
+    def _parse_optional_time(value) -> datetime | None:
+        if not value:
+            return None
         try:
-            self._processing_started_at = to_local_datetime(created_at)
+            return to_local_datetime(value)
         except (TypeError, ValueError, OverflowError):
-            self._processing_started_at = datetime.now().astimezone()
-        self._processing_completed_at = None
-        if completed_at:
-            try:
-                self._processing_completed_at = to_local_datetime(completed_at)
-            except (TypeError, ValueError, OverflowError):
-                self._processing_completed_at = None
-        if status in ACTIVE_STATUSES:
-            self._processing_timer.start()
-        else:
-            self._processing_timer.stop()
-        self._refresh_processing_time()
+            return None
 
-    def _refresh_processing_time(self):
-        if not self._processing_started_at:
-            self.processing_time_label.setText("已处理 0秒")
+    def start_task_timer(self, task_id: str, *, title: str = "",
+                         started_at=None) -> None:
+        if not task_id:
             return
-        end = self._processing_completed_at or datetime.now().astimezone()
-        elapsed = int(max(0, (end - self._processing_started_at).total_seconds()))
-        self.processing_time_label.setText(
-            "已处理 " + self._format_elapsed(elapsed)
+        timing = self._task_timings.setdefault(task_id, {})
+        timing["started_at"] = (
+            self._parse_optional_time(started_at)
+            or timing.get("started_at")
+            or datetime.now().astimezone()
         )
+        timing["completed_at"] = None
+        timing["title"] = title or timing.get("title", "")
+        timing["running"] = True
+        self._task_timer.start()
+        self._refresh_task_time(task_id)
+
+    def finish_task_timer(self, task_id: str, *, completed_at=None) -> None:
+        timing = self._task_timings.get(task_id)
+        if not timing:
+            return
+        timing["completed_at"] = (
+            self._parse_optional_time(completed_at)
+            or datetime.now().astimezone()
+        )
+        timing["running"] = False
+        self._refresh_task_time(task_id)
+        if not any(item.get("running") for item in self._task_timings.values()):
+            self._task_timer.stop()
+
+    def _refresh_task_times(self) -> None:
+        for task_id, timing in list(self._task_timings.items()):
+            if timing.get("running"):
+                self._refresh_task_time(task_id)
+
+    def _refresh_task_time(self, task_id: str) -> None:
+        timing = self._task_timings.get(task_id) or {}
+        started_at = timing.get("started_at")
+        if not started_at:
+            return
+        end = timing.get("completed_at") or datetime.now().astimezone()
+        elapsed = int(max(0, (end - started_at).total_seconds()))
+        activity_id = f"{task_id}-task"
+        item = self.worker_activity.item(activity_id)
+        if item is not None:
+            item.meta.setText(
+                f"{task_id} · 已处理 {self._format_elapsed(elapsed)}"
+            )
+            item.meta.show()
+
+    def restore_task_timings(self, tasks: list[dict]) -> None:
+        self._task_timings = {}
+        for task in tasks or []:
+            task_id = str(task.get("task_id") or "")
+            started_at = self._parse_optional_time(task.get("started_at"))
+            if not task_id or not started_at:
+                continue
+            completed_at = self._parse_optional_time(task.get("completed_at"))
+            running = task.get("status") in {"running", "executing"}
+            self._task_timings[task_id] = {
+                "started_at": started_at,
+                "completed_at": None if running else completed_at,
+                "title": task.get("title", ""),
+                "running": running,
+            }
+            status = str(task.get("status") or "pending")
+            self.worker_activity.add_or_update(
+                f"{task_id}-task",
+                status=(
+                    "started" if running else "success"
+                    if status == "done" else status
+                ),
+                summary=(
+                    f"正在执行 {task.get('title', '当前步骤')}"
+                    if running else f"步骤已完成 · {task.get('title', '')}"
+                    if status == "done" else f"步骤状态 · {task.get('title', '')}"
+                ),
+                meta=task_id,
+                details="",
+            )
+        if any(item.get("running") for item in self._task_timings.values()):
+            self._task_timer.start()
+        else:
+            self._task_timer.stop()
+        for task_id in self._task_timings:
+            self._refresh_task_time(task_id)
 
     def update_job_status(self, job_id: str, status: str):
         if not self._current_job or self._current_job.get("job_id") != job_id:
             return
         self._current_job["status"] = status
-        if status in ACTIVE_STATUSES:
-            if not self._processing_timer.isActive():
-                self._processing_timer.start()
-        else:
-            self._processing_completed_at = datetime.now().astimezone()
-            self._processing_timer.stop()
-        self._refresh_processing_time()
         self._set_header_status(status)
         self._set_terminal_actions(status, self._current_job)
         if status in {

@@ -445,6 +445,12 @@ class MainWindow(QMainWindow):
                             "acceptance_command": t.acceptance_command or "",
                             "description": t.description or "",
                             "allowed_paths": t.allowed_paths or [],
+                            "started_at": as_utc_isoformat(next((
+                                run.started_at
+                                for run in repos["agent_run"].list_by_task(t.id)
+                                if run.agent_type == "worker" and run.started_at
+                            ), None)),
+                            "completed_at": as_utc_isoformat(t.completed_at),
                             "worker_activities": self._task_worker_activities(
                                 t.task_id,
                                 repos["agent_run"].list_by_task(t.id),
@@ -1378,6 +1384,9 @@ class MainWindow(QMainWindow):
             if not self.task_panel.has_task(data.get("task_id", "")):
                 self._reload_selected_workflow()
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
+            self.task_panel.start_task_timer(
+                data.get("task_id", ""), title=data.get("title", "")
+            )
             self.task_panel.set_worker_progress(
                 data.get("task_id", ""),
                 task_index=int(data.get("task_index", 0) or 0),
@@ -1440,6 +1449,7 @@ class MainWindow(QMainWindow):
             )
         elif event_type == "task_done" and is_selected:
             self.bridge.task_update.emit(data.get("task_id", ""), "done")
+            self.task_panel.finish_task_timer(data.get("task_id", ""))
             result = data.get("result") or {}
             if result.get("no_changes"):
                 self.task_panel.append_stage_output(
@@ -1517,6 +1527,7 @@ class MainWindow(QMainWindow):
             self.bridge.task_update.emit(
                 data.get("task_id", ""), "interrupted"
             )
+            self.task_panel.finish_task_timer(data.get("task_id", ""))
             self.task_panel.update_stage(
                 "worker", "interrupted",
                 "已保存有效文件或结构化进度，等待继续",
@@ -1539,6 +1550,7 @@ class MainWindow(QMainWindow):
             self.bridge.task_update.emit(
                 data.get("task_id", ""), "needs_attention"
             )
+            self.task_panel.finish_task_timer(data.get("task_id", ""))
             self.task_panel.update_stage(
                 "worker", "needs_attention",
                 "任务需要你完成一项外部操作",
@@ -1559,6 +1571,7 @@ class MainWindow(QMainWindow):
             )
         elif event_type == "task_failed" and is_selected:
             failure_stage = data.get("failure_stage", "")
+            self.task_panel.finish_task_timer(data.get("task_id", ""))
             self.bridge.task_update.emit(
                 data.get("task_id", ""),
                 "model_configuration_failed"
@@ -1594,6 +1607,7 @@ class MainWindow(QMainWindow):
             )
             self._capture_diff(data.get("result"))
         elif event_type == "task_blocked" and is_selected:
+            self.task_panel.finish_task_timer(data.get("task_id", ""))
             self.bridge.task_update.emit(data.get("task_id", ""), "blocked")
             blocked_by = ", ".join(data.get("blocked_by") or [])
             self.task_panel.append_stage_output(

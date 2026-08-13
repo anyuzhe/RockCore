@@ -695,8 +695,8 @@ def test_worker_activity_timeline_is_nested_inside_worker_stage():
     panel = TaskPanel()
 
     assert panel.worker_activity.parentWidget() is panel.stages["worker"]
-    assert panel.stages["worker"].layout().indexOf(panel.processing_time_label) == 1
-    assert panel.stages["worker"].layout().indexOf(panel.worker_activity) == 2
+    assert panel.stages["worker"].layout().indexOf(panel.worker_activity) == 1
+    assert not hasattr(panel, "processing_time_label")
     assert panel.trace_layout.indexOf(panel.stages["worker"]) >= 0
     panel.close()
 
@@ -896,19 +896,61 @@ def test_worker_actions_are_grouped_below_each_narrative_segment():
     panel.close()
 
 
-def test_processing_time_uses_job_timestamps_and_stops_when_terminal():
+def test_each_task_uses_its_own_elapsed_time():
     _app()
     panel = TaskPanel()
     panel.set_workflow({
         "job_id": "JOB-ELAPSED", "user_request": "检查项目",
         "status": "done",
         "created_at": "2026-08-13T10:00:00Z",
-        "completed_at": "2026-08-13T10:05:21Z",
-    })
+        "completed_at": "2026-08-13T10:10:00Z",
+    }, tasks=[{
+        "task_id": "T001", "title": "分析结构", "status": "done",
+        "started_at": "2026-08-13T10:01:00Z",
+        "completed_at": "2026-08-13T10:03:21Z",
+    }, {
+        "task_id": "T002", "title": "修改页面", "status": "done",
+        "started_at": "2026-08-13T10:04:00Z",
+        "completed_at": "2026-08-13T10:09:05Z",
+    }])
 
-    assert panel.processing_time_label.text() == "已处理 5分钟 21秒"
-    assert not panel._processing_timer.isActive()
+    assert "已处理 2分钟 21秒" in panel.worker_activity.item(
+        "T001-task"
+    ).meta.text()
+    assert "已处理 5分钟 5秒" in panel.worker_activity.item(
+        "T002-task"
+    ).meta.text()
+    assert not panel._task_timer.isActive()
     panel.close()
+
+
+def test_live_task_timer_starts_and_finishes_on_task_events():
+    _app()
+    window = MainWindow(None)
+    job = {
+        "job_id": "JOB-LIVE-TASK-TIMER", "user_request": "修改页面",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }
+    window.task_panel.set_workflow(job, tasks=[{
+        "task_id": "T001", "title": "修改页面", "status": "pending",
+    }])
+    window._selected_job_id = job["job_id"]
+
+    window._on_event("task_running", {
+        "job_id": job["job_id"], "task_id": "T001",
+        "title": "修改页面", "task_index": 1, "task_total": 1,
+    })
+    item = window.task_panel.worker_activity.item("T001-task")
+    assert "T001 · 已处理" in item.meta.text()
+    assert window.task_panel._task_timings["T001"]["running"]
+
+    window._on_event("task_done", {
+        "job_id": job["job_id"], "task_id": "T001", "result": {},
+    })
+    assert not window.task_panel._task_timings["T001"]["running"]
+    assert not window.task_panel._task_timer.isActive()
+    assert "T001 · 已处理" in item.meta.text()
+    window.close()
 
 
 def test_successful_model_fallback_and_terminal_statuses_are_explicit():
