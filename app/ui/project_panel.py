@@ -102,7 +102,7 @@ class ProjectDialog(QDialog):
 
 
 class ProjectPanel(QWidget):
-    """Persistent navigation: projects at the top, requirements below."""
+    """Persistent navigation: projects at the top, conversations below."""
 
     project_selected = pyqtSignal(dict)
     project_deleted = pyqtSignal(str)
@@ -113,6 +113,7 @@ class ProjectPanel(QWidget):
         super().__init__(parent)
         self._projects: list[dict] = []
         self._jobs: list[dict] = []
+        self._sessions: list[dict] = []
         self.setObjectName("sidebar")
         self._setup_ui()
 
@@ -164,7 +165,7 @@ class ProjectPanel(QWidget):
         layout.addWidget(self.project_list)
 
         jobs_header = QHBoxLayout()
-        jobs_title = QLabel("需求")
+        jobs_title = QLabel("会话")
         jobs_title.setObjectName("sectionLabel")
         jobs_header.addWidget(jobs_title)
         jobs_header.addStretch()
@@ -204,34 +205,71 @@ class ProjectPanel(QWidget):
             self.project_list.setCurrentRow(selected_row if selected_row >= 0 else 0)
 
     def set_jobs(self, jobs: list[dict]):
-        selected = self.current_job_id()
-        self._jobs = jobs
+        """Compatibility adapter: group historical Job rows into sessions."""
+        grouped: dict[str, dict] = {}
+        order: list[str] = []
+        for job in jobs:
+            session_id = str(job.get("execution_session_id") or job.get("job_id") or "")
+            if session_id not in grouped:
+                grouped[session_id] = {
+                    **job,
+                    "session_id": session_id,
+                    "title": job.get("title") or job.get("user_request") or "新会话",
+                    "latest_job_id": job.get("job_id", ""),
+                    "turn_count": 0,
+                }
+                order.append(session_id)
+            grouped[session_id]["turn_count"] += 1
+        self.set_sessions([grouped[key] for key in order])
+
+    def set_sessions(self, sessions: list[dict]):
+        selected_session = self.current_session_id()
+        selected_job = self.current_job_id()
+        self._sessions = list(sessions)
+        self._jobs = list(sessions)
         self.job_list.blockSignals(True)
         self.job_list.clear()
-        self.history_count.setText(str(len(jobs)))
+        self.history_count.setText(str(len(sessions)))
         selected_row = -1
-        for row, job in enumerate(jobs):
-            status = job.get("status", "created")
+        for row, session in enumerate(sessions):
+            status = session.get("status", "created")
             _, status_text = JOB_STATUS.get(status, ("#8f8f98", status))
-            request = job.get("user_request", "").replace("\n", " ").strip()
-            timestamp = self._format_time(job.get("created_at", ""))
-            item = QListWidgetItem(f"{request[:34] or '未命名需求'}\n{status_text}  ·  {timestamp}")
-            item.setData(Qt.ItemDataRole.UserRole, job)
+            title = str(
+                session.get("title") or session.get("goal")
+                or session.get("user_request") or "新会话"
+            ).replace("\n", " ").strip()
+            timestamp = self._format_time(
+                session.get("updated_at") or session.get("created_at", "")
+            )
+            turns = max(1, int(session.get("turn_count") or 1))
+            item = QListWidgetItem(
+                f"{title[:34]}\n{status_text}  ·  {turns} 轮  ·  {timestamp}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, session)
             item.setForeground(QColor("#34312d"))
             item.setSizeHint(QSize(0, 58))
-            item.setToolTip(request)
+            item.setToolTip(
+                f"{title}\n内部会话：{session.get('session_id', '')}\n"
+                f"最新执行记录：{session.get('latest_job_id') or session.get('job_id', '')}"
+            )
             self.job_list.addItem(item)
-            if job.get("job_id") == selected:
+            if (
+                session.get("session_id") == selected_session
+                or session.get("latest_job_id") == selected_job
+            ):
                 selected_row = row
         self.job_list.blockSignals(False)
-        if jobs:
+        if sessions:
             self.job_list.setCurrentRow(selected_row if selected_row >= 0 else 0)
 
     def select_job(self, job_id: str):
         for row in range(self.job_list.count()):
             item = self.job_list.item(row)
             data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if data.get("job_id") == job_id:
+            if job_id in {
+                data.get("job_id"), data.get("latest_job_id"),
+                data.get("session_id"),
+            }:
                 self.job_list.setCurrentRow(row)
                 return
 
@@ -250,7 +288,14 @@ class ProjectPanel(QWidget):
     def current_job_id(self) -> str | None:
         item = self.job_list.currentItem()
         data = item.data(Qt.ItemDataRole.UserRole) if item else {}
-        return (data or {}).get("job_id")
+        return (data or {}).get("latest_job_id") or (data or {}).get("job_id")
+
+    def current_session_id(self) -> str | None:
+        item = self.job_list.currentItem()
+        data = item.data(Qt.ItemDataRole.UserRole) if item else {}
+        return (data or {}).get("session_id") or (data or {}).get(
+            "execution_session_id"
+        )
 
     def current_project_name(self) -> str | None:
         item = self.project_list.currentItem()
@@ -261,14 +306,21 @@ class ProjectPanel(QWidget):
         for row in range(self.job_list.count()):
             item = self.job_list.item(row)
             data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if data.get("job_id") != job_id:
+            if job_id not in {data.get("job_id"), data.get("latest_job_id")}:
                 continue
             data = {**data, "status": status}
             _, status_text = JOB_STATUS.get(status, ("#8f8f98", status))
-            request = data.get("user_request", "").replace("\n", " ").strip()
-            timestamp = self._format_time(data.get("created_at", ""))
+            request = str(
+                data.get("title") or data.get("user_request") or "新会话"
+            ).replace("\n", " ").strip()
+            timestamp = self._format_time(
+                data.get("updated_at") or data.get("created_at", "")
+            )
+            turns = max(1, int(data.get("turn_count") or 1))
             item.setData(Qt.ItemDataRole.UserRole, data)
-            item.setText(f"{request[:34] or '未命名需求'}\n{status_text}  ·  {timestamp}")
+            item.setText(
+                f"{request[:34]}\n{status_text}  ·  {turns} 轮  ·  {timestamp}"
+            )
             item.setForeground(QColor("#34312d"))
             break
 

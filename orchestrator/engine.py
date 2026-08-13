@@ -83,15 +83,17 @@ from .model_router import ModelRouter
 from .cost_engine import BudgetExceededError
 from .project_resolver import ProjectResolver
 from .execution_session import (
-    normalize_session, render_fixed_context, update_checklist,
+    normalize_session, record_substep, record_turn, render_fixed_context,
+    update_checklist,
 )
+from .main_agent import MainAgent
 from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
 from .agent_config import ProjectAgentConfig, load_project_config
 from storage.database import create_session_factory
 from storage.repositories import (
-    ProjectRepository, JobRepository, ConstitutionRepository,
+    ProjectRepository, ExecutionConversationRepository, JobRepository, ConstitutionRepository,
     PlanRepository, TaskRepository, AgentRunRepository,
     ToolCallRepository, TestRunRepository, ReviewRepository
 )
@@ -137,6 +139,7 @@ class Engine:
         )
         self.event_bus.subscribe("job_finished", self._generate_job_report)
         self.state_machine = StateMachine()
+        self.main_agent = MainAgent(self)
         self._default_scheduler = Scheduler(
             max_concurrent=max(1, int(max_concurrent_workers or 1))
         )
@@ -255,6 +258,7 @@ class Engine:
         session = self._session_factory()
         return {
             "project": ProjectRepository(session),
+            "conversation": ExecutionConversationRepository(session),
             "job": JobRepository(session),
             "constitution": ConstitutionRepository(session),
             "plan": PlanRepository(session),
@@ -400,6 +404,20 @@ class Engine:
                         else result_data.get("total_lines") or "read"
                     )[:200],
                 }
+            if tool_name:
+                record_substep(
+                    session,
+                    parent_task_id=task_id,
+                    key=f"tool-{data.get('turn', 0)}-{tool_name}",
+                    title=(
+                        f"{tool_name} · {path}" if path else tool_name
+                    )[:200],
+                    status=str(data.get("status") or "done"),
+                    summary=str(
+                        result_data.get("summary")
+                        or result_data.get("message") or ""
+                    )[:800],
+                )
             if tool_name in {
                 "write_file", "apply_patch", "insert_before", "insert_after",
                 "write_docx", "write_pptx", "write_pdf", "promote_artifact",
@@ -1049,6 +1067,10 @@ class Engine:
                 session_id=job.execution_session_id,
                 goal=(inherited_session.get("goal") or user_request),
             )
+            record_turn(
+                session, job_id=job_id_str, request=user_request,
+                status="created",
+            )
             if source_job:
                 session["decisions"] = list(session.get("decisions") or []) + [{
                     "kind": "follow_up",
@@ -1300,6 +1322,10 @@ class Engine:
 
     async def _resume_attention_pipeline(self, job_id: str,
                                          project_root: str):
+        return await self.main_agent.resume_turn(job_id, project_root)
+
+    async def _resume_attention_pipeline_core(self, job_id: str,
+                                              project_root: str):
         """Continue the same Job from its persisted phase and task worktrees."""
         repos = self._get_repos()
         job = None
@@ -1314,6 +1340,8 @@ class Engine:
                 raise ValueError(
                     f"Job {job_id} has no resumable checkpoint: {job.status}"
                 )
+            self.main_agent.prepare_turn(job, repos, resumed=True)
+            repos["_session"].refresh(job)
 
             self.state_machine.restore(job_id, JobState.WAITING_USER)
             self._cancelled_job_ids.discard(job_id)
@@ -1468,7 +1496,10 @@ class Engine:
             self._close_repos(repos)
 
     async def _run_job_pipeline(self, job_id: str, project_root: str):
-        """Run the full job lifecycle: Governor → Planner → Worker → Test → Reviewer."""
+        return await self.main_agent.run_turn(job_id, project_root)
+
+    async def _run_job_pipeline_core(self, job_id: str, project_root: str):
+        """Run one user turn under the persistent Main Agent."""
         logger.info(f"Running job: {job_id}")
 
         repos = self._get_repos()
@@ -1480,6 +1511,8 @@ class Engine:
             job = repos["job"].get_by_id(job_id)
             if not job:
                 raise ValueError(f"Job not found: {job_id}")
+            self.main_agent.prepare_turn(job, repos)
+            repos["_session"].refresh(job)
 
             # Track current job ID for chat logging
             self.model_router.set_job_id(job_id)
@@ -1585,6 +1618,23 @@ class Engine:
             precheck = self.model_router.risk_engine.precheck_request(
                 job.user_request, proj_root
             )
+            initial_risk_route = self._risk_route(precheck.get("level"))
+            advisor_decision = self.main_agent.decide_advisors(
+                mode=proj_config.mode,
+                risk_route=initial_risk_route,
+                complexity=complexity,
+                has_attachments=bool(getattr(job, "attachments", None)),
+                governor_enabled=proj_config.governor.enabled,
+                planner_enabled=proj_config.planner.enabled,
+                reviewer_enabled=proj_config.reviewer.enabled,
+            )
+            await self.event_bus.publish(
+                "main_agent_routed", job_id=job_id,
+                governor=advisor_decision.governor,
+                planner=advisor_decision.planner,
+                reviewer=advisor_decision.reviewer,
+                summary=advisor_decision.reason,
+            )
 
             profiles = {
                 "governor": proj_config.governor,
@@ -1632,13 +1682,7 @@ class Engine:
                 # Auto mode uses deterministic risk/permission preflight. A
                 # model Governor is reserved for high-risk ambiguity; standard,
                 # strict and custom modes retain their explicit configuration.
-                use_model_governor = (
-                    proj_config.governor.enabled
-                    and (
-                        proj_config.mode != "auto"
-                        or self._risk_route(precheck.get("level")) == "high"
-                    )
-                )
+                use_model_governor = advisor_decision.governor
                 if use_model_governor:
                     risk_assessment = await self._run_governor(
                         job, repos, proj_config, fallback_precheck=precheck
@@ -1687,6 +1731,29 @@ class Engine:
             assessed_risk = self._normalized_risk_level(
                 risk_assessment.get("risk"), precheck["level"]
             )
+            final_advisor_decision = self.main_agent.decide_advisors(
+                mode=proj_config.mode,
+                risk_route=self._risk_route(assessed_risk),
+                complexity=complexity,
+                has_attachments=bool(getattr(job, "attachments", None)),
+                governor_enabled=proj_config.governor.enabled,
+                planner_enabled=proj_config.planner.enabled,
+                reviewer_enabled=proj_config.reviewer.enabled,
+            )
+            advisor_decision = final_advisor_decision
+            self.main_agent.record_advisor_decision(
+                job, repos, final_advisor_decision
+            )
+            repos["_session"].refresh(job)
+            # Workload complexity, not only safety risk, determines whether an
+            # explicit plan is useful. The Main Agent remains the owner either
+            # way; Planner is an optional advisor for non-trivial turns.
+            if (
+                workflow_route == "low"
+                and advisor_decision.planner
+                and risk_assessment.get("source") != "governor"
+            ):
+                workflow_route = "medium"
             job._rockcore_workflow_route = workflow_route
             repos["job"].update_risk_level(job_id, assessed_risk)
             job.risk_level = assessed_risk
@@ -1729,7 +1796,7 @@ class Engine:
                     return
 
                 # ── Phase 2: Planner ──
-                if proj_config.planner.enabled:
+                if advisor_decision.planner:
                     await self._run_planner(job, repos, proj_config)
                     if job.status in {"failed", "needs_attention", "interrupted"}:
                         if worker and saved_turns is not None:
@@ -1766,13 +1833,7 @@ class Engine:
                     return
 
                 # ── Phase 4: Review ──
-                use_model_reviewer = (
-                    proj_config.reviewer.enabled
-                    and (
-                        proj_config.mode == "strict"
-                        or assessed_risk == "high"
-                    )
-                )
+                use_model_reviewer = advisor_decision.reviewer
                 if use_model_reviewer:
                     await self._run_reviewer(
                         job, repos,
@@ -6737,6 +6798,27 @@ Prefer these existing files when relevant:
 
     async def _finalize(self, job, repos):
         """Publish one authoritative terminal status after diagnostic checks."""
+        repos["_session"].refresh(job)
+        tasks = repos["task"].list_by_job(job.id)
+        public_summary = next((
+            str(task.result_summary or "") for task in reversed(tasks)
+            if str(task.result_summary or "").strip()
+        ), "")
+        checkpoint = dict(job.last_checkpoint or {})
+        session = normalize_session(
+            checkpoint.get("execution_session"),
+            session_id=(job.execution_session_id or job.job_id),
+            goal=job.user_request,
+        )
+        record_turn(
+            session, job_id=job.job_id, request=job.user_request,
+            status=job.status, summary=public_summary,
+        )
+        session["conversation_summary"] = (
+            public_summary or session.get("conversation_summary") or ""
+        )[:4000]
+        checkpoint["execution_session"] = session
+        repos["job"].update_checkpoint(job.job_id, checkpoint)
         repos["_session"].refresh(job)
         if job.status == "done" and job.project:
             root = job.project.root_path

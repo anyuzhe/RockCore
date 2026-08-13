@@ -23,6 +23,29 @@ class Project(Base):
                         onupdate=lambda: datetime.now(timezone.utc))
 
     jobs = relationship("Job", back_populates="project", cascade="all, delete-orphan")
+    execution_conversations = relationship(
+        "ExecutionConversation", back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExecutionConversation(Base):
+    """Persistent user-facing conversation spanning one or more Job turns."""
+
+    __tablename__ = "execution_conversations"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(64), nullable=False, unique=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    title = Column(String(255), default="")
+    goal = Column(Text, default="")
+    status = Column(String(32), default="created", index=True)
+    state = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    project = relationship("Project", back_populates="execution_conversations")
 
 
 class Job(Base):

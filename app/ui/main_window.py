@@ -395,12 +395,32 @@ class MainWindow(QMainWindow):
             self.project_panel.select_job(running)
 
     def _on_job_selected(self, data: dict):
-        """Load the full persisted execution workflow for one requirement."""
+        """Load one conversation and the latest turn's live execution trace."""
         if self.engine:
             repos = self._get_repos()
             try:
-                job = repos["job"].get_by_id(data.get("job_id", ""))
+                session_id = str(
+                    data.get("session_id") or data.get("execution_session_id") or ""
+                )
+                selected_job = repos["job"].get_by_id(
+                    str(data.get("latest_job_id") or data.get("job_id") or "")
+                )
+                if not session_id and selected_job:
+                    session_id = str(selected_job.execution_session_id or "")
+                conversation = (
+                    repos["conversation"].get(session_id) if session_id else None
+                )
+                turns = (
+                    repos["job"].list_by_session(session_id)
+                    if session_id else []
+                )
+                latest_job_id = str(
+                    data.get("latest_job_id") or data.get("job_id") or ""
+                )
+                job = turns[-1] if turns else selected_job
                 if job:
+                    if not turns:
+                        turns = [job]
                     tasks = repos["task"].list_by_job(job.id)
                     constitution = repos["constitution"].get_by_job(job.id)
                     plan = repos["plan"].get_by_job(job.id)
@@ -446,6 +466,8 @@ class MainWindow(QMainWindow):
                         "failure_reason": getattr(job, "failure_reason", "") or "",
                         "recovery_hint": getattr(job, "recovery_hint", "") or "",
                         "created_at": as_utc_isoformat(job.created_at),
+                        "turn_number": len(turns),
+                        "turn_total": len(turns),
                         "usage": self._job_usage(job),
                         "report_path": str(
                             self.engine.job_reports.report_path(
@@ -481,6 +503,27 @@ class MainWindow(QMainWindow):
                     self.task_panel.set_workflow(
                         job_dict, constitution_dict, plan_dict, task_dicts, review_dicts
                     )
+                    session_dict = {
+                        "session_id": job.execution_session_id,
+                        "title": (
+                            getattr(conversation, "title", "")
+                            or turns[0].user_request
+                        ),
+                    }
+                    public_turns = []
+                    for turn in turns:
+                        turn_tasks = repos["task"].list_by_job(turn.id)
+                        summary = next((
+                            task.result_summary for task in reversed(turn_tasks)
+                            if task.result_summary
+                        ), "")
+                        public_turns.append({
+                            "job_id": turn.job_id,
+                            "user_request": turn.user_request,
+                            "status": turn.status,
+                            "summary": summary,
+                        })
+                    self.task_panel.set_conversation(session_dict, public_turns)
                     if job.status in {"needs_attention", "interrupted"}:
                         self._followup_source_job_id = None
                         self.followup_source_label.setText(
@@ -1754,30 +1797,21 @@ class MainWindow(QMainWindow):
         self._on_job_selected({"job_id": self._selected_job_id})
 
     def _refresh_job_list(self):
-        """Reload job history for the current project."""
+        """Reload user-facing conversations for the current project."""
         if not self._current_project or not self.engine:
             return
         repos = self._get_repos()
         try:
             project = repos["project"].get_by_name(self._current_project["name"])
             if project:
-                jobs = repos["job"].list_by_project(project.id)
-                job_dicts = [
-                    {
-                        "job_id": j.job_id,
-                        "user_request": j.user_request,
-                        "status": j.status,
-                        "source_job_id": j.source_job_id,
-                        "execution_session_id": j.execution_session_id,
-                        "failure_code": getattr(j, "failure_code", "") or "",
-                        "failure_reason": getattr(j, "failure_reason", "") or "",
-                        "recovery_hint": getattr(j, "recovery_hint", "") or "",
-                        "risk_level": j.risk_level,
-                        "created_at": as_utc_isoformat(j.created_at),
-                    }
-                    for j in jobs
-                ]
-                self.project_panel.set_jobs(job_dicts)
+                conversations = repos["conversation"].list_by_project(project.id)
+                session_dicts = []
+                for conversation in conversations:
+                    item = repos["conversation"].aggregate(conversation)
+                    item["created_at"] = as_utc_isoformat(item["created_at"])
+                    item["updated_at"] = as_utc_isoformat(item["updated_at"])
+                    session_dicts.append(item)
+                self.project_panel.set_sessions(session_dicts)
         finally:
             self._close_repos(repos)
 
@@ -1856,12 +1890,13 @@ class MainWindow(QMainWindow):
         from storage.database import create_session_factory
         session = create_session_factory(self.engine._engine)()
         from storage.repositories import (
-            ProjectRepository, JobRepository, TaskRepository,
+            ProjectRepository, ExecutionConversationRepository, JobRepository, TaskRepository,
             ConstitutionRepository, PlanRepository, ReviewRepository,
             TestRunRepository, AgentRunRepository,
         )
         return {
             "project": ProjectRepository(session),
+            "conversation": ExecutionConversationRepository(session),
             "job": JobRepository(session),
             "task": TaskRepository(session),
             "constitution": ConstitutionRepository(session),

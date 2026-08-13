@@ -25,6 +25,14 @@ from app.ui.status_constants import ACTIVE_STATUSES, STATUS_STYLE
 from app.ui.time_utils import format_local_timestamp
 
 
+CONVERSATION_STATUS_TEXT = {
+    "done": "已完成", "failed": "未完成", "cancelled": "已停止",
+    "interrupted": "待继续", "needs_attention": "需要处理",
+    "rolled_back": "已回退", "created": "等待中", "governing": "分析中",
+    "planning": "规划中", "executing": "执行中", "reviewing": "验证中",
+}
+
+
 class StatusIndicator(QWidget):
     """Static status glyph that becomes a rotating ring while work is active."""
 
@@ -367,11 +375,11 @@ class TaskPanel(QWidget):
     report_requested = pyqtSignal(dict)
 
     STAGES = (
-        ("user", "已接收需求", "用户输入"),
-        ("governor", "裁决者", "目标、风险与边界"),
-        ("planner", "策划者", "步骤与验收条件"),
-        ("worker", "执行者", "读取分析 / 文件修改与验证"),
-        ("reviewer", "审核者", "结果检查"),
+        ("user", "理解需求", "目标与当前轮输入"),
+        ("governor", "安全与范围", "按需咨询裁决能力"),
+        ("planner", "执行计划", "动态步骤与验收条件"),
+        ("worker", "工作过程", "读取、修改与即时验证"),
+        ("reviewer", "验证结果", "确定性检查与按需审核"),
     )
 
     def __init__(self, parent=None):
@@ -467,6 +475,24 @@ class TaskPanel(QWidget):
         empty_layout.addWidget(self.empty_subtitle)
         empty_layout.addStretch(2)
         self.feed_layout.addWidget(self.empty_state, 1)
+
+        self.conversation_history = QFrame()
+        self.conversation_history.setObjectName("conversationHistory")
+        history_layout = QVBoxLayout(self.conversation_history)
+        history_layout.setContentsMargins(0, 0, 0, 6)
+        history_layout.setSpacing(6)
+        history_title = QLabel("此前对话")
+        history_title.setObjectName("traceLabel")
+        self.conversation_history_text = QLabel("")
+        self.conversation_history_text.setObjectName("assistantSummary")
+        self.conversation_history_text.setWordWrap(True)
+        self.conversation_history_text.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        history_layout.addWidget(history_title)
+        history_layout.addWidget(self.conversation_history_text)
+        self.conversation_history.hide()
+        self.feed_layout.addWidget(self.conversation_history)
 
         self.user_frame = QFrame()
         self.user_frame.setObjectName("userMessage")
@@ -972,10 +998,14 @@ class TaskPanel(QWidget):
         # summarized in the sidebar. Repeating it as a header wastes horizontal
         # space needed by usage and status information.
         self.workflow_title.hide()
-        meta = f"{job.get('job_id', '')}  ·  {self._format_time(job.get('created_at', ''))}"
-        if source:
-            meta += f"  ·  承接 {source}"
+        turn_number = max(1, int(job.get("turn_number") or 1))
+        turn_total = max(turn_number, int(job.get("turn_total") or turn_number))
+        meta = f"第 {turn_number}/{turn_total} 轮  ·  {self._format_time(job.get('created_at', ''))}"
         self.job_meta_label.setText(meta)
+        self.job_meta_label.setToolTip(
+            f"内部执行记录：{job.get('job_id', '')}\n"
+            f"会话：{job.get('execution_session_id', '')}"
+        )
         self._set_header_status(status)
         self._set_terminal_actions(status, job)
         self.set_report_state(
@@ -988,7 +1018,7 @@ class TaskPanel(QWidget):
         )
         self.user_output.setText(request)
         self._set_user_attachments(job.get("attachments") or [])
-        self.user_source_label.setText(f"继续自 {source}" if source else "")
+        self.user_source_label.setText("承接上一轮" if source else "")
         self.user_source_label.setVisible(bool(source))
         self.stages["user"].set_status("success")
         self.stages["user"].set_output("需求已进入工作流", expand=False)
@@ -1110,6 +1140,26 @@ class TaskPanel(QWidget):
         else:
             QTimer.singleShot(0, self._scroll_to_top)
 
+    def set_conversation(self, session: dict, turns: list[dict]):
+        """Show prior public turns while the latest turn remains fully live."""
+        previous = list(turns or [])[:-1]
+        lines = []
+        for index, turn in enumerate(previous, 1):
+            request = " ".join(str(turn.get("user_request") or "").split())
+            summary = " ".join(str(turn.get("summary") or "").split())
+            status = CONVERSATION_STATUS_TEXT.get(
+                str(turn.get("status") or "created"), "处理中"
+            )
+            lines.append(f"你 · 第 {index} 轮\n{request}")
+            lines.append(
+                f"RockCore · {status}\n{summary or '执行记录和结果已保留'}"
+            )
+        self.conversation_history_text.setText("\n\n".join(lines))
+        self.conversation_history.setVisible(bool(lines))
+        title = str(session.get("title") or "当前会话")
+        self.workflow_title.setText(title)
+        self.workflow_title.show()
+
     def clear_workflow(self):
         self._current_job = None
         self._tasks = []
@@ -1123,6 +1173,7 @@ class TaskPanel(QWidget):
         self._progress_sequence = 0
         self.worker_activity.clear()
         self.worker_progress_wrap.hide()
+        self.conversation_history.hide()
         self._clear_repair_stages()
         self._set_usage(self._empty_usage())
         self.workflow_title.setText("新需求")
@@ -1734,9 +1785,12 @@ class TaskPanel(QWidget):
             overall = "pending"
         stage.set_status(overall)
         lines = []
-        for task in base_tasks:
+        for index, task in enumerate(base_tasks, 1):
             style = STATUS_STYLE.get(task.get("status", "pending"), STATUS_STYLE["pending"])
-            lines.append(f"{style['icon']} {task.get('task_id', '?')} · {task.get('title', '')} · {style['text']}")
+            lines.append(
+                f"{style['icon']} 步骤 {index} · {task.get('title', '')} · "
+                f"{style['text']}"
+            )
             description = task.get("description", "").strip()
             if description and description != task.get("title", ""):
                 lines.append(f"    {description[:300]}")
@@ -1770,14 +1824,18 @@ class TaskPanel(QWidget):
             "\n".join(lines),
             expand=overall in {"running", "failed", "needs_attention", "interrupted"},
         )
+        stage.setToolTip("\n".join(
+            f"步骤 {index}：{task.get('task_id', '?')}"
+            for index, task in enumerate(base_tasks, 1)
+        ))
 
     def _populate_test_details(self):
         lines = []
-        for task in self._tasks:
+        for index, task in enumerate(self._tasks, 1):
             for result in task.get("test_results") or []:
                 style = STATUS_STYLE.get(result.get("status", "pending"), STATUS_STYLE["pending"])
                 lines.append(
-                    f"{style['icon']} {task.get('task_id', '?')} · "
+                    f"{style['icon']} 步骤 {index} · "
                     f"{result.get('command', '') or '本地检查'} · {style['text']}"
                 )
                 output = (result.get("output") or "").strip()

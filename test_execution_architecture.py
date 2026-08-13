@@ -9,9 +9,11 @@ from memory.instruction_resolver import InstructionResolver
 from orchestrator.engine import Engine
 from orchestrator.execution_session import (
     new_session,
+    record_substep,
     render_fixed_context,
     update_checklist,
 )
+from orchestrator.main_agent import MainAgent
 
 
 def test_layered_instructions_use_override_and_specificity(tmp_path):
@@ -119,10 +121,42 @@ def test_followup_job_inherits_execution_session(tmp_path):
             assert followup.execution_session_id == root.execution_session_id
             decisions = followup.last_checkpoint["execution_session"]["decisions"]
             assert decisions[-1]["kind"] == "follow_up"
+            conversations = repos["conversation"].list_by_project(project.id)
+            assert len(conversations) == 1
+            assert len(repos["conversation"].list_turns(
+                root.execution_session_id
+            )) == 2
         finally:
             repos["_session"].close()
 
     asyncio.run(scenario())
+
+
+def test_main_agent_uses_specialists_only_when_the_turn_needs_them():
+    direct = MainAgent.decide_advisors(
+        mode="auto", risk_route="low", complexity="simple",
+        has_attachments=False, governor_enabled=True,
+        planner_enabled=True, reviewer_enabled=True,
+    )
+    complex_turn = MainAgent.decide_advisors(
+        mode="auto", risk_route="high", complexity="complex",
+        has_attachments=False, governor_enabled=True,
+        planner_enabled=True, reviewer_enabled=True,
+    )
+
+    assert not direct.governor and not direct.planner and not direct.reviewer
+    assert complex_turn.governor and complex_turn.planner and complex_turn.reviewer
+
+
+def test_temporary_substeps_are_part_of_fixed_context_not_database_tasks():
+    session = new_session("SESSION-1", "修复页面")
+    record_substep(
+        session, parent_task_id="T001", key="inspect-listeners",
+        title="检查重复监听器", status="done", summary="没有重复绑定",
+    )
+
+    assert session["substeps"][0]["id"] == "T001:inspect-listeners"
+    assert "检查重复监听器" in render_fixed_context(session)
 
 
 def test_parallelization_requires_disjoint_concrete_nonruntime_paths():

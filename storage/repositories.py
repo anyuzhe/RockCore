@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .models import (
-    Project, Job, Constitution, Plan, Task, AgentRun,
+    Project, ExecutionConversation, Job, Constitution, Plan, Task, AgentRun,
     ToolCall, TestRun, Review, GitSnapshot
 )
 
@@ -42,6 +42,91 @@ class ProjectRepository:
         return False
 
 
+class ExecutionConversationRepository:
+    """Data access for stable conversations; Jobs are their individual turns."""
+
+    TERMINAL_STATES = {
+        "done", "failed", "cancelled", "interrupted", "needs_attention",
+        "rolled_back",
+    }
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    @staticmethod
+    def _title(value: str) -> str:
+        return " ".join(str(value or "").split())[:80] or "新会话"
+
+    def create(self, session_id: str, project_id: int, goal: str,
+               *, title: str = "", status: str = "created",
+               state: dict | None = None) -> ExecutionConversation:
+        existing = self.get(session_id)
+        if existing:
+            return existing
+        conversation = ExecutionConversation(
+            session_id=session_id,
+            project_id=project_id,
+            title=self._title(title or goal),
+            goal=str(goal or ""),
+            status=status,
+            state=dict(state or {}),
+        )
+        self.session.add(conversation)
+        self.session.commit()
+        return conversation
+
+    def get(self, session_id: str) -> Optional[ExecutionConversation]:
+        return self.session.query(ExecutionConversation).filter(
+            ExecutionConversation.session_id == session_id
+        ).first()
+
+    def list_by_project(self, project_id: int) -> list[ExecutionConversation]:
+        return self.session.query(ExecutionConversation).filter(
+            ExecutionConversation.project_id == project_id
+        ).order_by(ExecutionConversation.updated_at.desc()).all()
+
+    def list_turns(self, session_id: str) -> list[Job]:
+        return self.session.query(Job).filter(
+            Job.execution_session_id == session_id
+        ).order_by(Job.created_at.asc(), Job.id.asc()).all()
+
+    def sync_turn(self, job: Job, state: dict | None = None) -> ExecutionConversation:
+        conversation = self.get(job.execution_session_id)
+        if not conversation:
+            conversation = ExecutionConversation(
+                session_id=job.execution_session_id,
+                project_id=job.project_id,
+                title=self._title(job.user_request),
+                goal=job.user_request,
+                created_at=job.created_at,
+            )
+            self.session.add(conversation)
+        conversation.status = job.status
+        conversation.state = dict(state or conversation.state or {})
+        conversation.updated_at = datetime.now(timezone.utc)
+        self.session.commit()
+        return conversation
+
+    def aggregate(self, conversation: ExecutionConversation) -> dict:
+        turns = self.list_turns(conversation.session_id)
+        latest = turns[-1] if turns else None
+        status = latest.status if latest else conversation.status
+        return {
+            "session_id": conversation.session_id,
+            "title": conversation.title or self._title(conversation.goal),
+            "goal": conversation.goal,
+            "status": status,
+            "turn_count": len(turns),
+            "latest_job_id": latest.job_id if latest else "",
+            # Compatibility with existing selection and event code.
+            "job_id": latest.job_id if latest else "",
+            "user_request": latest.user_request if latest else conversation.goal,
+            "created_at": conversation.created_at,
+            "updated_at": latest.updated_at if latest else conversation.updated_at,
+            "state": dict(conversation.state or {}),
+        }
+
+
 class JobRepository:
     def __init__(self, session: Session):
         self.session = session
@@ -58,6 +143,7 @@ class JobRepository:
                   attachments=list(attachments or []))
         self.session.add(job)
         self.session.commit()
+        ExecutionConversationRepository(self.session).sync_turn(job)
         return job
 
     def get_by_id(self, job_id: str) -> Optional[Job]:
@@ -79,6 +165,11 @@ class JobRepository:
             Job.project_id == project_id
         ).order_by(Job.created_at.desc()).first()
 
+    def list_by_session(self, execution_session_id: str) -> list[Job]:
+        return self.session.query(Job).filter(
+            Job.execution_session_id == execution_session_id
+        ).order_by(Job.created_at.asc(), Job.id.asc()).all()
+
     def update_status(self, job_id: str, status: str) -> Optional[Job]:
         job = self.get_by_id(job_id)
         if job:
@@ -92,6 +183,9 @@ class JobRepository:
             else:
                 job.completed_at = None
             self.session.commit()
+            ExecutionConversationRepository(self.session).sync_turn(
+                job, dict(job.last_checkpoint or {}).get("execution_session")
+            )
         return job
 
     def update_risk_level(self, job_id: str, risk_level: str) -> Optional[Job]:
@@ -128,6 +222,9 @@ class JobRepository:
             job.last_checkpoint = dict(checkpoint or {})
             job.updated_at = datetime.now(timezone.utc)
             self.session.commit()
+            ExecutionConversationRepository(self.session).sync_turn(
+                job, dict(checkpoint or {}).get("execution_session")
+            )
         return job
 
     def add_usage(self, job_id: str, input_tokens: int = 0,

@@ -185,7 +185,8 @@ def test_job_detail_header_does_not_repeat_the_submitted_request():
     })
 
     assert panel.workflow_title.isHidden()
-    assert "JOB-NO-DUPLICATE-TITLE" in panel.job_meta_label.text()
+    assert "第 1/1 轮" in panel.job_meta_label.text()
+    assert "JOB-NO-DUPLICATE-TITLE" in panel.job_meta_label.toolTip()
     assert "这段需求" in panel.user_output.text()
 
     panel.begin_new_request("Demo", "/tmp/demo")
@@ -435,7 +436,7 @@ def test_review_repairs_are_appended_in_conversation_order():
         for index in range(panel.trace_layout.count())
     ]
     assert [stage.title_label.text() for stage in stages] == [
-        "已接收需求", "裁决者", "策划者", "执行者", "审核者",
+        "理解需求", "安全与范围", "执行计划", "工作过程", "验证结果",
         "策划者", "执行者", "审核者",
         "策划者", "执行者", "审核者",
     ]
@@ -1000,4 +1001,73 @@ def test_sidebar_uses_rock_innovation_branding():
     assert any(label.text() == "岩创科技" for label in labels)
     mark = next(label for label in labels if label.text() == "")
     assert not mark.pixmap().isNull()
+    panel.close()
+
+
+def test_sidebar_groups_followup_jobs_as_one_conversation():
+    _app()
+    panel = ProjectPanel()
+    panel.set_jobs([
+        {
+            "job_id": "JOB-2", "execution_session_id": "SESSION-1",
+            "user_request": "缩小标题", "status": "done",
+            "created_at": "2026-08-13T02:00:00Z",
+        },
+        {
+            "job_id": "JOB-1", "execution_session_id": "SESSION-1",
+            "user_request": "创建页面", "status": "done",
+            "created_at": "2026-08-13T01:00:00Z",
+        },
+    ])
+
+    assert panel.job_list.count() == 1
+    assert "2 轮" in panel.job_list.item(0).text()
+    assert "JOB-" not in panel.job_list.item(0).text()
+    assert "JOB-2" in panel.job_list.item(0).toolTip()
+    panel.close()
+
+
+def test_conversation_panel_shows_previous_turns_and_hides_internal_ids():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-2", "execution_session_id": "SESSION-1",
+        "user_request": "缩小标题", "status": "done",
+        "turn_number": 2, "turn_total": 2,
+        "created_at": "2026-08-13T02:00:00Z",
+    })
+    panel.set_conversation(
+        {"session_id": "SESSION-1", "title": "创建页面"},
+        [
+            {"user_request": "创建页面", "status": "done", "summary": "已创建"},
+            {"user_request": "缩小标题", "status": "done", "summary": "已调整"},
+        ],
+    )
+
+    assert not panel.conversation_history.isHidden()
+    assert "创建页面" in panel.conversation_history_text.text()
+    assert "JOB-2" not in panel.job_meta_label.text()
+    assert "JOB-2" in panel.job_meta_label.toolTip()
+    assert panel.workflow_title.text() == "创建页面"
+    panel.close()
+
+
+def test_primary_worker_steps_hide_internal_task_ids():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow(
+        {
+            "job_id": "JOB-1", "user_request": "修改页面",
+            "status": "executing", "created_at": "2026-08-13T02:00:00Z",
+        },
+        tasks=[{
+            "task_id": "T001", "title": "调整标题",
+            "task_type": "coding", "status": "running",
+        }],
+    )
+
+    output = panel.stages["worker"].output.toPlainText()
+    assert "步骤 1" in output
+    assert "T001" not in output
+    assert "T001" in panel.stages["worker"].toolTip()
     panel.close()

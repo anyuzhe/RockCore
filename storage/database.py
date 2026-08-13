@@ -121,6 +121,39 @@ def _migrate_schema(engine):
                     f"{job_failure_columns[name]}"
                 )
 
+    # Backfill only after last_checkpoint has been added to old databases.
+    # Some supported legacy fixtures predate even status/timestamp columns, so
+    # every optional source expression is selected from the inspected schema.
+    migrated_job_columns = {
+        column["name"] for column in inspect(engine).get_columns("jobs")
+    }
+    status_expr = "j.status" if "status" in migrated_job_columns else "'created'"
+    state_expr = (
+        "COALESCE(j.last_checkpoint, '{}')"
+        if "last_checkpoint" in migrated_job_columns else "'{}'"
+    )
+    created_expr = (
+        "j.created_at" if "created_at" in migrated_job_columns
+        else "CURRENT_TIMESTAMP"
+    )
+    updated_expr = (
+        "j.updated_at" if "updated_at" in migrated_job_columns
+        else created_expr
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT OR IGNORE INTO execution_conversations "
+            "(session_id, project_id, title, goal, status, state, created_at, updated_at) "
+            "SELECT j.execution_session_id, j.project_id, "
+            "substr(replace(j.user_request, char(10), ' '), 1, 255), "
+            f"j.user_request, {status_expr}, {state_expr}, "
+            f"{created_expr}, {updated_expr} FROM jobs j "
+            "INNER JOIN ("
+            "  SELECT execution_session_id, MIN(id) AS first_id "
+            "  FROM jobs GROUP BY execution_session_id"
+            ") first_turn ON first_turn.first_id = j.id"
+        )
+
     agent_run_columns = {
         column["name"]
         for column in inspect(engine).get_columns("agent_runs")
