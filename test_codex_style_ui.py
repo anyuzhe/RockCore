@@ -767,7 +767,7 @@ def test_worker_model_progress_is_readable_activity_not_task_dump():
     panel.close()
 
 
-def test_historical_worker_tools_restore_as_activity_timeline():
+def test_historical_worker_tools_are_hidden_after_job_finishes():
     _app()
     panel = TaskPanel()
     panel.set_workflow({
@@ -785,10 +785,8 @@ def test_historical_worker_tools_restore_as_activity_timeline():
         }],
     }])
 
-    assert panel.worker_activity.has_items
-    item = next(iter(panel.worker_activity._items.values()))
-    assert item.summary.text() == "已编辑 index.html"
-    assert "18ms" in item.meta.text()
+    assert not panel.worker_activity.has_items
+    assert panel.worker_activity.isHidden()
     panel.close()
 
 
@@ -914,13 +912,59 @@ def test_each_task_uses_its_own_elapsed_time():
         "completed_at": "2026-08-13T10:09:05Z",
     }])
 
-    assert "已处理 2分钟 21秒" in panel.worker_activity.item(
-        "T001-task"
-    ).meta.text()
-    assert "已处理 5分钟 5秒" in panel.worker_activity.item(
-        "T002-task"
-    ).meta.text()
+    assert not panel.worker_activity.has_items
+    assert panel.worker_activity.isHidden()
     assert not panel._task_timer.isActive()
+    panel.close()
+
+
+def test_worker_activity_shows_only_four_recent_and_one_current_action():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-COMPACT-ACTIVITY", "user_request": "修改页面",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "修改", "status": "running"}])
+
+    for index in range(6):
+        panel.add_worker_activity(
+            "T001", activity_id=f"done-{index}", event_kind="tool_completed",
+            tool="write_file", path=f"file-{index}.txt", status="success",
+        )
+    panel.add_worker_activity(
+        "T001", activity_id="current", event_kind="tool_started",
+        tool="run_command", path="pytest -q", status="started",
+    )
+
+    visible = [
+        activity_id for activity_id, item in panel.worker_activity._items.items()
+        if not item.isHidden()
+    ]
+    assert visible == [
+        "done-2", "done-3", "done-4", "done-5",
+        "T001-verification-0-0",
+    ]
+    panel.close()
+
+
+def test_terminal_status_clears_live_worker_activity():
+    _app()
+    panel = TaskPanel()
+    panel.set_workflow({
+        "job_id": "JOB-HIDE-ACTIVITY", "user_request": "修改页面",
+        "status": "executing", "created_at": "2026-08-13T10:00:00Z",
+    }, tasks=[{"task_id": "T001", "title": "修改", "status": "running"}])
+    panel.add_worker_activity(
+        "T001", activity_id="current", event_kind="tool_started",
+        tool="write_file", path="index.html", status="started",
+    )
+    assert panel.worker_activity.has_items
+    assert not panel.worker_activity.isHidden()
+
+    panel.update_job_status("JOB-HIDE-ACTIVITY", "done")
+
+    assert not panel.worker_activity.has_items
+    assert panel.worker_activity.isHidden()
     panel.close()
 
 

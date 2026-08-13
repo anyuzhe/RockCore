@@ -1376,11 +1376,13 @@ class MainWindow(QMainWindow):
                 "planner", "rejected", "计划未通过约束检查", {"errors": data.get("errors", [])}
             )
         elif event_type == "job_executing" and is_selected:
+            self.task_panel.worker_activity.set_live(True)
             self.task_panel.update_stage(
                 "worker", "running", "正在准备执行步骤",
                 repair_round=repair_round,
             )
         elif event_type == "task_running" and is_selected:
+            self.task_panel.worker_activity.set_live(True)
             if not self.task_panel.has_task(data.get("task_id", "")):
                 self._reload_selected_workflow()
             self.bridge.task_update.emit(data.get("task_id", ""), "running")
@@ -1726,6 +1728,7 @@ class MainWindow(QMainWindow):
             )
         elif event_type == "job_reviewing" and is_selected:
             self.task_panel.clear_worker_progress()
+            self.task_panel.worker_activity.set_live(False)
             self._reload_selected_workflow()
             self.task_panel.update_stage(
                 "reviewer", "running", "正在审核执行结果",

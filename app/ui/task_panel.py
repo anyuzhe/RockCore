@@ -32,6 +32,11 @@ CONVERSATION_STATUS_TEXT = {
     "planning": "规划中", "executing": "执行中", "reviewing": "验证中",
 }
 
+TERMINAL_JOB_STATUSES = {
+    "done", "failed", "cancelled", "interrupted", "needs_attention",
+    "rolled_back",
+}
+
 
 class StatusIndicator(QWidget):
     """Static status glyph that becomes a rotating ring while work is active."""
@@ -259,6 +264,7 @@ class ExecutionActivityItem(QFrame):
     def __init__(self, activity_id: str, parent=None):
         super().__init__(parent)
         self.activity_id = activity_id
+        self.activity_status = "pending"
         self.setObjectName("executionActivityItem")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 5, 0, 5)
@@ -308,6 +314,7 @@ class ExecutionActivityItem(QFrame):
             "started": "running", "running": "running",
             "error": "failed", "rejected": "failed",
         }.get(status, status or "pending")
+        self.activity_status = style_status
         is_narrative = variant == "narrative"
         self.indicator.setVisible(not is_narrative)
         if not is_narrative:
@@ -342,11 +349,14 @@ class ExecutionActivityItem(QFrame):
 class ExecutionActivityTimeline(QWidget):
     """Codex-style live activity feed for Worker actions."""
 
+    MAX_RECENT_COMPLETED = 4
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("executionActivityTimeline")
         self._items: dict[str, ExecutionActivityItem] = {}
         self._sequence = 0
+        self._live = False
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
@@ -362,6 +372,30 @@ class ExecutionActivityTimeline(QWidget):
                 widget.deleteLater()
         self.hide()
 
+    def set_live(self, live: bool):
+        """Show activities only while the Worker execution phase is live."""
+        self._live = bool(live)
+        self._refresh_visible_items()
+
+    def _refresh_visible_items(self):
+        """Keep four recent results plus the single current action visible."""
+        ordered = list(self._items.items())
+        running_ids = [
+            activity_id for activity_id, item in ordered
+            if item.activity_status == "running"
+        ]
+        current_id = running_ids[-1] if running_ids else ""
+        completed_ids = [
+            activity_id for activity_id, item in ordered
+            if activity_id != current_id and item.activity_status != "running"
+        ][-self.MAX_RECENT_COMPLETED:]
+        visible_ids = set(completed_ids)
+        if current_id:
+            visible_ids.add(current_id)
+        for activity_id, item in ordered:
+            item.setVisible(self._live and activity_id in visible_ids)
+        self.setVisible(bool(self._live and visible_ids))
+
     def add_or_update(self, activity_id: str = "", **activity):
         if not activity_id:
             self._sequence += 1
@@ -372,7 +406,7 @@ class ExecutionActivityTimeline(QWidget):
             self._items[activity_id] = item
             self.layout.addWidget(item)
         item.update_activity(**activity)
-        self.show()
+        self._refresh_visible_items()
         return item
 
     def item(self, activity_id: str) -> ExecutionActivityItem | None:
@@ -1022,6 +1056,11 @@ class TaskPanel(QWidget):
             stage.reset()
 
         status = job.get("status", "created")
+        worker_live = status == "executing"
+        self.worker_activity.set_live(worker_live)
+        if status in TERMINAL_JOB_STATUSES:
+            self.worker_activity.clear()
+            self.worker_progress_wrap.hide()
         source = job.get("source_job_id")
         request = job.get("user_request", "")
         # The complete requirement is already shown in the conversation and
@@ -1144,16 +1183,20 @@ class TaskPanel(QWidget):
         self._refresh_worker_stage()
         self._refresh_worker_progress()
         self._populate_test_details()
-        historical_activities = [
-            activity
-            for task in self._tasks
-            for activity in (task.get("worker_activities") or [])
-        ]
-        historical_activities.sort(
-            key=lambda item: str(item.get("created_at") or "")
-        )
-        if historical_activities and (not same_job or not self.worker_activity.has_items):
-            self.load_worker_activities(historical_activities)
+        if worker_live:
+            historical_activities = [
+                activity
+                for task in self._tasks
+                for activity in (task.get("worker_activities") or [])
+            ]
+            historical_activities.sort(
+                key=lambda item: str(item.get("created_at") or "")
+            )
+            if (
+                historical_activities
+                and (not same_job or not self.worker_activity.has_items)
+            ):
+                self.load_worker_activities(historical_activities)
         if not same_job:
             self.restore_task_timings(self._tasks)
 
@@ -1601,6 +1644,10 @@ class TaskPanel(QWidget):
                 result=activity.get("result") or {},
                 duration_ms=int(activity.get("duration_ms", 0) or 0),
             )
+        self.worker_activity.set_live(
+            bool(self._current_job)
+            and self._current_job.get("status") == "executing"
+        )
 
     def add_validation_activity(
         self, task_id: str, *, event_kind: str, command: str = "",
@@ -1930,20 +1977,14 @@ class TaskPanel(QWidget):
                 "running": running,
             }
             status = str(task.get("status") or "pending")
-            self.worker_activity.add_or_update(
-                f"{task_id}-task",
-                status=(
-                    "started" if running else "success"
-                    if status == "done" else status
-                ),
-                summary=(
-                    f"正在执行 {task.get('title', '当前步骤')}"
-                    if running else f"步骤已完成 · {task.get('title', '')}"
-                    if status == "done" else f"步骤状态 · {task.get('title', '')}"
-                ),
-                meta=task_id,
-                details="",
-            )
+            if running:
+                self.worker_activity.add_or_update(
+                    f"{task_id}-task",
+                    status="started",
+                    summary=f"正在执行 {task.get('title', '当前步骤')}",
+                    meta=task_id,
+                    details="",
+                )
         if any(item.get("running") for item in self._task_timings.values()):
             self._task_timer.start()
         else:
@@ -1957,10 +1998,10 @@ class TaskPanel(QWidget):
         self._current_job["status"] = status
         self._set_header_status(status)
         self._set_terminal_actions(status, self._current_job)
-        if status in {
-            "done", "failed", "cancelled", "interrupted", "needs_attention",
-            "rolled_back",
-        }:
+        self.worker_activity.set_live(status == "executing")
+        if status in TERMINAL_JOB_STATUSES:
+            self.worker_activity.clear()
+            self.worker_progress_wrap.hide()
             self.set_report_state(
                 path=str(self._current_job.get("report_path") or ""),
                 available=True,
