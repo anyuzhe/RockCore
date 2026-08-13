@@ -12,9 +12,11 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QLabel, QTextEdit, QMessageBox, QFrame, QFileDialog,
     QScrollArea,
+    QApplication,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QObject, QByteArray, QBuffer, QIODevice, QUrl,
+    QProcess,
 )
 from PyQt6.QtGui import (
     QAction, QDesktopServices, QFont, QKeySequence, QShortcut, QImage,
@@ -35,6 +37,7 @@ from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 from app.subprocess_utils import run_process
 from app.text_utils import strip_runtime_task_context
+from app.updater import UpdateError, UpdateInfo, UpdateManager, current_version
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,8 @@ class MainWindow(QMainWindow):
         self._attachments: list[dict] = []
         self._queued_attachments: list[dict] = []
         self._config = load_config()
+        self.update_manager = UpdateManager()
+        self._update_check_running = False
         self._setup_ui()
         self._connect_signals()
         self._setup_menu()
@@ -105,6 +110,7 @@ class MainWindow(QMainWindow):
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._poll_events)
         self._poll_timer.start(200)
+        QTimer.singleShot(4000, self._check_updates_on_startup)
 
     @staticmethod
     def _project_key(project: dict | None) -> str:
@@ -334,6 +340,12 @@ class MainWindow(QMainWindow):
             view_menu.addAction(action)
 
         help_menu = menubar.addMenu("帮助")
+        update_action = QAction("检查更新...", self)
+        update_action.triggered.connect(
+            lambda: asyncio.ensure_future(self._check_for_updates(manual=True))
+        )
+        help_menu.addAction(update_action)
+        help_menu.addSeparator()
         about_action = QAction("关于", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -2052,8 +2064,138 @@ class MainWindow(QMainWindow):
             f"{FULL_PRODUCT_NAME}\n\n"
             f"{PRODUCT_LINE}\n"
             f"{LEGAL_COMPANY_NAME}\n\n"
+            f"版本：{current_version()}\n\n"
             "Codex SDK（裁决/审核）→ Kimi（策划）→ DeepSeek V4（执行）"
         )
+
+    def _check_updates_on_startup(self):
+        if not self.update_manager.can_install:
+            return
+        if not bool(self._config.get("updates", {}).get("auto_check", True)):
+            return
+        asyncio.ensure_future(self._check_for_updates(manual=False))
+
+    async def _check_for_updates(self, *, manual: bool = False):
+        """Check in the background and offer a verified installer."""
+        if self._update_check_running:
+            if manual:
+                QMessageBox.information(self, "检查更新", "正在检查更新，请稍候。")
+            return
+        self._update_check_running = True
+        self.statusBar().showMessage("正在检查 RockCore 更新…")
+        try:
+            update = await asyncio.to_thread(self.update_manager.check)
+        except UpdateError as error:
+            logger.info("Update check unavailable: %s", error)
+            if manual:
+                QMessageBox.warning(self, "检查更新失败", str(error))
+            return
+        finally:
+            self._update_check_running = False
+            self.statusBar().clearMessage()
+
+        if update is None:
+            if manual:
+                QMessageBox.information(
+                    self, "检查更新",
+                    f"当前已是最新版本：{current_version()}",
+                )
+            return
+        self._offer_update(update)
+
+    def _offer_update(self, update: UpdateInfo):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("发现 RockCore 新版本")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText(
+            f"发现新版本 {update.version}\n"
+            f"当前版本：{update.current_version}"
+        )
+        if self._running_jobs:
+            dialog.setInformativeText(
+                "当前仍有任务运行。为避免中断任务，请在任务结束后从“帮助 → "
+                "检查更新”重新开始更新。"
+            )
+            dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        elif self.update_manager.can_install:
+            dialog.setInformativeText(
+                "点击“立即更新”后将下载安装包并校验 SHA-256。校验通过后 "
+                "RockCore 会退出，由安装程序完成升级。项目和用户配置不会被删除。"
+            )
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            dialog.button(QMessageBox.StandardButton.Yes).setText("立即更新")
+            dialog.button(QMessageBox.StandardButton.No).setText("稍后")
+        else:
+            dialog.setInformativeText(
+                "自动安装仅适用于 Windows 安装版。可以打开发布页面下载安装包。"
+            )
+            dialog.setStandardButtons(
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel
+            )
+        dialog.setDetailedText(update.notes or "本版本未提供更新说明。")
+        result = dialog.exec()
+        if result == QMessageBox.StandardButton.Yes:
+            asyncio.ensure_future(self._download_and_install_update(update))
+        elif result == QMessageBox.StandardButton.Open:
+            QDesktopServices.openUrl(QUrl(update.release_url))
+
+    async def _download_and_install_update(self, update: UpdateInfo):
+        if self._running_jobs:
+            QMessageBox.warning(
+                self, "暂不能更新", "仍有任务运行，请在任务结束后再更新。"
+            )
+            return
+        self.statusBar().showMessage(
+            f"正在下载并校验 RockCore {update.version}…"
+        )
+        try:
+            installer = await asyncio.to_thread(
+                self.update_manager.download_and_verify, update
+            )
+            verified = await asyncio.to_thread(
+                self.update_manager.verify_installer, installer, update
+            )
+            if not verified:
+                raise UpdateError("安装前的最终 SHA-256 校验失败。")
+        except UpdateError as error:
+            QMessageBox.critical(self, "更新失败", str(error))
+            return
+        except Exception:
+            logger.exception("Unexpected updater failure")
+            QMessageBox.critical(
+                self, "更新失败", "更新过程中发生内部错误，请稍后重试。"
+            )
+            return
+        finally:
+            self.statusBar().clearMessage()
+
+        result = QMessageBox.question(
+            self,
+            "安装更新",
+            f"RockCore {update.version} 已下载并通过 SHA-256 校验。\n\n"
+            "现在关闭 RockCore 并启动安装程序吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            launched = QProcess.startDetached(
+                str(installer), ["/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]
+            )
+        except Exception:
+            logger.exception("Failed to launch update installer")
+            launched = False
+        if isinstance(launched, tuple):
+            launched = launched[0]
+        if not launched:
+            QMessageBox.critical(
+                self, "更新失败", "安装程序无法启动，请从“帮助 → 检查更新”重试。"
+            )
+            return
+        QTimer.singleShot(250, QApplication.quit)
 
     def _get_repos(self):
         from storage.database import create_session_factory

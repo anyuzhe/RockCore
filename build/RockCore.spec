@@ -37,6 +37,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(ASSETS), "assets"),
+        (str(ROOT / "VERSION"), "."),
         (str(BUILTIN_SKILLS), "skills/builtin"),
         (str(MINGIT), "runtime/git"),
     ],

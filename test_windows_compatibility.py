@@ -205,6 +205,22 @@ def test_windows_package_bundles_python_acceptance_runtime():
     assert "--python-validation-smoke-test" in build_script
 
 
+def test_windows_package_bundles_version_and_release_tag_guard():
+    root = Path(__file__).resolve().parent
+    spec = (root / "build" / "RockCore.spec").read_text(encoding="utf-8")
+    workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    installer = (root / "installer" / "RockCore.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert '(str(ROOT / "VERSION"), ".")' in spec
+    assert "Verify release tag matches VERSION" in workflow
+    assert "CloseApplications=yes" in installer
+    assert "RestartApplications=yes" in installer
+
+
 def test_windows_command_arguments_quote_paths_with_spaces():
     quoted = quote_command_arg(
         r"C:\Program Files\Python 311\python.exe", platform="win32"

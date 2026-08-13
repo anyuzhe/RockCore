@@ -49,6 +49,7 @@ GitHub Actions 工作流位于 `.github/workflows/windows-release.yml`。
 
 - 推送到 `main`：生成 Windows x64 便携版 ZIP 和安装包，并上传到 Actions Artifacts。
 - 推送版本标签（例如 `v1.0.0`）：额外自动创建 GitHub Release，并附带安装包、便携版和 SHA256 校验文件。
+- 发布标签的版本必须与仓库 `VERSION` 完全一致，否则 Actions 会在打包前停止，避免客户端找不到对应安装包。
 
 本地 Windows 构建（需要 Python 3.11+ 和 Inno Setup）：
 
@@ -66,6 +67,12 @@ SHA256SUMS.txt
 ```
 
 正式版的配置、数据库和日志会保存到当前用户的应用数据目录，不会写入 `Program Files`。首次启动默认工作区为用户目录下的 `RockCore Projects`，也可以在设置中修改。
+
+Windows 安装版启动后会在后台检查 GitHub 的最新稳定版 Release；也可以从
+“帮助 → 检查更新”手动检查。发现新版本后由用户确认下载，RockCore 会同时
+下载 `SHA256SUMS.txt` 并验证安装包 SHA-256，只有校验通过才会启动 Inno
+Setup 覆盖升级。升级不会删除用户数据、项目或设置；启动检查可在“设置 →
+通用”中关闭。
 
 Python 项目的语法检查、`unittest` 和 `pytest` 验收使用 RockCore 安装包内置的
 Python 运行时与 pytest，不要求用户另外安装 Python，也不依赖系统 `PATH`。

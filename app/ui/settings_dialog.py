@@ -8,7 +8,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QPushButton, QLabel, QTabWidget, QWidget, QMessageBox, QSpinBox,
-    QDoubleSpinBox, QComboBox, QGroupBox, QToolButton, QFileDialog
+    QDoubleSpinBox, QComboBox, QGroupBox, QToolButton, QFileDialog,
+    QCheckBox,
 )
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QPainter, QPainterPath, QPen
@@ -435,6 +436,14 @@ class SettingsDialog(QDialog):
 
         self.working_dir = QLineEdit(self._config.get("working_dir", ""))
         general_layout.addRow("工作目录：", self.working_dir)
+        self.auto_check_updates = QCheckBox("启动后自动检查稳定版更新")
+        self.auto_check_updates.setChecked(
+            bool(self._config.get("updates", {}).get("auto_check", True))
+        )
+        self.auto_check_updates.setToolTip(
+            "仅在 Windows 安装版启动后后台检查；下载和安装前仍会征求确认"
+        )
+        general_layout.addRow("软件更新：", self.auto_check_updates)
         self.tabs.addTab(general_widget, "通用")
 
         # ── Buttons ──
@@ -528,6 +537,10 @@ class SettingsDialog(QDialog):
             "sandbox_mode": previous_codex.get("sandbox_mode", "read_only"),
         }
         self._config["max_concurrent_workers"] = self.max_workers.value()
+        self._config["updates"] = {
+            **dict(self._config.get("updates", {})),
+            "auto_check": self.auto_check_updates.isChecked(),
+        }
         requested_working_dir = self.working_dir.text().strip()
         resolved_working_dir = resolve_working_dir(
             requested_working_dir,
