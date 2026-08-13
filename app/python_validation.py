@@ -27,6 +27,14 @@ from pathlib import Path, PureWindowsPath
 PYTHON_COMMANDS = {"python", "python3", "py"}
 _SHELL_OPERATORS = {"&&", "||", ";", "|", ">", ">>", "<"}
 _UNITTEST_LOCK = threading.RLock()
+_PYTEST_RUNTIME_ARGS = (
+    "-p", "no:cacheprovider",
+    # A windowed PyInstaller executable has no real stderr file descriptor.
+    # Pytest's faulthandler plugin unconditionally asks stderr for fileno(),
+    # which raises io.UnsupportedOperation in that environment. RockCore
+    # already captures tracebacks and writes its own diagnostic log.
+    "-p", "no:faulthandler",
+)
 
 
 def _split_command(command: str) -> list[str]:
@@ -299,7 +307,7 @@ def _run_pytest_in_process(
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            returncode = int(pytest.main([*arguments, "-p", "no:cacheprovider"]))
+            returncode = int(pytest.main([*arguments, *_PYTEST_RUNTIME_ARGS]))
         return subprocess.CompletedProcess(
             ["embedded-python", "-m", "pytest", *arguments],
             returncode,

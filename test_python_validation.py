@@ -1,7 +1,11 @@
 """Tests for the Python validation runtime embedded in packaged RockCore."""
 
 import asyncio
+import io
 
+import pytest
+
+import app.python_validation as python_validation
 from app.python_validation import (
     run_embedded_python_command,
     run_packaged_pytest_smoke_test,
@@ -89,6 +93,25 @@ def test_packaged_pytest_smoke_runs_without_nested_process(tmp_path):
     assert result.returncode == 0
     assert "1 passed" in result.stdout
     assert not (tmp_path / ".pytest_cache").exists()
+
+
+def test_packaged_pytest_disables_console_fileno_plugin(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_main(arguments):
+        captured["arguments"] = list(arguments)
+        # Reproduce the GUI stream shape that broke pytest's faulthandler.
+        with pytest.raises(io.UnsupportedOperation):
+            io.StringIO().fileno()
+        return 0
+
+    monkeypatch.setattr(pytest, "main", fake_main)
+
+    result = python_validation.run_packaged_pytest_smoke_test([], tmp_path)
+
+    assert result.returncode == 0
+    assert ["-p", "no:faulthandler"] == captured["arguments"][-2:]
+    assert ["-p", "no:cacheprovider"] == captured["arguments"][-4:-2]
 
 
 def test_direct_pytest_command_uses_embedded_runtime(tmp_path):

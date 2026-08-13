@@ -242,6 +242,9 @@ def test_windows_build_smoke_tests_have_bounded_process_cleanup():
     assert "ROCKCORE_SMOKE_DIAGNOSTIC" in build_script
     assert "Write-SmokeDiagnostics" in build_script
     assert "rockcore.log" in build_script
+    assert '"-p", "no:faulthandler"' in (
+        root / "app" / "python_validation.py"
+    ).read_text(encoding="utf-8")
     smoke_guard = 'if "--python-validation-smoke-test" in sys.argv:'
     assert entrypoint.index(smoke_guard) < entrypoint.index("import qasync")
 
