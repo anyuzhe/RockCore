@@ -14,6 +14,41 @@ function Invoke-Native {
     }
 }
 
+function Stop-ProcessTree {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    # Stop the complete tree. PyInstaller multiprocessing children otherwise
+    # survive their parent and can keep a GitHub-hosted runner busy forever.
+    & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Host
+}
+
+function Invoke-ProcessWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSeconds = 90
+    )
+
+    Write-Host "==> $Label (timeout: $TimeoutSeconds seconds)"
+    $Process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru
+    try {
+        if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-ProcessTree -ProcessId $Process.Id
+            throw "$Label timed out after $TimeoutSeconds seconds"
+        }
+        $Process.Refresh()
+        if ($Process.ExitCode -ne 0) {
+            throw "$Label failed with exit code $($Process.ExitCode)"
+        }
+    } finally {
+        if (-not $Process.HasExited) {
+            Stop-ProcessTree -ProcessId $Process.Id
+        }
+        $Process.Dispose()
+    }
+}
+
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $Version = (Get-Content (Join-Path $Root "VERSION") -Raw).Trim()
@@ -79,16 +114,10 @@ $env:QT_QPA_PLATFORM = "offscreen"
 try {
     # Prove the app does not accidentally rely on Git installed on the runner.
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
-    $Smoke = Start-Process -FilePath $AppExe `
-        -ArgumentList "--startup-smoke-test" -Wait -PassThru
-    if ($Smoke.ExitCode -ne 0) {
-        throw "Packaged startup smoke test failed with exit code $($Smoke.ExitCode)"
-    }
-    $PythonSmoke = Start-Process -FilePath $AppExe `
-        -ArgumentList "--python-validation-smoke-test" -Wait -PassThru
-    if ($PythonSmoke.ExitCode -ne 0) {
-        throw "Packaged Python validation smoke test failed with exit code $($PythonSmoke.ExitCode)"
-    }
+    Invoke-ProcessWithTimeout "Packaged startup smoke test" $AppExe `
+        @("--startup-smoke-test") 90
+    Invoke-ProcessWithTimeout "Packaged Python validation smoke test" $AppExe `
+        @("--python-validation-smoke-test") 90
 } finally {
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
     $env:PATH = $PreviousPath

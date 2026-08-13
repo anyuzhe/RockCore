@@ -9,9 +9,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -54,6 +59,7 @@ jobs:
 
       - name: Build portable app and installer
         shell: pwsh
+        timeout-minutes: 12
         run: ./scripts/build_windows.ps1
 
       - name: Upload Windows artifacts

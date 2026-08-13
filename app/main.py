@@ -16,8 +16,6 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(project_root))
 
-from qasync import QApplication
-
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, icon_path
 from app.paths import (
     app_data_dir,
@@ -68,15 +66,6 @@ async def main():
                 + (git_check.stderr.strip() or f"exit {git_check.returncode}")
             )
         logger.info("Bundled Git ready: %s", git_check.stdout.strip())
-    if "--python-validation-smoke-test" in sys.argv:
-        result = _run_packaged_python_validation_smoke_test()
-        if result is None or result.returncode != 0:
-            detail = "no embedded result" if result is None else (
-                result.stderr.strip() or result.stdout.strip()
-            )
-            raise RuntimeError("内置 Python/pytest 验收不可用：" + detail)
-        logger.info("Packaged Python validation smoke test passed")
-        return
     from storage.database import init_database
     from orchestrator.engine import Engine
     from orchestrator.model_router import ModelRouter
@@ -206,6 +195,7 @@ async def main():
 
     # ── Start PyQt application ──
     # qasync.run() already created the QApplication, get the existing instance
+    from qasync import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(FULL_PRODUCT_NAME)
     app.setOrganizationName(COMPANY_NAME)
@@ -447,6 +437,26 @@ if __name__ == "__main__":
     # It must run before qasync starts the desktop event loop.
     import multiprocessing
     multiprocessing.freeze_support()
+    # This packaged-runtime check must finish before qasync creates a Qt event
+    # loop. On Windows, combining a frozen multiprocessing child with that loop
+    # can leave a descendant alive after the check and make CI wait forever.
+    if "--python-validation-smoke-test" in sys.argv:
+        try:
+            configure_runtime_logging()
+            result = _run_packaged_python_validation_smoke_test()
+            if result is None or result.returncode != 0:
+                detail = "no embedded result" if result is None else (
+                    result.stderr.strip() or result.stdout.strip()
+                )
+                raise RuntimeError("内置 Python/pytest 验收不可用：" + detail)
+            logger.info("Packaged Python validation smoke test passed")
+            raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as error:
+            logger.exception("Packaged Python validation smoke test failed")
+            print(str(error), file=sys.stderr)
+            raise SystemExit(1)
     import qasync
     try:
         qasync.run(main())

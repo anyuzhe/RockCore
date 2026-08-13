@@ -221,6 +221,28 @@ def test_windows_package_bundles_version_and_release_tag_guard():
     assert "RestartApplications=yes" in installer
 
 
+def test_windows_build_smoke_tests_have_bounded_process_cleanup():
+    root = Path(__file__).resolve().parent
+    workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    build_script = (root / "scripts" / "build_windows.ps1").read_text(
+        encoding="utf-8"
+    )
+    entrypoint = (root / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert "group: windows-release-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "timeout-minutes: 20" in workflow
+    assert "timeout-minutes: 12" in workflow
+    assert "function Invoke-ProcessWithTimeout" in build_script
+    assert "WaitForExit($TimeoutSeconds * 1000)" in build_script
+    assert "taskkill.exe /PID $ProcessId /T /F" in build_script
+    assert '-Wait -PassThru' not in build_script
+    smoke_guard = 'if "--python-validation-smoke-test" in sys.argv:'
+    assert entrypoint.index(smoke_guard) < entrypoint.index("import qasync")
+
+
 def test_windows_command_arguments_quote_paths_with_spaces():
     quoted = quote_command_arg(
         r"C:\Program Files\Python 311\python.exe", platform="win32"
