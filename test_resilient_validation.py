@@ -237,6 +237,54 @@ def test_acceptance_splitter_preserves_quoted_operator():
     ]
 
 
+def test_run_only_pytest_target_falls_back_to_real_project_suite(tmp_path):
+    tests = tmp_path / "tests" / "unit"
+    tests.mkdir(parents=True)
+    (tests / "test_existing.py").write_text(
+        "def test_existing():\n    assert True\n", encoding="utf-8",
+    )
+    task = SimpleNamespace(
+        task_type="testing",
+        title="Run deterministic verification",
+        description="Execute the existing regression suite without edits.",
+        acceptance_command=(
+            "python -m pytest tests/test_price_provider.py -q"
+        ),
+        acceptance_commands=[],
+    )
+
+    normalized, rewrites = TestManager._normalize_acceptance_suite_for_project(
+        task, tmp_path
+    )
+
+    assert normalized.acceptance_command == "python -m pytest -q"
+    assert rewrites == [{
+        "from": "python -m pytest tests/test_price_provider.py -q",
+        "to": "python -m pytest -q",
+        "missing": ["tests/test_price_provider.py"],
+    }]
+
+
+def test_test_authoring_keeps_missing_planned_target_for_worker(tmp_path):
+    (tmp_path / "tests").mkdir()
+    task = SimpleNamespace(
+        task_type="testing",
+        title="Add regression tests for price behavior",
+        description="Create and run the focused regression test.",
+        acceptance_command=(
+            "python -m pytest tests/test_price_provider.py -q"
+        ),
+        acceptance_commands=[],
+    )
+
+    normalized, rewrites = TestManager._normalize_acceptance_suite_for_project(
+        task, tmp_path
+    )
+
+    assert normalized is task
+    assert rewrites == []
+
+
 def test_provider_balance_error_requests_user_action_without_replanning(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

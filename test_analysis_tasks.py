@@ -9,6 +9,7 @@ from app.ui.status_constants import STATUS_STYLE
 from orchestrator.engine import Engine
 from orchestrator.scheduler import Scheduler
 from orchestrator.state_machine import JobState
+from orchestrator.test_manager import TestManager
 
 
 def test_status_metadata_can_load_without_qt_runtime():
@@ -222,6 +223,19 @@ def test_plan_normalizer_promotes_diagnose_and_fix_contract_to_coding():
     )
     assert plan["tasks"][0]["type"] == "coding"
     assert plan["tasks"][0]["acceptance_command"]
+
+
+def test_english_regression_test_task_is_treated_as_authoring():
+    task = SimpleNamespace(
+        task_type="testing",
+        title="Add regression tests for price and refresh behavior",
+        description=(
+            "Create focused provider and UI refresh coverage, then run it."
+        ),
+    )
+
+    assert TestManager.is_test_authoring_task(task)
+    assert not TestManager.should_validate_locally(task)
 
 
 def test_legacy_read_only_coding_task_is_safely_reclassified(tmp_path):

@@ -6,7 +6,10 @@ import hashlib
 import ast
 import copy
 import json
+import re
+import shlex
 import subprocess
+import sys
 import time
 from html.parser import HTMLParser
 from pathlib import Path
@@ -211,6 +214,16 @@ class TestManager:
         )
         if any(marker in text for marker in markers):
             return True
+        # Keep the English detector semantic rather than phrase-exact.  Repair
+        # planners commonly emit titles such as "Add regression tests" or
+        # "Create focused UI integration tests" where an adjective separates
+        # the authoring verb from the word "test".
+        if re.search(
+            r"\b(?:write|add|create|update|modify|implement|author|generate)\b"
+            r"[^.\n]{0,80}\btests?\b",
+            text,
+        ):
+            return True
         # Allow words between the action and object, e.g.
         # “编写并运行工作日志核心验收测试”, without treating a run-only
         # “执行验收测试” task as authoring work.
@@ -274,6 +287,99 @@ class TestManager:
         if (root_path / "go.mod").is_file():
             return "go test ./..."
         return ""
+
+    @classmethod
+    def normalize_acceptance_command(
+        cls, command: str, root: str | Path,
+    ) -> tuple[str, list[str]]:
+        """Repair stale pytest file targets for run-only validation tasks.
+
+        A Planner may name a plausible regression-test path that does not exist
+        in the repository.  Test-authoring tasks must still create that target,
+        but a deterministic/run-only step should use the real project suite
+        instead of failing the whole Job with ``no tests ran``.
+        """
+        text = str(command or "").strip()
+        if not text:
+            return text, []
+        looks_windows = bool(re.match(r'^\s*["\']?[A-Za-z]:\\', text))
+        try:
+            values = shlex.split(
+                text, posix=not (sys.platform == "win32" or looks_windows)
+            )
+        except ValueError:
+            return text, []
+        values = [value.strip("\"'") for value in values]
+        if not values:
+            return text, []
+        base = command_basename(text)
+        arguments: list[str]
+        if base == "pytest":
+            arguments = values[1:]
+        elif (
+            base in {"python", "python3", "py"}
+            and len(values) >= 3
+            and values[1:3] == ["-m", "pytest"]
+        ):
+            arguments = values[3:]
+        else:
+            return text, []
+
+        root_path = Path(root).resolve()
+        missing = []
+        for value in arguments:
+            if value.startswith("-"):
+                continue
+            target = value.split("::", 1)[0].replace("\\", "/")
+            if not (
+                target.endswith(".py")
+                or target == "tests"
+                or target.startswith("tests/")
+            ):
+                continue
+            candidate = (root_path / target).resolve()
+            try:
+                candidate.relative_to(root_path)
+            except ValueError:
+                missing.append(target)
+                continue
+            if not candidate.exists():
+                missing.append(target)
+        if not missing:
+            return text, []
+        discovered = cls.discover_test_command(root_path)
+        if not discovered or discovered == text:
+            return text, missing
+        return discovered, missing
+
+    @classmethod
+    def _normalize_acceptance_suite_for_project(
+        cls, task: Any, root: str | Path,
+    ) -> tuple[Any, list[dict]]:
+        """Return a shallow task copy with valid run-only acceptance targets."""
+        if cls.is_test_authoring_task(task):
+            return task, []
+        suite = cls.acceptance_suite(task)
+        if not suite:
+            return task, []
+        normalized = []
+        rewrites = []
+        for command in suite:
+            replacement, missing = cls.normalize_acceptance_command(command, root)
+            if replacement != command:
+                rewrites.append({
+                    "from": command,
+                    "to": replacement,
+                    "missing": missing,
+                })
+            if replacement not in normalized:
+                normalized.append(replacement)
+        if not rewrites:
+            return task, []
+        updated = copy.copy(task)
+        updated.acceptance_commands = normalized
+        updated.acceptance_command = normalized[0] if normalized else ""
+        return updated, rewrites
 
     @staticmethod
     def _is_shell_command(cmd: str) -> bool:
@@ -359,13 +465,21 @@ class TestManager:
                         baseline_snapshot: dict | None = None,
                         project_root: str | Path | None = None) -> dict:
         """Run a task's acceptance command and record results."""
+        cwd = str(project_root or (
+            task.job.project.root_path if task.job and task.job.project else "."
+        ))
+        task, rewrites = self._normalize_acceptance_suite_for_project(task, cwd)
         suite = self.acceptance_suite(task)
         command = str(getattr(task, "acceptance_command", "") or "").strip()
         if not command and suite:
             command = suite[0]
-        cwd = str(project_root or (
-            task.job.project.root_path if task.job and task.job.project else "."
-        ))
+        if rewrites and event_bus:
+            await event_bus.publish(
+                "test_command_rewritten",
+                task_id=task.task_id,
+                rewrites=rewrites,
+                reason="策划的测试目标不存在，已改用项目真实测试入口",
+            )
         if self.should_validate_locally(task):
             return await self._validate_project(
                 task, repos, event_bus, baseline_snapshot=baseline_snapshot,
@@ -692,7 +806,17 @@ class TestManager:
         test_commands: list[str] = []
         test_outputs: list[str] = []
         if not issues:
-            requested_suite = self.acceptance_suite(task)
+            normalized_task, rewrites = (
+                self._normalize_acceptance_suite_for_project(task, root)
+            )
+            requested_suite = self.acceptance_suite(normalized_task)
+            if rewrites and event_bus:
+                await event_bus.publish(
+                    "test_command_rewritten",
+                    task_id=task.task_id,
+                    rewrites=rewrites,
+                    reason="策划的测试目标不存在，已改用项目真实测试入口",
+                )
             test_commands = [
                 command for command in requested_suite
                 if self._is_shell_command(command) and not self._uses_git(command)

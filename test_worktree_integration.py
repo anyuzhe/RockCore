@@ -333,6 +333,7 @@ def test_stale_task_branch_gets_a_unique_worktree_run_suffix(tmp_path):
         assert created["collision_recovered"] is True
         assert created["branch"] == "ai/job-repeat/t001-run2"
         assert Path(created["path"]).name == "T001-run2"
+        assert Path(created["path"]).parent.name == "JOB-REPEAT"
         await manager.abort_worktree("T001")
 
     asyncio.run(scenario())
@@ -400,6 +401,8 @@ def test_preserved_continuation_releases_active_slot_without_deleting_files(
         ) == "partial"
         assert second["status"] == "created"
         assert second["path"] != str(first_path)
+        assert Path(second["path"]).parent.name == "JOB-TWO"
+        assert Path(second["path"]).name == "T001"
         await manager.abort_worktree("T001")
 
     asyncio.run(scenario())

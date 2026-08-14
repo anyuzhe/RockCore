@@ -4076,10 +4076,12 @@ class Engine:
                 try:
                     wt_result = await self.merge_manager.create_task_worktree(
                         task_id, job.job_id,
-                        source_job_id=(
-                            resume_source_job_id
-                            or str(job.source_job_id or "")
-                        ),
+                        # Only an in-place checkpoint resume may inherit an
+                        # unmerged task worktree.  A new follow-up Job already
+                        # starts from the integrated project HEAD; matching its
+                        # T001/R01T001 number against an older Job is not proof
+                        # that the task has the same meaning.
+                        source_job_id=resume_source_job_id,
                     )
                 except TypeError:
                     wt_result = await self.merge_manager.create_task_worktree(
@@ -4305,10 +4307,7 @@ class Engine:
                     final_outputs=final_outputs,
                     input_paths=list(artifact_manifest.get("inputs") or []),
                     require_declared_outputs=bool(document_profile),
-                    source_job_id=(
-                        resume_source_job_id
-                        or str(job.source_job_id or "")
-                    ),
+                    source_job_id=resume_source_job_id,
                 )
                 t._rockcore_runtime_checkpoint = runtime_checkpoint
             t._rockcore_max_auto_input_budget = int(

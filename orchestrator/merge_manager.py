@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -474,12 +475,20 @@ class MergeManager:
         continuation = self._resolve_continuation_state(source_job_id, task_id)
         start_point = continuation.get("ref") or "HEAD"
         base_branch = f"ai/{job_id.lower()}/{task_id.lower()}"
+        job_segment = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(job_id or "job")
+        ).strip("._-") or "job"
+        task_segment = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(task_id or "task")
+        ).strip("._-") or "task"
+        job_worktrees = self.worktrees_base / job_segment
+        job_worktrees.mkdir(parents=True, exist_ok=True)
         last_result = {}
         for run_number in range(1, 26):
             suffix = "" if run_number == 1 else f"-run{run_number}"
             branch = base_branch + suffix
-            path_name = task_id if run_number == 1 else f"{task_id}{suffix}"
-            wt_path = str(self.worktrees_base / path_name)
+            path_name = task_segment if run_number == 1 else f"{task_segment}{suffix}"
+            wt_path = str(job_worktrees / path_name)
             if self._worktree_slot_conflicts(branch, wt_path):
                 last_result = {
                     "status": "failed",
