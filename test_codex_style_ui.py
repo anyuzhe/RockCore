@@ -24,6 +24,8 @@ from app.ui.time_utils import (
     format_local_timestamp,
     to_local_datetime,
 )
+from orchestrator.agent_config import load_project_config
+from orchestrator.engine import Engine
 
 
 _QT_APP = None
@@ -1170,6 +1172,39 @@ def test_project_folder_selection_fills_empty_name_without_overwriting(
     dialog._browse()
     assert dialog.name_input.text() == "我的自定义名称"
     dialog.close()
+
+
+def test_creating_project_persists_current_global_model_defaults(tmp_path):
+    _app()
+    project_root = tmp_path / "new-project"
+    project_root.mkdir()
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    window = MainWindow(engine)
+    window._config = {
+        "agent_provider_map": {
+            "governor": "codex", "planner": "deepseek",
+            "worker": "kimi", "reviewer": "codex",
+            "emergency_coder": "codex",
+        },
+        "codex": {"model": "gpt-5.6-sol"},
+        "deepseek": {"model": "deepseek-v4-pro"},
+        "kimi": {"model": "kimi-k2.7-code"},
+    }
+
+    window._create_project({
+        "name": "Inherited", "root_path": str(project_root),
+        "description": "",
+    })
+    config = load_project_config(str(project_root))
+
+    assert config.planner.provider == "deepseek"
+    assert config.planner.model == "deepseek-v4-pro"
+    assert config.worker.provider == "kimi"
+    assert config.worker.model == "kimi-k2.7-code"
+    assert (project_root / ".ai" / "agents.json").exists()
+    window._poll_timer.stop()
+    window.engine = None
+    window.close()
 
 
 def test_api_key_fields_have_reveal_buttons():

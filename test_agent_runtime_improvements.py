@@ -8,7 +8,10 @@ import subprocess
 from types import SimpleNamespace
 
 from agents.worker import WorkerAgent
-from orchestrator.agent_config import HookConfig, ProjectAgentConfig, load_project_config, save_project_config
+from orchestrator.agent_config import (
+    HookConfig, ProjectAgentConfig, load_project_config,
+    project_config_from_global_settings, save_project_config,
+)
 from orchestrator.engine import Engine
 from orchestrator.failure_evals import FailureEvalStore
 from orchestrator.hooks import HookRunner
@@ -138,6 +141,40 @@ def test_historical_failures_are_backfilled_without_model_calls(tmp_path):
     )
     assert len(cases) == 1
     assert cases[0]["failure_class"] == "provider_timeout"
+
+
+def test_new_project_config_inherits_global_model_defaults_without_secrets():
+    settings = {
+        "agent_provider_map": {
+            "governor": "codex",
+            "planner": "deepseek",
+            "worker": "kimi",
+            "reviewer": "codex",
+            "emergency_coder": "codex",
+        },
+        "codex": {
+            "model": "gpt-5.6-sol", "api_key": "must-not-be-copied",
+        },
+        "deepseek": {
+            "model": "deepseek-v4-pro", "api_key": "must-not-be-copied",
+        },
+        "kimi": {
+            "model": "kimi-k2.7", "api_key": "must-not-be-copied",
+        },
+    }
+
+    config = project_config_from_global_settings(settings)
+    serialized = config.to_dict()
+
+    assert config.governor.provider == "codex"
+    assert config.governor.model == "gpt-5.6-sol"
+    assert config.planner.provider == "deepseek"
+    assert config.planner.model == "deepseek-v4-pro"
+    assert config.worker.provider == "kimi"
+    assert config.worker.model == "kimi-k2.7-code"
+    assert config.worker.reasoning_effort == "default"
+    assert config.reviewer.reasoning_effort == "high"
+    assert "api_key" not in json.dumps(serialized)
 
 
 def test_hooks_round_trip_and_execute_without_shell(tmp_path):

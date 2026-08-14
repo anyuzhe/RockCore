@@ -516,6 +516,9 @@ class ProjectConfigDialog(QDialog):
                 if idx >= 0:
                     w["provider"].setCurrentIndex(idx)
                 midx = w["model"].findData(profile.model)
+                if midx < 0 and profile.model:
+                    w["model"].addItem(profile.model, profile.model)
+                    midx = w["model"].findData(profile.model)
                 if midx >= 0:
                     w["model"].setCurrentIndex(midx)
                 ridx = w["reasoning"].findData(profile.reasoning_effort)
@@ -527,6 +530,9 @@ class ProjectConfigDialog(QDialog):
         if idx >= 0:
             self.worker_provider.setCurrentIndex(idx)
         midx = self.worker_model.findData(cfg.worker.model)
+        if midx < 0 and cfg.worker.model:
+            self.worker_model.addItem(cfg.worker.model, cfg.worker.model)
+            midx = self.worker_model.findData(cfg.worker.model)
         if midx >= 0:
             self.worker_model.setCurrentIndex(midx)
         ridx = self.worker_reasoning.findData(cfg.worker.reasoning_effort)

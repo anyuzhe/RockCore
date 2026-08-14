@@ -588,6 +588,60 @@ class ProjectAgentConfig:
         )
 
 
+def project_config_from_global_settings(
+    settings: dict | None,
+) -> ProjectAgentConfig:
+    """Build a new project's model routing from application defaults.
+
+    Global settings own provider credentials, the provider-level model choice,
+    and the default role-to-provider map. Project configuration must never copy
+    credentials, but a newly created project should start with the same routing
+    and model choices instead of unrelated hard-coded values.
+    """
+    values = settings if isinstance(settings, dict) else {}
+    config = ProjectAgentConfig()
+    provider_map = values.get("agent_provider_map")
+    provider_map = provider_map if isinstance(provider_map, dict) else {}
+    codex_effort = {
+        "governor": "high",
+        "planner": "high",
+        "worker": "high",
+        "reviewer": "high",
+        "emergency_coder": "max",
+    }
+
+    for role in (
+        "governor", "planner", "worker", "reviewer", "emergency_coder",
+    ):
+        profile = getattr(config, role)
+        original_provider = profile.provider
+        provider = str(
+            provider_map.get(role) or original_provider
+        ).strip().lower()
+        if provider not in PROVIDER_MODELS:
+            provider = original_provider
+
+        provider_values = values.get(provider)
+        provider_values = (
+            provider_values if isinstance(provider_values, dict) else {}
+        )
+        configured_model = str(provider_values.get("model") or "").strip()
+        if configured_model:
+            model = normalize_model_id(provider, configured_model)
+        elif provider == original_provider and profile.model:
+            model = normalize_model_id(provider, profile.model)
+        else:
+            model = PROVIDER_MODELS[provider][0]
+
+        profile.provider = provider
+        profile.model = model
+        profile.reasoning_effort = (
+            codex_effort[role] if provider == "codex" else "default"
+        )
+
+    return config
+
+
 def load_project_config(project_root: str) -> ProjectAgentConfig:
     """Load project AI config from .ai/agents.json, or return a sensible default."""
     config_path = Path(project_root) / ".ai" / "agents.json"

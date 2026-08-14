@@ -882,6 +882,25 @@ class MainWindow(QMainWindow):
                         f"Git 初始化失败，将使用文件快照：{git_state.get('error', '')}",
                         "log",
                     )
+                from orchestrator.agent_config import (
+                    project_config_from_global_settings,
+                    save_project_config,
+                )
+                project_config_path = (
+                    Path(project.root_path) / ".ai" / "agents.json"
+                )
+                if project_config_path.exists():
+                    self.task_panel.log(
+                        "已保留文件夹原有的项目 AI 配置", "log"
+                    )
+                else:
+                    inherited_config = project_config_from_global_settings(
+                        self._config
+                    )
+                    save_project_config(project.root_path, inherited_config)
+                    self.task_panel.log(
+                        "已继承默认的大模型与角色路由配置", "log"
+                    )
                 self._update_send_state()
                 self.status_label.setText(f"项目：{project.name}")
                 self.task_panel.begin_new_request(project.name, project.root_path)
