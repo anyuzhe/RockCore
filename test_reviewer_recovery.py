@@ -126,6 +126,38 @@ def test_reviewer_uses_final_net_diff_across_multiple_job_commits(tmp_path):
     assert changed_files == ["game.js"]
 
 
+def test_reviewer_excludes_rockcore_runtime_metadata_from_job_diff(tmp_path):
+    def git(*args):
+        subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True,
+            capture_output=True, text=True,
+        )
+
+    git("init")
+    (tmp_path / "game.js").write_text("const state = 'old';\n")
+    git("add", "game.js")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "Initial project state")
+    (tmp_path / "game.js").write_text("const state = 'ready';\n")
+    eval_file = tmp_path / ".ai" / "evals" / "failures.jsonl"
+    eval_file.parent.mkdir(parents=True)
+    eval_file.write_text('{"failure": true}\n')
+    learning = tmp_path / ".ai" / "skill-learning.json"
+    learning.write_text('{"learned": true}\n')
+    git("add", "-A")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-m", "AI JOB-RUNTIME: T001 - Update game")
+
+    diff, changed_files = ReviewerAgent._collect_job_changes(
+        str(tmp_path), "JOB-RUNTIME"
+    )
+
+    assert changed_files == ["game.js"]
+    assert "const state = 'ready'" in diff
+    assert "failures.jsonl" not in diff
+    assert "skill-learning.json" not in diff
+
+
 def test_reviewer_diff_chunks_preserve_every_original_character():
     diff = (
         "diff --git a/a.js b/a.js\n" + "+const a = 1;\n" * 80

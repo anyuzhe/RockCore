@@ -12,6 +12,7 @@ from app.subprocess_utils import run_process
 from app.text_utils import read_text_compatible
 from orchestrator.model_router import ModelRouter
 from orchestrator.cost_engine import BudgetExceededError
+from orchestrator.runtime_paths import is_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,11 @@ Your role is to review code changes for quality, correctness, and constraint com
 
 Review independently. Do not assume the Planner's proposed files or approach
 were complete or correct, and do not trust the Worker's completion claim.
+
+Stay within the supplied changed-file set. Do not broadly rediscover or scan
+the whole repository when the final diff and deterministic validation already
+provide the necessary evidence. RockCore-owned `.ai` runtime state is excluded
+from product review and must never be treated as a user artifact.
 
 You have READ-ONLY access. You must review and report findings.
 
@@ -206,23 +212,33 @@ Output ONLY valid JSON."""
                 if first_parent.returncode == 0:
                     base = first_parent.stdout.strip()
                     target = commits[-1]
+                    pathspec = [
+                        ":(exclude)" + path
+                        for path in ReviewerAgent._runtime_pathspecs()
+                    ]
                     diff_result = run_process(
-                        ["git", "diff", "--stat", "--patch", base, target, "--"],
+                        [
+                            "git", "diff", "--patch", base, target,
+                            "--", ".", *pathspec,
+                        ],
                         capture_output=True, text=True, cwd=project_root, timeout=10,
                     )
                     names_result = run_process(
-                        ["git", "diff", "--name-only", base, target, "--"],
+                        [
+                            "git", "diff", "--name-only", base, target,
+                            "--", ".", *pathspec,
+                        ],
                         capture_output=True, text=True, cwd=project_root, timeout=10,
                     )
                     changed_files = [
                         line.strip()
                         for line in names_result.stdout.splitlines()
-                        if line.strip()
+                        if line.strip() and not is_runtime_path(line.strip())
                     ]
-                    return diff_result.stdout or "(no changes)", changed_files
+                    return diff_result.stdout or "(no product changes)", changed_files
 
                 show = run_process(
-                    ["git", "show", "--format=", "--stat", "--patch", commits[-1]],
+                    ["git", "show", "--format=", "--patch", commits[-1]],
                     capture_output=True, text=True, cwd=project_root, timeout=10,
                 )
                 names = run_process(
@@ -230,9 +246,14 @@ Output ONLY valid JSON."""
                     capture_output=True, text=True, cwd=project_root, timeout=10,
                 )
                 changed_files = [
-                    line.strip() for line in names.stdout.splitlines() if line.strip()
+                    line.strip() for line in names.stdout.splitlines()
+                    if line.strip() and not is_runtime_path(line.strip())
                 ]
-                return show.stdout or "(no changes)", changed_files
+                if not changed_files:
+                    return "(no product changes)", []
+                # The root-commit fallback is rare; filter any historical
+                # runtime-only patch before placing it in Reviewer context.
+                return ReviewerAgent._filter_runtime_diff(show.stdout), changed_files
 
             diff_result = run_process(
                 ["git", "diff"], capture_output=True, text=True,
@@ -243,11 +264,50 @@ Output ONLY valid JSON."""
                 cwd=project_root, timeout=10,
             )
             changed_files = [
-                line.strip() for line in names_result.stdout.splitlines() if line.strip()
+                line.strip() for line in names_result.stdout.splitlines()
+                if line.strip() and not is_runtime_path(line.strip())
             ]
-            return diff_result.stdout or "(no changes)", changed_files
+            return ReviewerAgent._filter_runtime_diff(diff_result.stdout), changed_files
         except Exception as exc:
             return f"(error getting job changes: {exc})", []
+
+    @staticmethod
+    def _runtime_pathspecs() -> tuple[str, ...]:
+        """Git pathspecs for generated state that must never reach review."""
+        return (
+            ".ai/evals/**", ".ai/reports/**", ".ai/runtime/**",
+            ".ai/recovery/**", ".ai/worktrees/**",
+            ".ai/skill-learning.json", ".ai/repository_map.json",
+            ".ai/agents.json", ".ai/project.md", ".ai/architecture.md",
+            ".ai/decisions.md", ".ai/coding_rules.md",
+            ".ai/protected_paths.md", ".ai/known_issues.md",
+            ".ai/glossary.md",
+        )
+
+    @staticmethod
+    def _filter_runtime_diff(diff: str) -> str:
+        """Drop complete runtime-file sections from a unified Git patch."""
+        if not diff:
+            return "(no product changes)"
+        sections = []
+        current = []
+        for line in diff.splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                if current:
+                    sections.append(current)
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            sections.append(current)
+        kept = []
+        for section in sections:
+            header = section[0] if section else ""
+            marker = " b/"
+            path = header.split(marker, 1)[1].strip() if marker in header else ""
+            if not path or not is_runtime_path(path):
+                kept.extend(section)
+        return "".join(kept) or "(no product changes)"
 
     @staticmethod
     def _split_diff(diff: str, max_chars: int = 45_000) -> list[str]:

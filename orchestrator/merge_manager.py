@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.subprocess_utils import run_process
 from tools.git_tools import GitTools
+from .runtime_paths import is_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +30,6 @@ class MergeManager:
     # RockCore-owned state must never be published as user output, including
     # when continuing an old, polluted branch. Project extensions such as
     # `.ai/skills/` deliberately remain eligible for version control.
-    RUNTIME_PATH_PREFIXES = (
-        ".ai/reports/", ".ai/runtime/", ".ai/recovery/", ".ai/worktrees/",
-    )
-    RUNTIME_EXACT_PATHS = {
-        ".ai/repository_map.json", ".ai/agents.json", ".ai/project.md",
-        ".ai/architecture.md", ".ai/decisions.md", ".ai/coding_rules.md",
-        ".ai/protected_paths.md", ".ai/known_issues.md", ".ai/glossary.md",
-    }
-
     def __init__(self, project_root: str, worktrees_dir: str | None = None):
         self.project_root = Path(project_root).resolve()
         self.worktrees_base = Path(worktrees_dir or self.project_root / ".ai" / "worktrees")
@@ -227,6 +219,8 @@ class MergeManager:
         )
         copied = []
         for relative in (item for item in result.stdout.split("\0") if item):
+            if self._is_runtime_path(relative):
+                continue
             source = (source_root / relative).resolve()
             destination = (destination_root / relative).resolve()
             try:
@@ -248,12 +242,22 @@ class MergeManager:
         """List source-branch outputs not yet present on the target branch."""
         if not start_point or start_point == "HEAD":
             return []
+        return self._changed_files_between(
+            self.target_branch, start_point, str(self.project_root)
+        )
+
+    def _changed_files_between(
+        self, base: str, target: str, cwd: str,
+    ) -> list[str]:
+        """List product paths changed between two concrete Git revisions."""
+        if not base or not target or base == target:
+            return []
         result = run_process(
             [
                 "git", "diff", "--name-only", "-z",
-                self.target_branch, start_point,
+                base, target,
             ],
-            capture_output=True, text=True, cwd=self.project_root,
+            capture_output=True, text=True, cwd=cwd,
         )
         if result.returncode != 0:
             return []
@@ -264,13 +268,7 @@ class MergeManager:
 
     @classmethod
     def _is_runtime_path(cls, relative: str) -> bool:
-        normalized = str(relative or "").replace("\\", "/")
-        while normalized.startswith("./"):
-            normalized = normalized[2:]
-        return normalized in cls.RUNTIME_EXACT_PATHS or any(
-            normalized == prefix.rstrip("/") or normalized.startswith(prefix)
-            for prefix in cls.RUNTIME_PATH_PREFIXES
-        )
+        return is_runtime_path(relative)
 
     def _exclude_runtime_paths(self, worktree_path: str) -> tuple[bool, str]:
         """Remove generated RockCore state from the task index before commit."""
@@ -501,6 +499,14 @@ class MergeManager:
                 result = await self.git_tools.create_worktree(branch, wt_path)
             last_result = result
             if result.get("status") == "created":
+                initial_head_result = run_process(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, cwd=wt_path,
+                )
+                initial_head = (
+                    initial_head_result.stdout.strip()
+                    if initial_head_result.returncode == 0 else ""
+                )
                 preserved = self._copy_preserved_files(
                     wt_path, include_all=bool(source_job_id)
                 )
@@ -519,6 +525,7 @@ class MergeManager:
                     "preserved_paths": preserved,
                     "resumed_from": continuation.get("branch", ""),
                     "resumed_files": resumed_files,
+                    "initial_head": initial_head,
                 }
                 result["collision_recovered"] = run_number > 1
                 result["run_number"] = run_number
@@ -666,7 +673,26 @@ class MergeManager:
             ]
             reuse_existing_commit = False
             if not staged_paths:
-                staged_paths = self._continuation_committed_files(branch)
+                current_head_result = run_process(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, cwd=wt_path,
+                )
+                current_head = (
+                    current_head_result.stdout.strip()
+                    if current_head_result.returncode == 0 else ""
+                )
+                initial_head = str(wt_info.get("initial_head") or "")
+                if current_head and initial_head and current_head != initial_head:
+                    # The current Worker created commits itself. Attribute only
+                    # the paths introduced in this task, not the whole
+                    # continuation branch inherited before it started.
+                    staged_paths = self._changed_files_between(
+                        initial_head, current_head, wt_path
+                    )
+                elif wt_info.get("resumed_from"):
+                    # No new commit, but a continuation may still be importing
+                    # a preserved product commit that has never reached target.
+                    staged_paths = self._continuation_committed_files(branch)
                 reuse_existing_commit = bool(staged_paths)
                 if not reuse_existing_commit:
                     return self._integration_failure(

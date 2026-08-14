@@ -403,6 +403,16 @@ class TestManager:
                     int(result.get("duration_ms") or 0) for _, result in results
                 ),
                 "commands": [command for command, _ in results],
+                "failure_category": (
+                    "" if passed else next(
+                        (
+                            str(result.get("failure_category") or "")
+                            for _, result in results
+                            if result.get("status") != "passed"
+                        ),
+                        "code_or_test",
+                    )
+                ),
             }
 
         # Only execute if it's an actual shell command
@@ -478,6 +488,10 @@ class TestManager:
             return {
                 "status": status, "passed": passed, "failed": failed,
                 "output": output[:2000], "duration_ms": duration,
+                "failure_category": (
+                    "" if status == "passed"
+                    else self._validation_failure_category([output])
+                ),
             }
         except subprocess.TimeoutExpired:
             repos["test_run"].update_result(
@@ -490,13 +504,19 @@ class TestManager:
                     "test_result", task_id=task.task_id,
                     status="failed", output="Timeout"
                 )
-            return {"status": "failed", "error": "timeout"}
+            return {
+                "status": "failed", "error": "timeout",
+                "failure_category": "code_or_test",
+            }
         except Exception as e:
             logger.error(f"Test execution error: {e}")
             repos["test_run"].update_result(
                 tr.id, 0, 0, 0, str(e), 0, "failed"
             )
-            return {"status": "failed", "error": str(e)}
+            return {
+                "status": "failed", "error": str(e),
+                "failure_category": self._validation_failure_category([str(e)]),
+            }
 
     async def validate_project(self, task: Any, repos: dict,
                                event_bus: EventBus | None = None,
@@ -727,7 +747,30 @@ class TestManager:
                 "failed": len(issues), "output": output, "changes": diff,
                 "command": " | ".join(test_commands),
                 "commands": test_commands,
+                "failure_category": (
+                    "" if status == "passed"
+                    else self._validation_failure_category(issues)
+                ),
                 "test_output": "\n\n".join(test_outputs)[:4000]}
+
+    @staticmethod
+    def _validation_failure_category(issues: list[str]) -> str:
+        """Separate code defects from orchestration/environment failures."""
+        joined = "\n".join(str(issue or "") for issue in issues).lower()
+        if "no file changes detected" in joined:
+            return "no_progress"
+        if any(marker in joined for marker in (
+            "rockcore 内置", "shell 组合", "invalid acceptance",
+            "unsupported acceptance", "验收不接受",
+        )):
+            return "internal_validation"
+        if any(marker in joined for marker in (
+            "command not found", "is not recognized as an internal",
+            "cannot run test command", "no such file or directory",
+            "no module named pytest", "python: not found", "python3: not found",
+        )):
+            return "environment"
+        return "code_or_test"
 
     @classmethod
     def _validate_source(cls, path: Path) -> dict:

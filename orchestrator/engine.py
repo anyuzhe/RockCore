@@ -120,6 +120,7 @@ from .test_manager import TestManager
 from .merge_manager import MergeManager
 from .agent_config import ProjectAgentConfig, load_project_config
 from .failure_evals import FailureEvalStore
+from .runtime_paths import is_runtime_path
 from .hooks import HookRunner
 from .skill_learning import SkillLearningService
 from storage.database import create_session_factory
@@ -4642,13 +4643,29 @@ class Engine:
                         or (test_result or {}).get("error")
                         or "Validation failed"
                     )
+                    repairable_validation = self._validation_allows_model_repair(
+                        test_result or {}, validation_detail, task_changes
+                    )
                     # Keep focused repairs on the configured Worker. Emergency
                     # is a quality escalation only after two repair/validation
                     # rounds have both failed; it is never a response to repeated
                     # reads or other strategy-level stalls.
-                    validation_repair_attempts = max(2, min(3, int(getattr(
-                        t, "_rockcore_emergency_after_failures", 3
-                    )) - 1))
+                    validation_repair_attempts = (
+                        max(2, min(3, int(getattr(
+                            t, "_rockcore_emergency_after_failures", 3
+                        )) - 1))
+                        if repairable_validation else 0
+                    )
+                    if not repairable_validation:
+                        await self.event_bus.publish(
+                            "task_model_repair_skipped",
+                            job_id=job.job_id,
+                            task_id=task_id,
+                            reason=str((test_result or {}).get(
+                                "failure_category"
+                            ) or "internal_or_environmental_validation"),
+                            validation=validation_detail[:1200],
+                        )
                     for validation_attempt in range(
                         1, validation_repair_attempts + 1
                     ):
@@ -4735,6 +4752,7 @@ class Engine:
 
                     if (
                         not test_passed
+                        and repairable_validation
                         and bool(getattr(t, "_rockcore_emergency_enabled", True))
                         and self.get_agent("emergency_coder")
                     ):
@@ -4948,6 +4966,58 @@ class Engine:
                         or (test_result or {}).get("error")
                         or "Acceptance validation did not pass"
                     )
+                    failure_category = str(
+                        (test_result or {}).get("failure_category")
+                        or "code_or_test"
+                    )
+                    repairable_validation = self._validation_allows_model_repair(
+                        test_result or {}, validation_detail, task_changes
+                    )
+                    if not repairable_validation:
+                        category_labels = {
+                            "environment": "验收环境不可用",
+                            "internal_validation": "RockCore 内部验收错误",
+                            "no_progress": "任务没有产生要求的文件变化",
+                        }
+                        label = category_labels.get(
+                            failure_category, "非代码验收错误"
+                        )
+                        failure = {
+                            "status": "failed",
+                            "error": f"{label}：{validation_detail[:1200]}",
+                            "failure_stage": failure_category,
+                            "failure_category": failure_category,
+                            "checkpoint": {
+                                "changes": task_changes,
+                                "validation": test_result or {"status": "failed"},
+                            },
+                        }
+                        repos["task"].update_status_by_pk(t.id, "failed")
+                        self._checkpoint_task(
+                            repos, job, t, status="failed",
+                            result=failure, error=failure["error"],
+                        )
+                        await self.event_bus.publish(
+                            "task_failed", job_id=job.job_id,
+                            task_id=task_id, error=failure["error"],
+                            failure_stage=failure_category,
+                            failure_category=failure_category,
+                            checkpoint=failure["checkpoint"],
+                        )
+                        if has_worktree:
+                            product_changes = any(
+                                not is_runtime_path(path)
+                                for path in (task_changes.get("changed") or [])
+                            )
+                            if product_changes:
+                                preserve = getattr(
+                                    self.merge_manager, "preserve_worktree", None
+                                )
+                                if callable(preserve):
+                                    preserve(task_id)
+                            else:
+                                await self.merge_manager.abort_worktree(task_id)
+                        return failure
                     continuation = {
                         "status": "needs_continuation",
                         "error": (
@@ -6454,6 +6524,35 @@ class Engine:
         )
         return True
 
+    @staticmethod
+    def _validation_allows_model_repair(
+        test_result: dict, detail: str, changes: dict | None = None,
+    ) -> bool:
+        """Only send genuine product defects to Worker/Emergency models.
+
+        Missing host tools, invalid RockCore acceptance plumbing, no-progress
+        results and runtime-only metadata cannot be fixed by spending more
+        coding-model turns. They remain explicit deterministic failures for the
+        orchestrator or environment layer to handle.
+        """
+        category = str(test_result.get("failure_category") or "").strip()
+        if category in {"environment", "internal_validation", "no_progress"}:
+            return False
+        lowered = str(detail or "").lower()
+        if any(marker in lowered for marker in (
+            "rockcore 内置", "shell 组合", "验收不接受",
+            "command not found", "is not recognized as an internal",
+            "no module named pytest", "cannot run test command",
+            "no file changes detected from the job baseline",
+        )):
+            return False
+        changed_paths = list((changes or {}).get("changed") or [])
+        if changed_paths and not any(
+            not is_runtime_path(path) for path in changed_paths
+        ):
+            return False
+        return True
+
     async def _escalate_to_emergency(
         self, task, job, error, worktree_root: str
     ) -> dict | None:
@@ -6972,6 +7071,19 @@ class Engine:
     @staticmethod
     def _review_context(job, repos) -> str:
         """Build the complete, bounded workflow record used by Reviewer."""
+        def clean_text(value: object, limit: int) -> str:
+            runtime_markers = (
+                ".ai/evals/", ".ai/reports/", ".ai/runtime/",
+                ".ai/recovery/", ".ai/worktrees/",
+                ".ai/skill-learning.json",
+            )
+            lines = [
+                line for line in str(value or "").splitlines()
+                if not any(marker in line.replace("\\", "/")
+                           for marker in runtime_markers)
+            ]
+            return "\n".join(lines)[:limit]
+
         constitution = repos["constitution"].get_by_job(job.id)
         plan = repos["plan"].get_by_job(job.id)
         tasks = repos["task"].list_by_job(job.id)
@@ -6989,20 +7101,28 @@ class Engine:
             "tasks": [],
         }
         for task in tasks:
+            allowed_paths = [
+                path for path in (task.allowed_paths or [])
+                if not is_runtime_path(path)
+            ]
+            if task.allowed_paths and not allowed_paths:
+                # Internal cleanup/checkpoint tasks are orchestrator work, not
+                # product behavior the independent Reviewer should re-litigate.
+                continue
             test_runs = repos["test_run"].list_by_task(task.id)
             payload["tasks"].append({
                 "id": task.task_id,
                 "title": task.title,
-                "description": task.description,
+                "description": clean_text(task.description, 1800),
                 "status": task.status,
-                "allowed_paths": task.allowed_paths or [],
+                "allowed_paths": allowed_paths,
                 "acceptance_command": task.acceptance_command or "",
-                "result_summary": (task.result_summary or "")[:1600],
-                "failure_reason": (task.failure_reason or "")[:1200],
+                "result_summary": clean_text(task.result_summary, 1600),
+                "failure_reason": clean_text(task.failure_reason, 1200),
                 "tests": [{
                     "command": test.command,
                     "status": test.status,
-                    "output": (test.output or "")[-1600:],
+                    "output": clean_text(test.output, 1600),
                 } for test in test_runs[-4:]],
             })
         return json.dumps(payload, ensure_ascii=False, default=str)[:16000]

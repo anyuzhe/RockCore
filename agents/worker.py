@@ -1351,6 +1351,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             return result
         if result.get("status") in {"error", "rejected"} or result.get("error"):
             return result
+        if tool_name == "read_file" and result.get("source_version"):
+            ranged = cls._incremental_file_range(arguments, result, delivered)
+            if ranged is not None:
+                return ranged
         signature_payload = json.dumps(
             {"tool": tool_name, "arguments": arguments},
             ensure_ascii=False, sort_keys=True, default=str,
@@ -1391,6 +1395,127 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         while len(delivered) > 160:
             delivered.pop(next(iter(delivered)))
         return result
+
+    @staticmethod
+    def _merge_line_intervals(intervals: list[list[int]]) -> list[list[int]]:
+        """Merge inclusive line intervals stored in a Worker checkpoint."""
+        normalized = sorted(
+            [max(1, int(item[0])), max(1, int(item[1]))]
+            for item in intervals
+            if isinstance(item, (list, tuple)) and len(item) == 2
+            and int(item[1]) >= int(item[0])
+        )
+        merged: list[list[int]] = []
+        for start, end in normalized:
+            if not merged or start > merged[-1][1] + 1:
+                merged.append([start, end])
+            else:
+                merged[-1][1] = max(merged[-1][1], end)
+        return merged
+
+    @classmethod
+    def _incremental_file_range(
+        cls, arguments: dict, result: dict, delivered: dict[str, dict],
+    ) -> dict | None:
+        """Return only file lines not already delivered for this source version.
+
+        Exact tool-argument caching misses overlapping pagination such as
+        ``1-400`` followed by ``200-500``.  Track covered line intervals by
+        path and source version so the second response contains only 401-500.
+        A changed file version naturally starts a fresh coverage record.
+        """
+        path = str(result.get("path") or arguments.get("path") or "")
+        source_version = str(result.get("source_version") or "")
+        content = result.get("content")
+        if not path or not source_version or not isinstance(content, str):
+            return None
+        total_lines = max(0, int(result.get("total_lines") or 0))
+        start = max(1, int(result.get("start_line") or 1))
+        content_lines = content.split("\n")
+        end = int(result.get("end_line") or (start + len(content_lines) - 1))
+        if total_lines:
+            end = min(end, total_lines)
+        if end < start:
+            return None
+
+        coverage_key = "read-range:" + hashlib.sha256(
+            f"{path}\0{source_version}".encode("utf-8")
+        ).hexdigest()
+        record = delivered.get(coverage_key) or {}
+        covered = cls._merge_line_intervals(list(record.get("intervals") or []))
+
+        uncovered: list[list[int]] = [[start, end]]
+        for covered_start, covered_end in covered:
+            next_uncovered: list[list[int]] = []
+            for item_start, item_end in uncovered:
+                if covered_end < item_start or covered_start > item_end:
+                    next_uncovered.append([item_start, item_end])
+                    continue
+                if item_start < covered_start:
+                    next_uncovered.append([item_start, covered_start - 1])
+                if covered_end < item_end:
+                    next_uncovered.append([covered_end + 1, item_end])
+            uncovered = next_uncovered
+            if not uncovered:
+                break
+
+        delivered[coverage_key] = {
+            "path": path,
+            "source_version": source_version,
+            "intervals": cls._merge_line_intervals(covered + [[start, end]]),
+            "summary": str(record.get("summary") or content[:1200]),
+        }
+        while len(delivered) > 160:
+            delivered.pop(next(iter(delivered)))
+
+        if not uncovered:
+            return {
+                "status": "unchanged",
+                "incremental": True,
+                "tool": "read_file",
+                "path": path,
+                "source_version": source_version,
+                "covered_lines": [start, end],
+                "total_lines": total_lines,
+                "has_more": bool(result.get("has_more")),
+                "next_start": result.get("next_start"),
+                "summary": str(
+                    record.get("summary")
+                    or content[:1200]
+                    or f"Previously delivered {path} lines {start}-{end}"
+                ),
+                "message": (
+                    "These unchanged lines were already delivered in this "
+                    "Worker session. Reuse them; continue at next_start when "
+                    "has_more is true."
+                ),
+            }
+
+        segments = []
+        for segment_start, segment_end in uncovered:
+            offset_start = segment_start - start
+            offset_end = segment_end - start + 1
+            segments.append({
+                "start_line": segment_start,
+                "end_line": segment_end,
+                "content": "\n".join(content_lines[offset_start:offset_end]),
+            })
+        incremental = dict(result)
+        incremental["incremental"] = bool(covered)
+        incremental["new_line_ranges"] = uncovered
+        if len(segments) == 1:
+            incremental["start_line"] = segments[0]["start_line"]
+            incremental["end_line"] = segments[0]["end_line"]
+            incremental["content"] = segments[0]["content"]
+        else:
+            incremental.pop("content", None)
+            incremental["segments"] = segments
+        if covered:
+            incremental["message"] = (
+                "Only previously unseen lines are included; reuse overlapping "
+                "lines from the existing Worker session."
+            )
+        return incremental
 
     @staticmethod
     def _exploration_result_is_truncated(

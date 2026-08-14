@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from orchestrator.runtime_paths import runtime_gitignore_rules
+
 from app.subprocess_utils import run_process
 
 logger = logging.getLogger(__name__)
@@ -50,19 +52,7 @@ ROCKCORE_IGNORE_LINES = (
     "*~",
     "",
     "# RockCore runtime isolation",
-    ".ai/worktrees/",
-    ".ai/runtime/",
-    ".ai/recovery/",
-    ".ai/reports/",
-    ".ai/repository_map.json",
-    ".ai/agents.json",
-    ".ai/project.md",
-    ".ai/architecture.md",
-    ".ai/decisions.md",
-    ".ai/coding_rules.md",
-    ".ai/protected_paths.md",
-    ".ai/known_issues.md",
-    ".ai/glossary.md",
+    *runtime_gitignore_rules(),
 )
 
 

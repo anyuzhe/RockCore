@@ -47,6 +47,71 @@ def test_incremental_tool_result_references_unchanged_version():
     assert "const ready = true" in second["summary"]
 
 
+def test_incremental_file_result_returns_only_unseen_overlapping_lines():
+    delivered = {}
+    source_version = "v1"
+    first_result = {
+        "status": "success", "path": "game.js",
+        "source_version": source_version,
+        "content": "\n".join(f"line {index}" for index in range(1, 401)),
+        "start_line": 1, "end_line": 400, "total_lines": 500,
+        "has_more": True, "next_start": 401,
+    }
+    overlap_result = {
+        "status": "success", "path": "game.js",
+        "source_version": source_version,
+        "content": "\n".join(f"line {index}" for index in range(200, 501)),
+        "start_line": 200, "end_line": 500, "total_lines": 500,
+        "has_more": False, "next_start": None,
+    }
+
+    first = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js", "start": 1, "end": 400},
+        first_result, delivered,
+    )
+    overlap = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js", "start": 200, "end": 500},
+        overlap_result, delivered,
+    )
+    repeated = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js", "start": 250, "end": 350},
+        {
+            **overlap_result,
+            "content": "\n".join(f"line {index}" for index in range(250, 351)),
+            "start_line": 250, "end_line": 350,
+        }, delivered,
+    )
+
+    assert first["content"].startswith("line 1\n")
+    assert overlap["incremental"] is True
+    assert overlap["new_line_ranges"] == [[401, 500]]
+    assert overlap["start_line"] == 401
+    assert overlap["content"].startswith("line 401\n")
+    assert "line 400" not in overlap["content"]
+    assert repeated["status"] == "unchanged"
+    assert repeated["covered_lines"] == [250, 350]
+
+
+def test_incremental_file_result_resets_coverage_after_file_change():
+    delivered = {}
+    old = {
+        "status": "success", "path": "game.js", "source_version": "v1",
+        "content": "old", "start_line": 1, "end_line": 1,
+        "total_lines": 1,
+    }
+    new = {**old, "source_version": "v2", "content": "new"}
+
+    WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js"}, old, delivered,
+    )
+    refreshed = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js"}, new, delivered,
+    )
+
+    assert refreshed["content"] == "new"
+    assert refreshed["new_line_ranges"] == [[1, 1]]
+
+
 def test_worker_resumes_protocol_valid_conversation_from_same_group():
     class Router:
         def __init__(self):

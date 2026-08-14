@@ -155,6 +155,56 @@ def test_untracked_runtime_report_is_removed_from_task_worktree(tmp_path):
     assert report.read_text(encoding="utf-8") == "main report\n"
 
 
+def test_eval_and_skill_learning_runtime_files_never_enter_task_commit(tmp_path):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(str(project), worktrees_dir=str(tmp_path / "worktrees"))
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-RUNTIME")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("task output\n", encoding="utf-8")
+        eval_file = worktree / ".ai" / "evals" / "failures.jsonl"
+        eval_file.parent.mkdir(parents=True, exist_ok=True)
+        eval_file.write_text('{"failure": true}\n', encoding="utf-8")
+        learning = worktree / ".ai" / "skill-learning.json"
+        learning.write_text('{"learned": true}\n', encoding="utf-8")
+        return await manager.commit_and_merge("T001", "produce output")
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "merged"
+    assert result["staged_paths"] == ["output.txt"]
+    assert not (project / ".ai" / "evals" / "failures.jsonl").exists()
+    assert not (project / ".ai" / "skill-learning.json").exists()
+
+
+def test_continuation_does_not_copy_dirty_runtime_metadata(tmp_path):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(str(project), worktrees_dir=str(tmp_path / "worktrees"))
+
+    async def scenario():
+        source = await manager.create_task_worktree("T001", "JOB-OLD")
+        source_root = Path(source["path"])
+        (source_root / "checkpoint.txt").write_text("useful\n", encoding="utf-8")
+        eval_file = source_root / ".ai" / "evals" / "failures.jsonl"
+        eval_file.parent.mkdir(parents=True, exist_ok=True)
+        eval_file.write_text("runtime\n", encoding="utf-8")
+        manager.preserve_worktree("T001")
+
+        resumed = await manager.create_task_worktree(
+            "T001", "JOB-NEW", source_job_id="JOB-OLD"
+        )
+        resumed_root = Path(resumed["path"])
+        return resumed, resumed_root
+
+    resumed, resumed_root = asyncio.run(scenario())
+
+    assert resumed["status"] == "created"
+    assert "checkpoint.txt" in resumed["resumed_files"]
+    assert ".ai/evals/failures.jsonl" not in resumed["resumed_files"]
+    assert not (resumed_root / ".ai" / "evals" / "failures.jsonl").exists()
+
+
 def test_continuation_neutralizes_reports_committed_by_old_branch(tmp_path):
     project = _initialize_project(tmp_path)
     event_report = project / ".ai" / "reports" / "OLD.events.jsonl"
@@ -409,6 +459,34 @@ def test_continuation_can_integrate_already_committed_source_output(tmp_path):
 
     asyncio.run(scenario())
     assert (project / "completed.md").read_text(encoding="utf-8") == "done\n"
+
+
+def test_worker_owned_commit_is_attributed_only_to_current_product_paths(tmp_path):
+    project = _initialize_project(tmp_path)
+    manager = MergeManager(
+        str(project), worktrees_dir=str(tmp_path / "worktrees")
+    )
+
+    async def scenario():
+        created = await manager.create_task_worktree("T001", "JOB-COMMITTED")
+        worktree = Path(created["path"])
+        (worktree / "output.txt").write_text("done\n", encoding="utf-8")
+        runtime = worktree / ".ai" / "evals" / "failures.jsonl"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("runtime\n", encoding="utf-8")
+        assert _git(worktree, "add", "-A").returncode == 0
+        assert _git(
+            worktree, "-c", "user.name=Test", "-c",
+            "user.email=test@example.com", "commit", "-m", "worker commit",
+        ).returncode == 0
+        return await manager.commit_and_merge("T001", "finish task")
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "merged"
+    assert result["staged_paths"] == ["output.txt"]
+    assert (project / "output.txt").read_text(encoding="utf-8") == "done\n"
+    assert not (project / ".ai" / "evals" / "failures.jsonl").exists()
 
 
 def test_different_untracked_target_collision_is_backed_up_and_merged(tmp_path):

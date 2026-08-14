@@ -41,6 +41,19 @@ Thumbs.db
 *~
 
 # RockCore runtime isolation
+.ai/evals/
+.ai/reports/
 .ai/worktrees/
 .ai/runtime/
+.ai/recovery/
+.ai/skill-learning.json
+.ai/repository_map.json
+.ai/agents.json
+.ai/project.md
+.ai/architecture.md
+.ai/decisions.md
+.ai/coding_rules.md
+.ai/protected_paths.md
+.ai/known_issues.md
+.ai/glossary.md
 # <<< RockCore managed ignores <<<

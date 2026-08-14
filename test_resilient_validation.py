@@ -47,6 +47,38 @@ def test_repository_bootstrap_creates_safe_initial_commit(tmp_path):
     assert "node_modules/" in ignore_text
     assert ".ai/runtime/" in ignore_text
     assert ".ai/recovery/" in ignore_text
+    assert ".ai/evals/" in ignore_text
+    assert ".ai/skill-learning.json" in ignore_text
+
+
+def test_validation_failure_category_separates_environment_from_code():
+    assert TestManager._validation_failure_category([
+        "Test command failed: python: command not found"
+    ]) == "environment"
+    assert TestManager._validation_failure_category([
+        "No file changes detected from the job baseline"
+    ]) == "no_progress"
+    assert TestManager._validation_failure_category([
+        "main.py: invalid syntax"
+    ]) == "code_or_test"
+
+
+def test_model_repair_skips_environment_and_runtime_only_failures():
+    assert not Engine._validation_allows_model_repair(
+        {"failure_category": "environment"},
+        "python: command not found",
+        {"changed": ["main.py"]},
+    )
+    assert not Engine._validation_allows_model_repair(
+        {"failure_category": "code_or_test"},
+        "validation failed",
+        {"changed": [".ai/evals/failures.jsonl"]},
+    )
+    assert Engine._validation_allows_model_repair(
+        {"failure_category": "code_or_test"},
+        "main.py: invalid syntax",
+        {"changed": ["main.py"]},
+    )
 
 
 def test_repository_bootstrap_ignores_generated_code_artifacts(tmp_path):
