@@ -563,14 +563,30 @@ class TestManager:
             issues.append("No file changes detected from the job baseline")
 
         test_command = ""
-        test_output = ""
+        test_commands: list[str] = []
+        test_outputs: list[str] = []
         if not issues:
-            requested = getattr(task, "acceptance_command", "") or ""
-            if self._is_shell_command(requested) and not self._uses_git(requested):
-                test_command = requested
-            else:
-                test_command = self.discover_test_command(root)
-            if test_command:
+            requested_suite = list(dict.fromkeys(
+                str(command).strip()
+                for command in (
+                    getattr(task, "acceptance_commands", None) or []
+                )
+                if str(command).strip()
+            ))
+            legacy = str(
+                getattr(task, "acceptance_command", "") or ""
+            ).strip()
+            if legacy and legacy not in requested_suite:
+                requested_suite.append(legacy)
+            test_commands = [
+                command for command in requested_suite
+                if self._is_shell_command(command) and not self._uses_git(command)
+            ]
+            if not test_commands:
+                discovered = self.discover_test_command(root)
+                if discovered:
+                    test_commands = [discovered]
+            for test_command in test_commands:
                 try:
                     proc = run_embedded_python_command(
                         test_command, root, timeout=self.DEFAULT_TIMEOUT
@@ -580,11 +596,14 @@ class TestManager:
                             test_command, shell=True, capture_output=True, text=True,
                             timeout=self.DEFAULT_TIMEOUT, cwd=str(root),
                         )
-                    test_output = (proc.stdout + "\n" + proc.stderr).strip()
+                    command_output = (proc.stdout + "\n" + proc.stderr).strip()
+                    test_outputs.append(
+                        f"$ {test_command}\n{command_output}".strip()
+                    )
                     if proc.returncode != 0:
                         issues.append(
                             f"Test command failed ({test_command}): "
-                            f"{test_output[-1000:]}"
+                            f"{command_output[-1000:]}"
                         )
                 except subprocess.TimeoutExpired:
                     issues.append(f"Test command timed out: {test_command}")
@@ -595,8 +614,8 @@ class TestManager:
         summary_parts = [
             f"changed={len(changed)}", f"files_checked={len(checked)}"
         ]
-        if test_command:
-            summary_parts.append(f"tests={test_command}")
+        if test_commands:
+            summary_parts.append(f"tests={' | '.join(test_commands)}")
         if issues:
             summary_parts.append("issues=" + "; ".join(issues[:5]))
         output = "Local validation: " + ", ".join(summary_parts)
@@ -611,7 +630,9 @@ class TestManager:
             )
         return {"status": status, "passed": 1 if status == "passed" else 0,
                 "failed": len(issues), "output": output, "changes": diff,
-                "command": test_command, "test_output": test_output[:2000]}
+                "command": " | ".join(test_commands),
+                "commands": test_commands,
+                "test_output": "\n\n".join(test_outputs)[:4000]}
 
     @classmethod
     def _validate_source(cls, path: Path) -> dict:

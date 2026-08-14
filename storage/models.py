@@ -138,6 +138,13 @@ class Task(Base):
     skills = Column(JSON, default=list)
     dependencies = Column(JSON, default=list)
     acceptance_command = Column(String(1024), default="")
+    # Tasks that touch the same core files share one execution group, worktree
+    # and long-lived Worker conversation.  ``internal_steps`` keeps the
+    # Planner's original boundaries without spawning a fresh Worker per step.
+    context_key = Column(String(255), default="", index=True)
+    execution_group_id = Column(String(255), default="", index=True)
+    internal_steps = Column(JSON, default=list, nullable=False)
+    acceptance_commands = Column(JSON, default=list, nullable=False)
     order = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),

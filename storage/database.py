@@ -200,6 +200,10 @@ def _migrate_schema(engine):
         "result_data": "JSON NOT NULL DEFAULT '{}'",
         "failure_reason": "TEXT NOT NULL DEFAULT ''",
         "skills": "JSON NOT NULL DEFAULT '[]'",
+        "context_key": "VARCHAR(255) NOT NULL DEFAULT ''",
+        "execution_group_id": "VARCHAR(255) NOT NULL DEFAULT ''",
+        "internal_steps": "JSON NOT NULL DEFAULT '[]'",
+        "acceptance_commands": "JSON NOT NULL DEFAULT '[]'",
     }
     missing_task_results = [
         name for name in task_result_columns if name not in task_columns

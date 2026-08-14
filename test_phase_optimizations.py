@@ -303,7 +303,7 @@ def test_planner_context_key_merges_shared_runtime_reasoning():
     assert len(plan["tasks"]) == 1
 
 
-def test_transitive_overlap_does_not_merge_conflicting_acceptance_commands():
+def test_transitive_overlap_merges_and_preserves_acceptance_suite():
     plan = {
         "summary": "Keep independently validated stages",
         "tasks": [
@@ -331,10 +331,13 @@ def test_transitive_overlap_does_not_merge_conflicting_acceptance_commands():
     assert Engine._merge_shared_context_tasks(
         plan, {"active_files": ["shared.json", "service.py", "app.js"]}
     )
-    assert len(plan["tasks"]) == 2
-    assert {task["acceptance_command"] for task in plan["tasks"]} == {
-        "pytest -q", "npm test",
-    }
+    assert len(plan["tasks"]) == 1
+    merged = plan["tasks"][0]
+    assert merged["acceptance_commands"] == ["pytest -q", "npm test"]
+    assert merged["execution_group_id"].startswith("shared:")
+    assert [step["id"] for step in merged["internal_steps"]] == [
+        "T001", "T002", "T003",
+    ]
     assert PolicyEngine().check_task_plan(plan, {}) == []
 
 

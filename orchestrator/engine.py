@@ -2861,6 +2861,16 @@ class Engine:
                 ),
                 dependencies=task_data.get("dependencies", []),
                 acceptance_command=task_data.get("acceptance_command", ""),
+                context_key=str(task_data.get("context_key") or ""),
+                execution_group_id=str(
+                    task_data.get("execution_group_id")
+                    or task_data.get("context_key")
+                    or task_data.get("id", f"T{i+1:03d}")
+                ),
+                internal_steps=list(task_data.get("internal_steps") or []),
+                acceptance_commands=list(
+                    task_data.get("acceptance_commands") or []
+                ),
                 order=order_offset + i,
                 skills=selected_skills,
             )
@@ -3111,8 +3121,8 @@ class Engine:
         A Planner task maps to one fresh Worker conversation.  Repeated coding
         stages over the same runtime files therefore cost more context without
         providing isolation.  Merge those stages deterministically, while
-        preserving analysis-only deliverables, action boundaries, independent
-        scopes, and conflicting acceptance commands.
+        preserving analysis-only deliverables, action boundaries and independent
+        scopes. Different acceptance commands are retained as a group suite.
         """
         original = copy.deepcopy(plan_data)
         tasks = copy.deepcopy(list(plan_data.get("tasks") or []))
@@ -3169,11 +3179,7 @@ class Engine:
             left_root, right_root = find(left_id), find(right_id)
             if left_root == right_root:
                 return True
-            merged_commands = (
-                group_commands[left_root] | group_commands[right_root]
-            )
-            if len(merged_commands) > 1:
-                return False
+            merged_commands = group_commands[left_root] | group_commands[right_root]
             if order[left_root] <= order[right_root]:
                 parent[right_root] = left_root
                 group_commands[left_root] = merged_commands
@@ -3318,6 +3324,11 @@ class Engine:
         merged_by_primary: dict[str, dict] = {}
         removed_ids: set[str] = set()
         for group in merge_groups:
+            acceptance_suite = list(dict.fromkeys(
+                str(item.get("acceptance_command") or "").strip()
+                for item in group
+                if str(item.get("acceptance_command") or "").strip()
+            ))
             coding_members = [
                 item for item in group
                 if str(item.get("type") or "coding") == "coding"
@@ -3331,6 +3342,7 @@ class Engine:
                     removed_ids.add(task_id)
 
             sections = []
+            internal_steps = []
             for step_number, item in enumerate(group, start=1):
                 title = str(item.get("title") or item.get("id") or "执行步骤")
                 description = str(item.get("description") or "").strip()
@@ -3339,6 +3351,17 @@ class Engine:
                 sections.append(
                     f"【内部步骤 {step_number} · {title}】\n{description}".strip()
                 )
+                internal_steps.append({
+                    "id": str(item.get("id") or f"S{step_number:03d}"),
+                    "title": title,
+                    "type": str(item.get("type") or "coding"),
+                    "description": description,
+                    "allowed_paths": list(item.get("allowed_paths") or []),
+                    "acceptance_command": str(
+                        item.get("acceptance_command") or ""
+                    ).strip(),
+                    "status": "pending",
+                })
             primary["title"] = (
                 str(primary.get("title") or "完成共享上下文实现")
                 + "（连续执行）"
@@ -3349,6 +3372,15 @@ class Engine:
                 + "\n\n".join(sections)
             )
             primary["type"] = "coding"
+            declared_keys = [
+                context_keys[str(item.get("id") or "")]
+                for item in group
+                if context_keys.get(str(item.get("id") or ""))
+            ]
+            group_key = declared_keys[0] if declared_keys else f"shared:{primary_id.lower()}"
+            primary["context_key"] = group_key
+            primary["execution_group_id"] = group_key
+            primary["internal_steps"] = internal_steps
             primary["allowed_paths"] = list(dict.fromkeys(
                 str(path) for item in group
                 for path in (item.get("allowed_paths") or []) if str(path).strip()
@@ -3362,6 +3394,7 @@ class Engine:
                 for item in reversed(group)
                 if str(item.get("acceptance_command") or "").strip()
             ), "")
+            primary["acceptance_commands"] = acceptance_suite
             primary["dependencies"] = list(dict.fromkeys(
                 str(dependency) for item in group
                 for dependency in (item.get("dependencies") or [])
@@ -3912,6 +3945,21 @@ class Engine:
             )
             t._rockcore_project_surface = project_surface
             t._rockcore_fixed_context = render_fixed_context(latest_session)
+            execution_group_id = str(
+                getattr(t, "execution_group_id", "") or t.task_id
+            )
+            saved_worker_sessions = dict(
+                (getattr(job, "last_checkpoint", None) or {}).get(
+                    "worker_sessions"
+                ) or {}
+            )
+            saved_worker_session = saved_worker_sessions.get(
+                execution_group_id
+            ) or (dict(getattr(t, "result_data", None) or {}).get(
+                "worker_session"
+            ) or {})
+            if isinstance(saved_worker_session, dict) and saved_worker_session:
+                t._rockcore_worker_session = dict(saved_worker_session)
             shared_context = self._execution_continuation_context(
                 job, t, completed_task_results
             )
@@ -4270,6 +4318,9 @@ class Engine:
                 input_token_budget=t._rockcore_input_budget,
                 budget_reason=budget["reason"],
                 skills=t.skills or [],
+                execution_group_id=execution_group_id,
+                internal_steps=list(getattr(t, "internal_steps", None) or []),
+                resumed_worker_session=bool(saved_worker_session),
             )
 
             # A preserved continuation may already contain everything the task
@@ -4623,8 +4674,17 @@ class Engine:
                                     t, "_rockcore_retry_evidence", ""
                                 ))[:5000]
                             ),
+                            session_state=dict(getattr(
+                                t, "_rockcore_worker_session", None
+                            ) or {}),
                         )
                         if isinstance(repair_result, dict):
+                            if isinstance(
+                                repair_result.get("worker_session"), dict
+                            ):
+                                t._rockcore_worker_session = dict(
+                                    repair_result["worker_session"]
+                                )
                             evidence = self._worker_retry_evidence(repair_result)
                             if evidence:
                                 t._rockcore_retry_evidence = evidence
@@ -5263,6 +5323,12 @@ class Engine:
         retry_evidence = self._worker_retry_evidence(
             dict(getattr(task, "result_data", None) or {})
         )
+        worker_session = dict(
+            getattr(task, "_rockcore_worker_session", None)
+            or (dict(getattr(task, "result_data", None) or {}).get(
+                "worker_session"
+            ) or {})
+        )
         initial_turn_budget = getattr(worker, "max_turns", 16)
         document_profile = getattr(task, "_rockcore_document_profile", None)
         continuation_turn_budget = (
@@ -5408,8 +5474,12 @@ class Engine:
                     task,
                     project_root=worktree_root,
                     recovery_context=recovery_context,
+                    session_state=worker_session,
                 )
                 if isinstance(result, dict):
+                    if isinstance(result.get("worker_session"), dict):
+                        worker_session = dict(result["worker_session"])
+                        task._rockcore_worker_session = worker_session
                     current_evidence = self._worker_retry_evidence(result)
                     if current_evidence:
                         retry_evidence = current_evidence
@@ -5675,7 +5745,8 @@ class Engine:
             or self._is_provider_unavailable(last_error)
         ):
             fallback = await self._run_worker_fallback(
-                worker, task, worktree_root, last_error
+                worker, task, worktree_root, last_error,
+                session_state=worker_session,
             )
             if fallback:
                 if fallback.get("status") == "completed":
@@ -6246,7 +6317,8 @@ class Engine:
         return any(marker in normalized for marker in markers)
 
     async def _run_worker_fallback(self, worker, task, worktree_root: str,
-                                   original_error: str) -> dict | None:
+                                   original_error: str,
+                                   session_state: dict | None = None) -> dict | None:
         """Try one tool-capable alternate worker when the primary provider is unavailable."""
         fallback_errors = []
         configured_provider = str(
@@ -6275,7 +6347,14 @@ class Engine:
                         "Use the existing project state and finish the task with focused "
                         "tool calls; do not repeat broad exploration."
                     ),
+                    session_state=session_state,
                 )
+                if isinstance(result, dict) and isinstance(
+                    result.get("worker_session"), dict
+                ):
+                    task._rockcore_worker_session = dict(
+                        result["worker_session"]
+                    )
             except Exception as error:
                 fallback_errors.append(f"{provider}: {error}")
                 continue
@@ -7109,6 +7188,26 @@ class Engine:
         payload = json.loads(json.dumps(
             result or {}, ensure_ascii=False, default=str
         ))
+        internal_steps = [
+            dict(step) for step in (
+                getattr(task, "internal_steps", None) or []
+            ) if isinstance(step, dict)
+        ]
+        if internal_steps:
+            if status == "done":
+                for step in internal_steps:
+                    step["status"] = "done"
+            payload["execution_group"] = {
+                "id": str(
+                    getattr(task, "execution_group_id", "") or task.task_id
+                ),
+                "context_key": str(getattr(task, "context_key", "") or ""),
+                "status": status,
+                "internal_steps": internal_steps,
+            }
+            repos["task"].update_definition(
+                task.id, internal_steps=internal_steps
+            )
         retry_evidence = str(
             getattr(task, "_rockcore_retry_evidence", "") or ""
         ).strip()
@@ -7244,6 +7343,25 @@ class Engine:
             existing_checkpoint["task_runtimes"] = task_runtimes
         else:
             existing_checkpoint.pop("task_runtimes", None)
+        group_id = str(
+            getattr(task, "execution_group_id", "") or task.task_id
+        )
+        worker_sessions = dict(
+            existing_checkpoint.get("worker_sessions") or {}
+        )
+        worker_session = dict(
+            getattr(task, "_rockcore_worker_session", None)
+            or payload.get("worker_session")
+            or {}
+        )
+        if worker_session and status != "done":
+            worker_sessions[group_id] = worker_session
+        else:
+            worker_sessions.pop(group_id, None)
+        if worker_sessions:
+            existing_checkpoint["worker_sessions"] = worker_sessions
+        else:
+            existing_checkpoint.pop("worker_sessions", None)
         existing_checkpoint["budget"] = (
             self.model_router.cost_engine.get_budget_snapshot(job.job_id)
         )
@@ -7630,6 +7748,13 @@ Prefer these existing files when relevant:
             allowed_paths=direct_task["allowed_paths"],
             dependencies=[], acceptance_command="", order=0,
             skills=selected_skills,
+            context_key="direct:t001", execution_group_id="direct:t001",
+            internal_steps=[{
+                "id": "T001", "title": direct_task["title"],
+                "type": task_type, "description": description,
+                "allowed_paths": direct_task["allowed_paths"],
+                "acceptance_command": "", "status": "pending",
+            }],
         )
 
         worker = self.get_agent("worker")

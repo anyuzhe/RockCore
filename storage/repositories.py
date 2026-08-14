@@ -336,7 +336,10 @@ class TaskRepository:
                task_type: str = "coding", description: str = "",
                allowed_paths: list = None, dependencies: list = None,
                acceptance_command: str = "", order: int = 0,
-               skills: list[str] | None = None) -> Task:
+               skills: list[str] | None = None,
+               context_key: str = "", execution_group_id: str = "",
+               internal_steps: list[dict] | None = None,
+               acceptance_commands: list[str] | None = None) -> Task:
         task = Task(
             task_id=task_id, job_id=job_id, title=title,
             description=description, task_type=task_type,
@@ -344,6 +347,12 @@ class TaskRepository:
             skills=skills or [],
             dependencies=dependencies or [],
             acceptance_command=acceptance_command,
+            context_key=context_key,
+            execution_group_id=execution_group_id or context_key or task_id,
+            internal_steps=list(internal_steps or []),
+            acceptance_commands=list(acceptance_commands or (
+                [acceptance_command] if acceptance_command else []
+            )),
             order=order
         )
         self.session.add(task)
@@ -389,7 +398,11 @@ class TaskRepository:
                           allowed_paths: list[str] | None = None,
                           acceptance_command: str | None = None,
                           skills: list[str] | None = None,
-                          task_type: str | None = None) -> Optional[Task]:
+                          task_type: str | None = None,
+                          context_key: str | None = None,
+                          execution_group_id: str | None = None,
+                          internal_steps: list[dict] | None = None,
+                          acceptance_commands: list[str] | None = None) -> Optional[Task]:
         """Refine an unstarted task from verified prerequisite findings."""
         task = self.get_by_pk(task_pk)
         if task:
@@ -403,6 +416,14 @@ class TaskRepository:
                 task.skills = skills
             if task_type is not None:
                 task.task_type = task_type
+            if context_key is not None:
+                task.context_key = context_key
+            if execution_group_id is not None:
+                task.execution_group_id = execution_group_id
+            if internal_steps is not None:
+                task.internal_steps = list(internal_steps)
+            if acceptance_commands is not None:
+                task.acceptance_commands = list(acceptance_commands)
             task.updated_at = datetime.now(timezone.utc)
             self.session.commit()
         return task

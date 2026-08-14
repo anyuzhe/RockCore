@@ -141,7 +141,8 @@ class WorkerAgent:
     async def run(self, task, project=None, project_root: str | None = None,
                   provider_override: str | None = None,
                   model_override: str | None = None,
-                  recovery_context: str = "") -> dict:
+                  recovery_context: str = "",
+                  session_state: dict | None = None) -> dict:
         """Execute a single task using the tool-calling loop."""
         logger.info(f"Worker: executing task {task.task_id}: {task.title}")
 
@@ -220,6 +221,9 @@ Description: {task.description}
 Type: {task.task_type}
 Allowed Paths: {task.allowed_paths or 'all'}
 Acceptance Command: {task.acceptance_command or 'none'}
+Acceptance Suite: {getattr(task, 'acceptance_commands', None) or 'none'}
+Execution Group: {getattr(task, 'execution_group_id', '') or task.task_id}
+Internal Steps: {json.dumps(getattr(task, 'internal_steps', None) or [], ensure_ascii=False, default=str)}
 Selected Skills: {', '.join(selected_skills) or 'none'}
 {task_memory_context}
 """
@@ -280,14 +284,41 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 + "."
             )
 
-        messages = [{"role": "user", "content": task_context}]
+        execution_group_id = str(
+            getattr(task, "execution_group_id", "") or task.task_id
+        )
+        restored_state = dict(session_state or {})
+        restored_messages = restored_state.get("messages")
+        can_resume = bool(
+            isinstance(restored_messages, list)
+            and restored_messages
+            and str(restored_state.get("execution_group_id") or "")
+            == execution_group_id
+        )
+        if can_resume:
+            messages = json.loads(json.dumps(
+                restored_messages, ensure_ascii=False, default=str
+            ))
+            messages = self._repair_tool_message_sequence(messages)
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Continue the same execution group from its saved model/tool "
+                    "conversation. Reuse prior observations and file results; do "
+                    "not reload unchanged project context. Apply the current "
+                    "requirements and recovery guidance below:\n"
+                    + task_context[-8000:]
+                ),
+            })
+        else:
+            messages = [{"role": "user", "content": task_context}]
         total_input = 0
         total_output = 0
         tool_calls_made = []
         final_content = ""
         no_changes_declared = False
-        exploration_calls = 0
-        has_written = False
+        exploration_calls = int(restored_state.get("exploration_calls") or 0)
+        has_written = bool(restored_state.get("has_written", False))
         exploration_observations: dict[tuple[str, str], tuple[str, str]] = {}
         consecutive_uninformative_reads = 0
         uninformative_read_warning_sent = False
@@ -303,7 +334,12 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         external_action_completed = False
         external_action_signatures: set[tuple[str, str]] = set()
         verified_existing_state = False
-        pending_document_pages: dict[str, int] = {}
+        pending_document_pages: dict[str, int] = dict(
+            restored_state.get("document_progress") or {}
+        )
+        delivered_tool_results: dict[str, dict] = dict(
+            restored_state.get("delivered_tool_results") or {}
+        )
         repeated_errors: dict[str, int] = {}
         truncated_tool_failures = 0
         exploration_warning_sent = False
@@ -321,6 +357,27 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             for item in tool_definitions
             if isinstance(item, dict)
         }
+
+        def finish(payload: dict) -> dict:
+            """Attach a compact, protocol-valid checkpoint to every exit path."""
+            checkpoint_messages = self._repair_tool_message_sequence(messages)
+            checkpoint_messages = self._compact_messages(
+                checkpoint_messages, max_chars=36_000
+            )
+            checkpoint = {
+                "version": 1,
+                "execution_group_id": execution_group_id,
+                "messages": checkpoint_messages,
+                "delivered_tool_results": delivered_tool_results,
+                "has_written": has_written,
+                "exploration_calls": exploration_calls,
+                "document_progress": dict(pending_document_pages),
+                "provider": str(provider_override or ""),
+                "model": str(model_override or ""),
+            }
+            task._rockcore_worker_session = checkpoint
+            payload["worker_session"] = checkpoint
+            return payload
 
         try:
             for turn in range(self.max_turns):
@@ -519,10 +576,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 )
 
                 if not isinstance(response, dict):
-                    return self._failure(
+                    return finish(self._failure(
                         "Provider returned an invalid response object",
                         tool_calls_made, total_input, total_output,
-                    )
+                    ))
 
                 usage = response.get("usage") or {}
                 if not isinstance(usage, dict):
@@ -652,7 +709,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             "content": (content or "")[-1600:],
                         })
                         if premature_completion_count >= 2:
-                            return {
+                            return finish({
                                 "status": "failed",
                                 "error": "Coding model ended without editing files",
                                 "content": content or "",
@@ -660,7 +717,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 "tool_calls": tool_calls_made,
                                 "input_tokens": total_input,
                                 "output_tokens": total_output,
-                            }
+                            })
                         messages.append({
                             "role": "user",
                             "content": (
@@ -683,11 +740,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             "content": (content or "")[-1600:],
                         })
                         if premature_completion_count >= 2:
-                            return self._failure(
+                            return finish(self._failure(
                                 "External action task ended without calling a "
                                 "mutating MCP tool",
                                 tool_calls_made, total_input, total_output,
-                            )
+                            ))
                         messages.append({
                             "role": "user",
                             "content": (
@@ -708,10 +765,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         })
                         if empty_report_count < 2:
                             continue
-                        return self._failure(
+                        return finish(self._failure(
                             "Read-only task ended without a report",
                             tool_calls_made, total_input, total_output,
-                        )
+                        ))
                     # No more tool calls — task is complete
                     logger.info(f"Worker: task {task.task_id} completed in {turn+1} turns")
                     final_content = content or ""
@@ -935,10 +992,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         source_path = str(
                             result.get("path") or args.get("path") or "PDF"
                         )
-                        return self._failure(
+                        return finish(self._failure(
                             f"USER_INPUT_REQUIRED: {source_path}: {reason}",
                             tool_calls_made, total_input, total_output,
-                        )
+                        ))
                     if (
                         task.task_type == "coding"
                         and func_name in WRITE_TOOLS
@@ -955,10 +1012,10 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             "args": args,
                             "result_status": "rejected",
                         })
-                        return self._failure(
+                        return finish(self._failure(
                             str(result.get("error") or "Path not in allowed set"),
                             tool_calls_made, total_input, total_output,
-                        )
+                        ))
                     uninformative_exploration = False
                     if (
                         is_exploration
@@ -1064,9 +1121,12 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     })
 
                     # Format result for the model
+                    model_result = self._incremental_result_for_model(
+                        func_name, args, result, delivered_tool_results
+                    )
                     result_limit = 18_000 if func_name == "read_pdf" else 1_800
                     result_str = json.dumps(
-                        result, ensure_ascii=False, default=str
+                        model_result, ensure_ascii=False, default=str
                     )[:result_limit]
                     messages.append({
                         "role": "tool",
@@ -1088,11 +1148,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             "the remaining sections."
                         )
                         if truncated_tool_failures >= 3:
-                            return self._failure(
+                            return finish(self._failure(
                                 "TOOL_PAYLOAD_TRUNCATED: the provider repeatedly "
                                 "returned an oversized incomplete write payload",
                                 tool_calls_made, total_input, total_output,
-                            )
+                            ))
                     elif result.get("status") in {"error", "rejected"} or result.get("error"):
                         signature = re.sub(
                             r"\d+", "#", str(result.get("error") or result.get("status"))
@@ -1107,11 +1167,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 "built-in tool before retrying."
                             )
                         elif count >= 6:
-                            return self._failure(
+                            return finish(self._failure(
                                 "REPEATED_TOOL_FAILURE: the same tool strategy "
                                 f"failed {count} times: {signature}",
                                 tool_calls_made, total_input, total_output,
-                            )
+                            ))
 
                 # Do not insert user guidance between an assistant tool_calls
                 # message and its tool replies. OpenAI-compatible providers reject
@@ -1190,11 +1250,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             # of converting harmless reads into task failure.
                             no_progress_turns = 4
                             continue
-                        return self._failure(
+                        return finish(self._failure(
                             "NO_PROGRESS: eight consecutive turns produced no "
                             "new evidence, file change, or artifact progress",
                             tool_calls_made, total_input, total_output,
-                        )
+                        ))
 
             else:
                 logger.warning(f"Worker: task {task.task_id} reached max turns ({self.max_turns})")
@@ -1204,7 +1264,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         f"{path} start_page={page}"
                         for path, page in sorted(pending_document_pages.items())
                     )
-                return {
+                return finish({
                     "status": "needs_continuation",
                     "error": (
                         f"Max turns ({self.max_turns}) reached{unread_detail}"
@@ -1215,7 +1275,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     "output_tokens": total_output,
                     "document_progress": dict(pending_document_pages),
                     "has_written": has_written,
-                }
+                })
 
             result = {
                 "status": "completed",
@@ -1231,16 +1291,16 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 result["no_changes"] = True
             if is_document_task:
                 result["document_progress"] = dict(pending_document_pages)
-            return result
+            return finish(result)
 
         except Exception as e:
             logger.error(f"Worker: task {task.task_id} failed: {e}")
-            return {
+            return finish({
                 "status": "failed",
                 "error": str(e),
                 "turns": len(tool_calls_made),
                 "tool_calls": tool_calls_made,
-            }
+            })
 
     @staticmethod
     def _progress_phase(tool_name: str) -> str:
@@ -1273,6 +1333,64 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             stable_result, ensure_ascii=False, sort_keys=True, default=str
         ).encode("utf-8")
         return source_version, hashlib.sha256(payload).hexdigest()
+
+    @classmethod
+    def _incremental_result_for_model(
+        cls, tool_name: str, arguments: dict, result: dict,
+        delivered: dict[str, dict],
+    ) -> dict:
+        """Send unchanged read/search results as a compact version reference.
+
+        ToolBroker may avoid the physical I/O, but returning its full cached
+        payload still spends model context.  The Worker session therefore
+        remembers exactly which version/result it has already seen. Changed or
+        paginated results are delivered in full; only an identical successful
+        observation is replaced by a compact, self-contained reminder.
+        """
+        if tool_name not in EXPLORATION_TOOLS:
+            return result
+        if result.get("status") in {"error", "rejected"} or result.get("error"):
+            return result
+        signature_payload = json.dumps(
+            {"tool": tool_name, "arguments": arguments},
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+        signature = hashlib.sha256(signature_payload.encode("utf-8")).hexdigest()
+        source_version, result_digest = cls._exploration_observation(result)
+        previous = delivered.get(signature) or {}
+        if (
+            previous.get("source_version") == source_version
+            and previous.get("result_digest") == result_digest
+            and not cls._exploration_result_is_truncated(result, tool_name)
+        ):
+            return {
+                "status": "unchanged",
+                "incremental": True,
+                "tool": tool_name,
+                "path": str(result.get("path") or arguments.get("path") or ""),
+                "source_version": source_version,
+                "result_ref": signature[:16],
+                "summary": str(previous.get("summary") or "")[:1200],
+                "message": (
+                    "Unchanged since this Worker session last received it; "
+                    "reuse the prior result instead of reading it again."
+                ),
+            }
+        stable = {
+            key: value for key, value in result.items()
+            if key not in {"duration_ms", "absolute_path"}
+        }
+        delivered[signature] = {
+            "source_version": source_version,
+            "result_digest": result_digest,
+            "summary": json.dumps(
+                stable, ensure_ascii=False, default=str
+            )[:1200],
+        }
+        # Bound checkpoint growth when a very long task touches many sources.
+        while len(delivered) > 160:
+            delivered.pop(next(iter(delivered)))
+        return result
 
     @staticmethod
     def _exploration_result_is_truncated(

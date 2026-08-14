@@ -21,7 +21,74 @@ def _task(task_type="coding"):
         task_type=task_type,
         allowed_paths=["game.js", "index.html"],
         acceptance_command="",
+        acceptance_commands=[],
+        execution_group_id="runtime:game",
+        internal_steps=[],
     )
+
+
+def test_incremental_tool_result_references_unchanged_version():
+    delivered = {}
+    result = {
+        "status": "success", "path": "game.js",
+        "source_version": "v1", "content": "const ready = true;",
+    }
+
+    first = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js"}, result, delivered
+    )
+    second = WorkerAgent._incremental_result_for_model(
+        "read_file", {"path": "game.js"}, result, delivered
+    )
+
+    assert first["content"] == "const ready = true;"
+    assert second["status"] == "unchanged"
+    assert second["incremental"] is True
+    assert "const ready = true" in second["summary"]
+
+
+def test_worker_resumes_protocol_valid_conversation_from_same_group():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+            self.message_batches = []
+
+        async def chat_with_tools(self, *_args, **_kwargs):
+            self.calls += 1
+            self.message_batches.append(json.loads(json.dumps(_args[2])))
+            if self.calls == 1:
+                return {
+                    "content": "Reading once.",
+                    "tool_calls": [{
+                        "id": "read-once",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": "game.js"}),
+                        },
+                    }],
+                    "usage": {},
+                }
+            return {
+                "content": "Concrete review report.",
+                "tool_calls": [], "usage": {},
+            }
+
+    async def exercise():
+        router = Router()
+        worker = WorkerAgent(router, _RecordingBroker(), max_turns=4)
+        task = _task("analysis")
+        first = await worker.run(task)
+        second = await worker.run(task, session_state=first["worker_session"])
+        return router, first, second
+
+    router, first, second = asyncio.run(exercise())
+
+    assert first["status"] == "completed"
+    assert second["status"] == "completed"
+    resumed_messages = router.message_batches[-1]
+    assert any(message.get("tool_calls") for message in resumed_messages)
+    assert any(message.get("role") == "tool" for message in resumed_messages)
+    assert "Continue the same execution group" in resumed_messages[-1]["content"]
 
 
 class _ToolSequenceRouter:

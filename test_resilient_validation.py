@@ -126,6 +126,38 @@ def test_local_html_validation_reports_duplicate_ids(tmp_path):
         repos["_session"].close()
 
 
+def test_execution_group_runs_every_acceptance_command(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Suite", str(tmp_path))
+        baseline = TestManager.capture_snapshot(tmp_path)
+        (tmp_path / "one.py").write_text("value = 1\n", encoding="utf-8")
+        (tmp_path / "two.py").write_text("value = 2\n", encoding="utf-8")
+        task = _task(
+            project,
+            task_type="coding",
+            allowed_paths=["*.py"],
+            acceptance_command="python -m py_compile two.py",
+            acceptance_commands=[
+                "python -m py_compile one.py",
+                "python -m py_compile two.py",
+            ],
+        )
+
+        result = asyncio.run(engine.test_manager.validate_project(
+            task, repos, baseline_snapshot=baseline, project_root=tmp_path
+        ))
+
+        assert result["status"] == "passed"
+        assert result["commands"] == [
+            "python -m py_compile one.py",
+            "python -m py_compile two.py",
+        ]
+    finally:
+        repos["_session"].close()
+
+
 def test_provider_balance_error_requests_user_action_without_replanning(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))
