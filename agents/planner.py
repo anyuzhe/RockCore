@@ -90,6 +90,10 @@ Rules:
     context_key only when tasks would need the same loaded code and live runtime
     reasoning. Tasks with the same context_key will be merged into one long-lived
     Worker conversation. Use different keys for genuinely independent runtimes.
+28. One acceptance command field contains exactly one executable command. Never
+    join commands with &&, ||, semicolons or pipes. When deterministic acceptance
+    needs multiple commands, put each command separately in acceptance_commands
+    and keep acceptance_command as the primary/final command.
 
 Output ONLY valid JSON with this structure:
 {
@@ -104,7 +108,8 @@ Output ONLY valid JSON with this structure:
       "context_key": "game-runtime",
       "skills": ["simple-edit"],
       "allowed_paths": ["relative/path/glob", "*.html", "src/**/*.py"],
-      "acceptance_command": "pytest ..."
+      "acceptance_command": "pytest ...",
+      "acceptance_commands": ["python -m compileall -q .", "pytest ..."]
     }
   ]
 }
@@ -130,6 +135,9 @@ Rules:
    direct dependencies only, and real test commands when available.
 6. Do not repeat the original implementation. Plan only the changes needed to
    address the review findings and verify them.
+7. Never combine acceptance commands with &&, ||, semicolons or pipes. Put
+   multiple independent checks in acceptance_commands and keep one primary
+   executable command in acceptance_command.
 
 Output ONLY valid JSON with this structure:
 {
@@ -147,7 +155,8 @@ Output ONLY valid JSON with this structure:
         "dependencies": [],
         "skills": ["bug-fix"],
         "allowed_paths": ["relative/path/or/glob"],
-        "acceptance_command": ""
+        "acceptance_command": "",
+        "acceptance_commands": []
       }
     ]
   }
@@ -282,6 +291,7 @@ Output ONLY valid JSON."""
                 task.setdefault("allowed_paths", [])
                 task.setdefault("skills", [])
                 task.setdefault("acceptance_command", "")
+                task.setdefault("acceptance_commands", [])
 
             logger.info(f"Planner: created {len(plan['tasks'])} tasks")
             return plan
@@ -304,6 +314,7 @@ Output ONLY valid JSON."""
                         "allowed_paths": [],
                         "skills": [],
                         "acceptance_command": "",
+                        "acceptance_commands": [],
                     }
                 ],
             }
@@ -429,6 +440,7 @@ Output ONLY valid JSON.""",
                 task.setdefault("dependencies", [])
                 task.setdefault("allowed_paths", [])
                 task.setdefault("acceptance_command", "")
+                task.setdefault("acceptance_commands", [])
 
             if repairable and not plan["tasks"]:
                 repairable = False

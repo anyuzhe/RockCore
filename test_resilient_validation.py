@@ -158,6 +158,53 @@ def test_execution_group_runs_every_acceptance_command(tmp_path):
         repos["_session"].close()
 
 
+def test_combined_python_acceptance_is_split_and_run_as_a_suite(tmp_path):
+    engine = Engine(db_path=str(tmp_path / "studio.db"))
+    repos = engine._get_repos()
+    try:
+        project = repos["project"].create("Combined suite", str(tmp_path))
+        (tmp_path / "sample.py").write_text("value = 1\n", encoding="utf-8")
+        (tmp_path / "test_sample.py").write_text(
+            "def test_sample():\n    assert True\n", encoding="utf-8",
+        )
+        task = _task(
+            project,
+            title="Write and validate combined sample",
+            description="Create the sample and run its acceptance suite",
+            task_type="coding",
+            acceptance_command=(
+                "python -m py_compile sample.py && "
+                "python -m pytest -q test_sample.py"
+            ),
+        )
+
+        result = asyncio.run(engine.test_manager.run_tests(
+            task, repos, engine.event_bus, project_root=tmp_path,
+        ))
+
+        assert result["status"] == "passed"
+        assert result["commands"] == [
+            "python -m py_compile sample.py",
+            "python -m pytest -q test_sample.py",
+        ]
+        stored = repos["test_run"].list_by_task(task.id)
+        assert {run.command for run in stored} == set(result["commands"])
+    finally:
+        repos["_session"].close()
+
+
+def test_acceptance_splitter_preserves_quoted_operator():
+    command = (
+        'python -c "print(\'a && b\')" && '
+        "python -m pytest -q"
+    )
+
+    assert TestManager._split_sequential_commands(command) == [
+        'python -c "print(\'a && b\')"',
+        "python -m pytest -q",
+    ]
+
+
 def test_provider_balance_error_requests_user_action_without_replanning(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

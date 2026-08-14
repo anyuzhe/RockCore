@@ -4,6 +4,7 @@ import logging
 import fnmatch
 import hashlib
 import ast
+import copy
 import json
 import subprocess
 import time
@@ -282,12 +283,86 @@ class TestManager:
         base = command_basename(cmd)
         return base in VALID_TEST_COMMANDS
 
+    @staticmethod
+    def _split_sequential_commands(command: str) -> list[str]:
+        """Split unquoted ``&&`` without enabling general shell composition.
+
+        Planner output occasionally represents an acceptance suite as one
+        ``command_a && command_b`` string.  RockCore must keep rejecting shell
+        composition in the embedded Python runner, but the orchestrator can
+        safely turn a plain sequential suite into separately audited commands.
+        Operators inside quotes are preserved and ``||``/pipes/redirection are
+        deliberately not rewritten because they change control/data flow.
+        """
+        text = str(command or "").strip()
+        if not text:
+            return []
+        parts: list[str] = []
+        start = 0
+        quote = ""
+        escaped = False
+        index = 0
+        while index < len(text):
+            character = text[index]
+            if escaped:
+                escaped = False
+            elif character == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if character == quote:
+                    quote = ""
+            elif character in {"'", '"'}:
+                quote = character
+            elif text[index:index + 2] == "&&":
+                part = text[start:index].strip()
+                if not part:
+                    return [text]
+                parts.append(part)
+                index += 1
+                start = index + 1
+            index += 1
+        if quote:
+            return [text]
+        tail = text[start:].strip()
+        if not tail:
+            return [text]
+        parts.append(tail)
+        return parts
+
+    @classmethod
+    def acceptance_suite(cls, task: Any) -> list[str]:
+        """Return a de-duplicated suite of independently executable commands."""
+        raw_commands = [
+            str(command).strip()
+            for command in (getattr(task, "acceptance_commands", None) or [])
+            if str(command).strip()
+        ]
+        legacy = str(getattr(task, "acceptance_command", "") or "").strip()
+        if legacy:
+            raw_commands.append(legacy)
+        normalized: list[str] = []
+        for command in raw_commands:
+            candidates = cls._split_sequential_commands(command)
+            if len(candidates) > 1 and all(
+                cls._is_shell_command(candidate) for candidate in candidates
+            ):
+                values = candidates
+            else:
+                values = [command]
+            for value in values:
+                if value not in normalized:
+                    normalized.append(value)
+        return normalized
+
     async def run_tests(self, task: Any, repos: dict,
                         event_bus: EventBus | None = None,
                         baseline_snapshot: dict | None = None,
                         project_root: str | Path | None = None) -> dict:
         """Run a task's acceptance command and record results."""
-        command = task.acceptance_command
+        suite = self.acceptance_suite(task)
+        command = str(getattr(task, "acceptance_command", "") or "").strip()
+        if not command and suite:
+            command = suite[0]
         cwd = str(project_root or (
             task.job.project.root_path if task.job and task.job.project else "."
         ))
@@ -298,6 +373,37 @@ class TestManager:
             )
         if not command:
             return {"status": "skipped", "reason": "no acceptance command"}
+
+        if len(suite) > 1 or (suite and suite[0] != str(command).strip()):
+            results = []
+            for suite_command in suite:
+                command_task = copy.copy(task)
+                command_task.acceptance_command = suite_command
+                command_task.acceptance_commands = []
+                result = await self.run_tests(
+                    command_task, repos, event_bus,
+                    baseline_snapshot=baseline_snapshot,
+                    project_root=cwd,
+                )
+                results.append((suite_command, result))
+                if result.get("status") != "passed":
+                    break
+            passed = bool(results) and all(
+                result.get("status") == "passed" for _, result in results
+            ) and len(results) == len(suite)
+            return {
+                "status": "passed" if passed else "failed",
+                "passed": sum(int(result.get("passed") or 0) for _, result in results),
+                "failed": sum(int(result.get("failed") or 0) for _, result in results),
+                "output": "\n\n".join(
+                    f"$ {suite_command}\n{result.get('output') or result.get('error') or ''}"
+                    for suite_command, result in results
+                )[:4000],
+                "duration_ms": sum(
+                    int(result.get("duration_ms") or 0) for _, result in results
+                ),
+                "commands": [command for command, _ in results],
+            }
 
         # Only execute if it's an actual shell command
         if not self._is_shell_command(command):
@@ -566,18 +672,7 @@ class TestManager:
         test_commands: list[str] = []
         test_outputs: list[str] = []
         if not issues:
-            requested_suite = list(dict.fromkeys(
-                str(command).strip()
-                for command in (
-                    getattr(task, "acceptance_commands", None) or []
-                )
-                if str(command).strip()
-            ))
-            legacy = str(
-                getattr(task, "acceptance_command", "") or ""
-            ).strip()
-            if legacy and legacy not in requested_suite:
-                requested_suite.append(legacy)
+            requested_suite = self.acceptance_suite(task)
             test_commands = [
                 command for command in requested_suite
                 if self._is_shell_command(command) and not self._uses_git(command)
