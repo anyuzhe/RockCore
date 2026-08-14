@@ -61,8 +61,8 @@ python -m pip install -r requirements-build.txt
 输出目录为 `release/`：
 
 ```text
-RockCore-Setup-1.0.0-x64.exe
-RockCore-1.0.0-Windows-x64-portable.zip
+RockCore-Setup-1.0.3-x64.exe
+RockCore-1.0.3-Windows-x64-portable.zip
 SHA256SUMS.txt
 ```
 
