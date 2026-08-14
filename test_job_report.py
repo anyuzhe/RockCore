@@ -70,6 +70,10 @@ def test_job_report_persists_events_redacts_secrets_and_generates_pdf(tmp_path):
     )
     assert report_path == project_root / ".ai" / "reports" / "JOB-REPORT-001.pdf"
     assert report_path.is_file() and report_path.stat().st_size > 1000
+    metadata = json.loads(
+        report_path.with_suffix(".report.json").read_text(encoding="utf-8")
+    )
+    assert metadata["format_version"] == JobReportService.REPORT_FORMAT_VERSION
     assert len(PdfReader(str(report_path)).pages) >= 1
     report_events = engine.event_bus.get_history()
     assert any(event["type"] == "job_report_started" for event in report_events)
@@ -94,6 +98,24 @@ def test_historical_terminal_job_can_generate_report_without_event_log(tmp_path)
     assert path == project_root / ".ai" / "reports" / "JOB-REPORT-001.pdf"
     assert path.is_file()
     assert len(PdfReader(str(path)).pages) >= 1
+
+
+def test_legacy_report_is_regenerated_once_for_current_format(tmp_path):
+    engine, project_root, _task = _seed_job(tmp_path)
+    expected = project_root / ".ai" / "reports" / "JOB-REPORT-001.pdf"
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    expected.write_bytes(b"%PDF-1.4\nlegacy report")
+
+    assert engine.job_reports.report_path(
+        "JOB-REPORT-001", existing_only=True,
+    ) is None
+
+    generated = engine.job_reports.generate("JOB-REPORT-001")
+
+    assert generated == expected
+    assert engine.job_reports.report_path(
+        "JOB-REPORT-001", existing_only=True,
+    ) == expected
 
 
 def test_terminal_job_exposes_report_button_and_signal():

@@ -38,6 +38,7 @@ _SECRET_PATTERNS = (
 class JobReportService:
     """Record Job events and build a readable, restart-safe PDF report."""
 
+    REPORT_FORMAT_VERSION = 2
     _ORCHESTRATION_AGENTS = {
         "main_agent", "main_agent_summary", "governor", "planner", "reviewer",
     }
@@ -103,7 +104,22 @@ class JobReportService:
             path, _ = self._resolve_paths(job_id)
         except (LookupError, OSError):
             return None
-        return path if not existing_only or path.is_file() else None
+        if not existing_only:
+            return path
+        return path if path.is_file() and self._is_current_report(path) else None
+
+    @classmethod
+    def _report_metadata_path(cls, report_path: Path) -> Path:
+        return report_path.with_suffix(".report.json")
+
+    @classmethod
+    def _is_current_report(cls, report_path: Path) -> bool:
+        metadata_path = cls._report_metadata_path(report_path)
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            return False
+        return int(metadata.get("format_version") or 0) == cls.REPORT_FORMAT_VERSION
 
     def events(self, job_id: str) -> list[dict[str, Any]]:
         """Return the durable event recording used by reports and replay."""
@@ -181,18 +197,27 @@ class JobReportService:
         """Generate or refresh the full PDF report for one persisted Job."""
         report_path, event_path = self._resolve_paths(job_id)
         temp_path = report_path.with_suffix(".tmp.pdf")
+        metadata_path = self._report_metadata_path(report_path)
+        temp_metadata_path = metadata_path.with_suffix(".tmp.json")
         with self._lock_for(job_id):
             snapshot = self._sanitize(self._load_snapshot(job_id))
             events = self._load_events(event_path)
             try:
                 self._build_pdf(temp_path, snapshot, events)
                 os.replace(temp_path, report_path)
+                temp_metadata_path.write_text(json.dumps({
+                    "format_version": self.REPORT_FORMAT_VERSION,
+                    "job_id": job_id,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(temp_metadata_path, metadata_path)
             finally:
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except OSError:
-                        pass
+                for temporary in (temp_path, temp_metadata_path):
+                    if temporary.exists():
+                        try:
+                            temporary.unlink()
+                        except OSError:
+                            pass
         return report_path
 
     def _load_snapshot(self, job_id: str) -> dict[str, Any]:
