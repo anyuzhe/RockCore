@@ -2,12 +2,14 @@
 
 import hashlib
 import json
+import urllib.error
 
 import pytest
 
 import app.updater as updater
 from app.updater import (
     ReleaseAsset,
+    NoStableRelease,
     UpdateError,
     UpdateInfo,
     UpdateManager,
@@ -114,6 +116,47 @@ def test_check_ignores_current_and_rejects_prerelease(monkeypatch):
     respond(_release("1.3.0", prerelease=True))
     with pytest.raises(UpdateError, match="稳定版本"):
         UpdateManager().check()
+
+
+def test_latest_404_without_releases_is_not_reported_as_network_failure(
+    monkeypatch,
+):
+    calls = []
+
+    def respond(request, **_kwargs):
+        calls.append(request.full_url)
+        if request.full_url == updater.LATEST_RELEASE_API:
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, None
+            )
+        return _Response(b"[]", updater.RELEASES_API)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", respond)
+
+    with pytest.raises(NoStableRelease, match="尚未发布") as failure:
+        UpdateManager().check()
+
+    assert "无法连接" not in str(failure.value)
+    assert calls == [updater.LATEST_RELEASE_API, updater.RELEASES_API]
+
+
+def test_latest_404_can_recover_from_stable_release_list(monkeypatch):
+    payload = json.dumps([_release("1.3.0")]).encode()
+    monkeypatch.setattr(updater, "current_version", lambda: "1.2.0")
+
+    def respond(request, **_kwargs):
+        if request.full_url == updater.LATEST_RELEASE_API:
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, None
+            )
+        return _Response(payload, updater.RELEASES_API)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", respond)
+
+    result = UpdateManager().check()
+
+    assert result is not None
+    assert result.version == "1.3.0"
 
 
 def test_checksum_manifest_requires_one_exact_filename():

@@ -37,7 +37,9 @@ from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 from app.subprocess_utils import run_process
 from app.text_utils import strip_runtime_task_context
-from app.updater import UpdateError, UpdateInfo, UpdateManager, current_version
+from app.updater import (
+    NoStableRelease, UpdateError, UpdateInfo, UpdateManager, current_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2085,6 +2087,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在检查 RockCore 更新…")
         try:
             update = await asyncio.to_thread(self.update_manager.check)
+        except NoStableRelease as notice:
+            logger.info("No stable update release: %s", notice)
+            if manual:
+                QMessageBox.information(self, "暂无可用更新", str(notice))
+            return
         except UpdateError as error:
             logger.info("Update check unavailable: %s", error)
             if manual:

@@ -23,6 +23,10 @@ LATEST_RELEASE_API = (
     f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}"
     "/releases/latest"
 )
+RELEASES_API = (
+    f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}"
+    "/releases?per_page=20"
+)
 MAX_RELEASE_METADATA_BYTES = 2 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 1024 * 1024
 MAX_INSTALLER_BYTES = 1024 * 1024 * 1024
@@ -36,6 +40,10 @@ ALLOWED_DOWNLOAD_HOSTS = {
 
 class UpdateError(RuntimeError):
     """A safe, user-displayable update failure."""
+
+
+class NoStableRelease(UpdateError):
+    """The update service is reachable but has no installable release."""
 
 
 @dataclass(frozen=True)
@@ -160,22 +168,77 @@ class UpdateManager:
     def can_install(self) -> bool:
         return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
 
-    def check(self) -> UpdateInfo | None:
-        """Return a newer stable release, or ``None`` when already current."""
+    def _fetch_json(self, url: str):
+        """Fetch one trusted JSON document while preserving HTTP status."""
         try:
             with urllib.request.urlopen(
-                _request(self.api_url), timeout=self.timeout
+                _request(url), timeout=self.timeout
             ) as response:
                 _safe_https_url(response.geturl())
-                payload = json.loads(
+                return json.loads(
                     _read_response(response, MAX_RELEASE_METADATA_BYTES).decode(
                         "utf-8-sig"
                     )
                 )
+        except urllib.error.HTTPError:
+            # HTTPError is also a URLError. Preserve it so a valid 404 response
+            # is not incorrectly reported as a network connection failure.
+            raise
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise UpdateError(f"无法连接更新服务器：{error}") from error
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise UpdateError("更新服务器返回了无法识别的版本信息。") from error
+
+    @staticmethod
+    def _raise_http_error(error: urllib.error.HTTPError):
+        code = int(getattr(error, "code", 0) or 0)
+        if code in {401, 403}:
+            raise UpdateError(
+                f"更新服务器拒绝访问（HTTP {code}）。请稍后重试；若持续出现，"
+                "请检查 GitHub 匿名访问频率限制。"
+            ) from error
+        if code == 429:
+            raise UpdateError("更新检查过于频繁（HTTP 429），请稍后再试。") from error
+        if code == 404:
+            raise UpdateError(
+                "更新地址不存在或仓库无法公开访问（HTTP 404）。"
+            ) from error
+        raise UpdateError(
+            f"更新服务器返回 HTTP {code or '错误'}：{error.reason or '未知原因'}"
+        ) from error
+
+    def _release_after_latest_404(self):
+        """Distinguish an empty release feed from a missing repository."""
+        try:
+            releases = self._fetch_json(RELEASES_API)
+        except urllib.error.HTTPError as error:
+            self._raise_http_error(error)
+        if not isinstance(releases, list):
+            raise UpdateError("更新服务器返回了无法识别的版本列表。")
+        for release in releases:
+            if (
+                isinstance(release, dict)
+                and not release.get("draft")
+                and not release.get("prerelease")
+            ):
+                return release
+        raise NoStableRelease(
+            "更新服务连接正常，但当前尚未发布可安装的稳定版本。"
+            "Git 标签或 Actions 构建产物不会自动成为更新；请在 GitHub "
+            "Releases 中发布带安装包和 SHA256SUMS.txt 的正式版本。"
+        )
+
+    def check(self) -> UpdateInfo | None:
+        """Return a newer stable release, or ``None`` when already current."""
+        try:
+            payload = self._fetch_json(self.api_url)
+        except urllib.error.HTTPError as error:
+            if int(getattr(error, "code", 0) or 0) == 404 and (
+                self.api_url == LATEST_RELEASE_API
+            ):
+                payload = self._release_after_latest_404()
+            else:
+                self._raise_http_error(error)
 
         if (
             not isinstance(payload, dict)
