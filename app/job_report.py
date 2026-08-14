@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -36,6 +37,31 @@ _SECRET_PATTERNS = (
 
 class JobReportService:
     """Record Job events and build a readable, restart-safe PDF report."""
+
+    _ORCHESTRATION_AGENTS = {
+        "main_agent", "main_agent_summary", "governor", "planner", "reviewer",
+    }
+    # A single-agent comparison is necessarily counterfactual.  These factors
+    # make the estimate explicit and reproducible instead of presenting an
+    # unexplained percentage.  Execution work remains mostly necessary, while
+    # role hand-offs, repeated planning and independent reviews shrink more.
+    _SINGLE_AGENT_SCENARIOS = {
+        "optimistic": {
+            "execution_input": 0.65, "execution_output": 0.75,
+            "execution_calls": 0.55, "orchestration_input": 0.15,
+            "orchestration_output": 0.15, "orchestration_calls": 0.08,
+        },
+        "expected": {
+            "execution_input": 0.82, "execution_output": 0.90,
+            "execution_calls": 0.70, "orchestration_input": 0.25,
+            "orchestration_output": 0.25, "orchestration_calls": 0.15,
+        },
+        "conservative": {
+            "execution_input": 0.95, "execution_output": 0.98,
+            "execution_calls": 0.85, "orchestration_input": 0.40,
+            "orchestration_output": 0.40, "orchestration_calls": 0.25,
+        },
+    }
 
     def __init__(self, session_factory):
         self._session_factory = session_factory
@@ -351,6 +377,208 @@ class JobReportService:
             "error": "错误", "skipped": "已跳过",
         }.get(str(value or ""), str(value or "-"))
 
+    @staticmethod
+    def _infer_provider(model_name: str) -> str:
+        normalized = str(model_name or "").strip().lower()
+        if normalized.startswith("deepseek"):
+            return "deepseek"
+        if normalized.startswith("kimi"):
+            return "kimi"
+        if normalized.startswith(("gpt", "codex")):
+            return "codex"
+        return "历史记录"
+
+    @classmethod
+    def _usage_records(cls, snapshot: dict, events: list[dict]) -> tuple[list[dict], str]:
+        """Return one normalized record per model call plus any legacy residual."""
+        model_events = [item for item in events if item.get("event") == "model_chat"]
+        records: list[dict[str, Any]] = []
+        if model_events:
+            source = "逐次模型事件"
+            for item in model_events:
+                data = item.get("data") or {}
+                records.append({
+                    "agent_type": str(data.get("agent_type") or "unknown"),
+                    "provider": str(data.get("provider") or "unknown"),
+                    "model_name": str(data.get("model_name") or "unknown"),
+                    "billing_mode": str(data.get("billing_mode") or "api"),
+                    "input_tokens": max(0, int(data.get("input_tokens") or 0)),
+                    "cached_input_tokens": max(
+                        0, int(data.get("cached_input_tokens") or 0),
+                    ),
+                    "output_tokens": max(0, int(data.get("output_tokens") or 0)),
+                    "cost": max(0.0, float(data.get("estimated_cost") or 0.0)),
+                    "billable_cost": max(
+                        0.0, float(data.get("billable_cost") or 0.0),
+                    ),
+                    "calls": 1,
+                })
+        else:
+            source = "数据库 AgentRun 历史记录"
+            for task in snapshot.get("tasks") or []:
+                for run in task.get("agent_runs") or []:
+                    model_name = str(run.get("model_name") or "unknown")
+                    records.append({
+                        "agent_type": str(run.get("agent_type") or "unknown"),
+                        "provider": cls._infer_provider(model_name),
+                        "model_name": model_name,
+                        "billing_mode": str(run.get("billing_mode") or "api"),
+                        "input_tokens": max(0, int(run.get("input_tokens") or 0)),
+                        "cached_input_tokens": max(
+                            0, int(run.get("cached_input_tokens") or 0),
+                        ),
+                        "output_tokens": max(0, int(run.get("output_tokens") or 0)),
+                        "cost": max(0.0, float(run.get("cost") or 0.0)),
+                        "billable_cost": max(
+                            0.0, float(run.get("billable_cost") or 0.0),
+                        ),
+                        "calls": 1,
+                    })
+
+        # Events/AgentRun were introduced after Job-level totals.  Preserve any
+        # positive difference as an explicit legacy bucket so the report does
+        # not silently claim that a partial breakdown is complete.
+        job = snapshot.get("job") or {}
+        fields = {
+            "input_tokens": "usage_input_tokens",
+            "cached_input_tokens": "usage_cached_input_tokens",
+            "output_tokens": "usage_output_tokens",
+            "calls": "usage_calls",
+            "cost": "usage_cost",
+            "billable_cost": "usage_billable_cost",
+        }
+        residual = {}
+        for record_key, job_key in fields.items():
+            job_value = job.get(job_key)
+            if job_value is None:
+                residual[record_key] = 0
+                continue
+            detailed = sum(record.get(record_key, 0) or 0 for record in records)
+            residual[record_key] = max(0, job_value - detailed)
+        if any(float(value or 0) > 0 for value in residual.values()):
+            records.append({
+                "agent_type": "unknown",
+                "provider": "历史未归属",
+                "model_name": "历史未归属",
+                "billing_mode": "unknown",
+                **residual,
+            })
+        for record in records:
+            record["cached_input_tokens"] = min(
+                record["input_tokens"], record["cached_input_tokens"],
+            )
+        return records, source
+
+    @staticmethod
+    def _model_usage_breakdown(records: list[dict]) -> list[dict]:
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for record in records:
+            key = (record["provider"], record["model_name"])
+            row = grouped.setdefault(key, {
+                "provider": key[0], "model_name": key[1], "calls": 0,
+                "input_tokens": 0, "cached_input_tokens": 0,
+                "output_tokens": 0, "cost": 0.0, "billable_cost": 0.0,
+                "agent_types": set(), "billing_modes": set(),
+            })
+            for field in ("calls", "input_tokens", "cached_input_tokens", "output_tokens"):
+                row[field] += int(record.get(field) or 0)
+            for field in ("cost", "billable_cost"):
+                row[field] += float(record.get(field) or 0.0)
+            row["agent_types"].add(str(record.get("agent_type") or "unknown"))
+            row["billing_modes"].add(str(record.get("billing_mode") or "unknown"))
+        return sorted(
+            grouped.values(),
+            key=lambda row: row["input_tokens"] + row["output_tokens"],
+            reverse=True,
+        )
+
+    @classmethod
+    def _single_agent_comparison(cls, records: list[dict], job: dict) -> dict | None:
+        if not records:
+            return None
+        from orchestrator.cost_engine import CostEngine
+
+        main_candidates = [
+            record for record in records
+            if record.get("agent_type") in {"main_agent", "main_agent_summary"}
+        ] or [
+            record for record in records if record.get("agent_type") == "governor"
+        ] or list(records)
+        main_record = max(
+            main_candidates,
+            key=lambda item: int(item.get("input_tokens") or 0)
+            + int(item.get("output_tokens") or 0),
+        )
+        provider = str(main_record.get("provider") or "")
+        model_name = str(main_record.get("model_name") or "")
+        billing_mode = str(main_record.get("billing_mode") or "api")
+
+        def estimate(factors: dict[str, float]) -> dict:
+            totals = {
+                "input_tokens": 0.0, "cached_input_tokens": 0.0,
+                "output_tokens": 0.0, "calls": 0.0,
+            }
+            for record in records:
+                category = (
+                    "orchestration"
+                    if record.get("agent_type") in cls._ORCHESTRATION_AGENTS
+                    else "execution"
+                )
+                input_factor = factors[f"{category}_input"]
+                totals["input_tokens"] += int(record.get("input_tokens") or 0) * input_factor
+                totals["cached_input_tokens"] += (
+                    int(record.get("cached_input_tokens") or 0) * input_factor
+                )
+                totals["output_tokens"] += (
+                    int(record.get("output_tokens") or 0)
+                    * factors[f"{category}_output"]
+                )
+                totals["calls"] += (
+                    int(record.get("calls") or 0) * factors[f"{category}_calls"]
+                )
+            normalized = {
+                key: max(0, int(round(value))) for key, value in totals.items()
+            }
+            normalized["calls"] = max(1, int(math.ceil(totals["calls"])))
+            normalized["cached_input_tokens"] = min(
+                normalized["input_tokens"], normalized["cached_input_tokens"],
+            )
+            normalized["cost"] = CostEngine.estimate_cost(
+                "main_agent", normalized["input_tokens"],
+                normalized["output_tokens"], provider,
+                normalized["cached_input_tokens"], model_name,
+            )
+            normalized["billable_cost"] = CostEngine.estimate_billable_cost(
+                "main_agent", normalized["input_tokens"],
+                normalized["output_tokens"], provider, billing_mode,
+                normalized["cached_input_tokens"], model_name,
+            )
+            normalized["total_tokens"] = (
+                normalized["input_tokens"] + normalized["output_tokens"]
+            )
+            return normalized
+
+        scenarios = {
+            name: estimate(factors)
+            for name, factors in cls._SINGLE_AGENT_SCENARIOS.items()
+        }
+        actual_total = (
+            int(job.get("usage_input_tokens") or 0)
+            + int(job.get("usage_output_tokens") or 0)
+        )
+        expected = scenarios["expected"]
+        expected["token_saving_percent"] = (
+            0.0 if not actual_total else
+            max(0.0, (1 - expected["total_tokens"] / actual_total) * 100)
+        )
+        return {
+            "provider": provider, "model_name": model_name,
+            "billing_mode": billing_mode, "actual_total_tokens": actual_total,
+            "actual_cost": float(job.get("usage_cost") or 0.0),
+            "actual_billable_cost": job.get("usage_billable_cost"),
+            "scenarios": scenarios,
+        }
+
     def _build_pdf(self, path: Path, snapshot: dict, events: list[dict]):
         try:
             from reportlab.lib import colors
@@ -484,6 +712,93 @@ class JobReportService:
                 else f"¥{float(job.get('usage_billable_cost') or 0):.4f}"
             )),
         ])
+        usage_records, usage_source = self._usage_records(snapshot, events)
+        model_breakdown = self._model_usage_breakdown(usage_records)
+        story.append(Paragraph("2.1 各模型用量与费用", h2))
+        add_text(
+            "统计口径",
+            f"明细来源：{usage_source}。缓存输入包含在输入 Token 内，不重复计入总 Token；"
+            "等价估算用于跨模型比较，可计费 API 才代表会占用人民币 API 预算的估算费用。",
+        )
+        if model_breakdown:
+            for index, row in enumerate(model_breakdown, 1):
+                ordinary_input = max(
+                    0, row["input_tokens"] - row["cached_input_tokens"],
+                )
+                cache_rate = (
+                    row["cached_input_tokens"] / row["input_tokens"] * 100
+                    if row["input_tokens"] else 0.0
+                )
+                story.append(Paragraph(html.escape(
+                    f"模型 {index}：{row['provider']} / {row['model_name']}"
+                ), h2))
+                kv_table([
+                    ("承担角色", "、".join(sorted(row["agent_types"]))),
+                    ("计费通道", "、".join(sorted(row["billing_modes"]))),
+                    ("调用次数", f"{row['calls']:,} 次"),
+                    ("普通输入", f"{ordinary_input:,} Token"),
+                    ("缓存输入", (
+                        f"{row['cached_input_tokens']:,} Token（缓存率 {cache_rate:.1f}%）"
+                    )),
+                    ("输入合计", f"{row['input_tokens']:,} Token"),
+                    ("输出", f"{row['output_tokens']:,} Token"),
+                    ("Token 总量", (
+                        f"{row['input_tokens'] + row['output_tokens']:,}"
+                    )),
+                    ("等价估算", f"¥{row['cost']:.4f}"),
+                    ("可计费 API", f"¥{row['billable_cost']:.4f}"),
+                ])
+        else:
+            add_text("模型明细", "当前任务没有可用于按模型拆分的历史记录。")
+
+        comparison = self._single_agent_comparison(usage_records, job)
+        story.append(Paragraph("2.2 与单一主控 Agent 的估算对比", h2))
+        if comparison:
+            expected = comparison["scenarios"]["expected"]
+            optimistic = comparison["scenarios"]["optimistic"]
+            conservative = comparison["scenarios"]["conservative"]
+            actual_total = comparison["actual_total_tokens"]
+            kv_table([
+                ("单 Agent 模型", (
+                    f"{comparison['provider']} / {comparison['model_name']}"
+                )),
+                ("当前多角色流程", (
+                    f"{actual_total:,} Token / "
+                    f"等价 ¥{comparison['actual_cost']:.4f} / "
+                    f"可计费 API "
+                    + (
+                        "历史数据未分类"
+                        if comparison["actual_billable_cost"] is None
+                        else f"¥{float(comparison['actual_billable_cost']):.4f}"
+                    )
+                )),
+                ("单 Agent 基准估计", (
+                    f"{expected['total_tokens']:,} Token / "
+                    f"{expected['calls']:,} 次调用 / "
+                    f"等价 ¥{expected['cost']:.4f} / "
+                    f"可计费 API ¥{expected['billable_cost']:.4f}"
+                )),
+                ("预计 Token 减少", f"{expected['token_saving_percent']:.1f}%"),
+                ("合理 Token 区间", (
+                    f"{optimistic['total_tokens']:,} - "
+                    f"{conservative['total_tokens']:,}"
+                )),
+                ("合理等价成本区间", (
+                    f"¥{optimistic['cost']:.4f} - ¥{conservative['cost']:.4f}"
+                )),
+            ])
+            add_text(
+                "估算方法与限制",
+                "这是反事实估算，不是实际账单。基准情景假设：单一长生命周期 Agent "
+                "保留 82% 的执行输入、90% 的执行输出和 70% 的执行调用；裁决、策划、"
+                "审核等工作内化到同一上下文后，仅保留其 25% 的输入/输出和 15% 的调用。"
+                "缓存输入按原有比例同比缩减。乐观到保守区间分别按执行输入保留 65%-95%、"
+                "编排输入保留 15%-40% 计算。所有单 Agent Token 均按本任务实际主控模型的"
+                "当前人民币单价重新估算，因此 Token 更少不一定意味着费用更低；若主控模型"
+                "单价高于 Worker 模型，单 Agent 的等价成本仍可能更高。",
+            )
+        else:
+            add_text("单 Agent 对比", "缺少模型调用记录，无法生成可信的反事实估算。")
 
         story.append(Paragraph("三、裁决与策划", h1))
         phase_pairs = (

@@ -147,3 +147,88 @@ def test_sanitizer_redacts_common_tokens():
 
     assert sanitized["authorization"] == "[已脱敏]"
     assert "sk-abcdefghijklmnop" not in sanitized["note"]
+
+
+def test_report_usage_breakdown_groups_each_model_and_reconciles_job_totals():
+    snapshot = {"job": {
+        "usage_input_tokens": 1_500,
+        "usage_cached_input_tokens": 500,
+        "usage_output_tokens": 250,
+        "usage_calls": 3,
+        "usage_cost": 0.42,
+        "usage_billable_cost": 0.12,
+    }, "tasks": []}
+    events = [{
+        "event": "model_chat",
+        "data": {
+            "agent_type": "main_agent", "provider": "codex",
+            "model_name": "gpt-5.6-sol", "billing_mode": "chatgpt_cli",
+            "input_tokens": 500, "cached_input_tokens": 200,
+            "output_tokens": 50, "estimated_cost": 0.30,
+            "billable_cost": 0.0,
+        },
+    }, {
+        "event": "model_chat",
+        "data": {
+            "agent_type": "worker", "provider": "deepseek",
+            "model_name": "deepseek-v4-pro", "billing_mode": "api",
+            "input_tokens": 800, "cached_input_tokens": 250,
+            "output_tokens": 150, "estimated_cost": 0.08,
+            "billable_cost": 0.08,
+        },
+    }]
+
+    records, source = JobReportService._usage_records(snapshot, events)
+    rows = JobReportService._model_usage_breakdown(records)
+
+    assert source == "逐次模型事件"
+    assert sum(row["input_tokens"] for row in rows) == 1_500
+    assert sum(row["cached_input_tokens"] for row in rows) == 500
+    assert sum(row["output_tokens"] for row in rows) == 250
+    assert sum(row["calls"] for row in rows) == 3
+    residual = next(row for row in rows if row["model_name"] == "历史未归属")
+    assert residual["input_tokens"] == 200
+    assert residual["output_tokens"] == 50
+    assert residual["calls"] == 1
+    deepseek = next(row for row in rows if row["model_name"] == "deepseek-v4-pro")
+    assert deepseek["agent_types"] == {"worker"}
+    assert deepseek["billable_cost"] == 0.08
+
+
+def test_single_agent_comparison_uses_main_model_and_explicit_token_reduction():
+    records = [{
+        "agent_type": "main_agent", "provider": "codex",
+        "model_name": "gpt-5.6-sol", "billing_mode": "chatgpt_cli",
+        "input_tokens": 1_000, "cached_input_tokens": 500,
+        "output_tokens": 100, "calls": 1, "cost": 0.0,
+        "billable_cost": 0.0,
+    }, {
+        "agent_type": "worker", "provider": "deepseek",
+        "model_name": "deepseek-v4-pro", "billing_mode": "api",
+        "input_tokens": 4_000, "cached_input_tokens": 2_000,
+        "output_tokens": 500, "calls": 4, "cost": 0.0,
+        "billable_cost": 0.0,
+    }]
+    job = {
+        "usage_input_tokens": 5_000, "usage_output_tokens": 600,
+        "usage_cost": 1.25, "usage_billable_cost": 0.20,
+    }
+
+    result = JobReportService._single_agent_comparison(records, job)
+    expected = result["scenarios"]["expected"]
+
+    assert result["model_name"] == "gpt-5.6-sol"
+    assert result["billing_mode"] == "chatgpt_cli"
+    assert expected["input_tokens"] == 3_530
+    assert expected["cached_input_tokens"] == 1_765
+    assert expected["output_tokens"] == 475
+    assert expected["calls"] == 3
+    assert expected["total_tokens"] == 4_005
+    assert round(expected["token_saving_percent"], 1) == 28.5
+    assert expected["cost"] > 0
+    assert expected["billable_cost"] == 0.0
+    assert (
+        result["scenarios"]["optimistic"]["total_tokens"]
+        < expected["total_tokens"]
+        < result["scenarios"]["conservative"]["total_tokens"]
+    )
