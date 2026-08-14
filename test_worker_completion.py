@@ -4,7 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from agents.worker import WorkerAgent
+from agents.worker import UNINFORMATIVE_READ_WARNING, WorkerAgent
 from orchestrator.agent_config import ProjectAgentConfig
 from orchestrator.cost_engine import BudgetExceededError, JobBudget
 from orchestrator.engine import Engine
@@ -677,9 +677,13 @@ def test_identical_unchanged_reads_only_trigger_a_strategy_warning():
         ).run(_task("analysis"), project_root=".")
 
         assert result["status"] == "completed"
-        assert broker.executed == ["read_file"] * 10
+        # The first read is useful; after eight unchanged repeats the Worker
+        # pauses exploration and the next hallucinated read is not executed.
+        assert broker.executed == ["read_file"] * (
+            UNINFORMATIVE_READ_WARNING + 1
+        )
         assert any(
-            "against unchanged source state" in str(
+            "produced no new lines" in str(
                 message.get("content", "")
             )
             for messages in router.received_messages
@@ -706,6 +710,96 @@ def test_changed_source_or_result_is_not_an_uninformative_repeat():
     assert WorkerAgent._exploration_observation(changed_source) != (
         WorkerAgent._exploration_observation(changed_result)
     )
+
+
+def test_search_evidence_ignores_keyword_changes_without_new_matches():
+    first = WorkerAgent._search_evidence(
+        "search_in_file", {"path": "main.py", "text": "price"}, {
+            "path": "main.py", "source_version": "v1",
+            "matches": [{"line": 42, "content": "item.setText(price)"}],
+        },
+    )
+    renamed_query = WorkerAgent._search_evidence(
+        "search_in_file", {"path": "main.py", "text": "setText"}, {
+            "path": "main.py", "source_version": "v1",
+            "matches": [{"line": 42, "content": "item.setText(price)"}],
+        },
+    )
+    changed_file = WorkerAgent._search_evidence(
+        "search_in_file", {"path": "main.py", "text": "setText"}, {
+            "path": "main.py", "source_version": "v2",
+            "matches": [{"line": 42, "content": "item.setText(price)"}],
+        },
+    )
+
+    assert first == renamed_query
+    assert first[0] != changed_file[0]
+
+
+def test_worker_pauses_semantically_repeated_searches_and_finishes_report():
+    class Router:
+        def __init__(self):
+            self.calls = 0
+            self.tool_names = []
+
+        async def chat_with_tools(self, *_args, **kwargs):
+            self.calls += 1
+            self.tool_names.append({
+                item["function"]["name"] for item in kwargs.get("tools", [])
+            })
+            if self.calls <= UNINFORMATIVE_READ_WARNING + 1:
+                return {
+                    "content": "Searching another spelling.",
+                    "tool_calls": [{
+                        "id": f"search-{self.calls}",
+                        "function": {
+                            "name": "search_in_file",
+                            "arguments": json.dumps({
+                                "path": "main.py",
+                                "text": f"price-{self.calls}",
+                            }),
+                        },
+                    }],
+                    "usage": {},
+                }
+            return {
+                "content": "The repeated searches identify the same price row.",
+                "tool_calls": [], "usage": {},
+            }
+
+    class Broker(_RecordingBroker):
+        def get_tool_definitions(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "search_in_file", "parameters": {
+                        "type": "object", "properties": {},
+                    },
+                },
+            }]
+
+        async def execute(self, _task_value, name, _args):
+            self.executed.append(name)
+            return {
+                "status": "success", "path": "main.py",
+                "source_version": "v1",
+                "matches": [{"line": 42, "content": "item.setText(price)"}],
+            }
+
+    async def scenario():
+        router = Router()
+        broker = Broker()
+        result = await WorkerAgent(
+            router, broker, max_turns=14, max_exploration_turns=60,
+        ).run(_task("analysis"), project_root=".")
+
+        assert result["status"] == "completed"
+        assert broker.executed.count("search_in_file") == (
+            UNINFORMATIVE_READ_WARNING + 1
+        )
+        assert "search_in_file" not in router.tool_names[-1]
+
+    asyncio.run(scenario())
 
 
 def test_cache_metadata_does_not_change_exploration_observation():

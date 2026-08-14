@@ -204,6 +204,26 @@ def test_plan_normalizer_corrects_only_read_only_coding_defaults():
     assert mixed_plan["tasks"][0]["type"] == "coding"
 
 
+def test_plan_normalizer_promotes_diagnose_and_fix_contract_to_coding():
+    plan = {"tasks": [{
+        "id": "T001",
+        "type": "analysis",
+        "title": "Diagnose the price display and refresh chain",
+        "description": (
+            "Inspect main.py and data_provider.py, then apply the minimal fix "
+            "to the source and verify it with the focused test suite."
+        ),
+        "allowed_paths": ["main.py", "data_provider.py"],
+        "acceptance_command": "python -m pytest tests -q",
+    }]}
+
+    assert Engine._normalize_plan_task_types(
+        plan, "检查一下股票价格为什么不正确"
+    )
+    assert plan["tasks"][0]["type"] == "coding"
+    assert plan["tasks"][0]["acceptance_command"]
+
+
 def test_legacy_read_only_coding_task_is_safely_reclassified(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

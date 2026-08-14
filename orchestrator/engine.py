@@ -1027,12 +1027,23 @@ class Engine:
     def _normalize_plan_task_types(
         cls, plan_data: dict, user_request: str,
     ) -> bool:
-        """Correct coding defaults for an unambiguously read-only request."""
-        if cls._request_task_type(user_request) != "analysis":
-            return False
+        """Keep Planner task types consistent with their deliverable contract.
+
+        User wording can begin as a diagnosis or question while the Planner has
+        already decided that the concrete deliverable is a source edit.  Never
+        turn that mixed diagnose-and-fix task back into a read-only report merely
+        because the original request was phrased as "why" or "inspect".
+        """
         changed = False
         for task in plan_data.get("tasks", []):
             task_type = str(task.get("type") or "coding").lower()
+            if cls._plan_task_has_mutation_contract(task):
+                if task_type == "analysis":
+                    task["type"] = "coding"
+                    changed = True
+                continue
+            if cls._request_task_type(user_request) != "analysis":
+                continue
             if task_type != "coding":
                 continue
             task_text = " ".join((
@@ -1045,6 +1056,34 @@ class Engine:
             task["acceptance_command"] = ""
             changed = True
         return changed
+
+    @classmethod
+    def _plan_task_has_mutation_contract(cls, task: dict) -> bool:
+        """Return whether a planned task explicitly promises workspace changes.
+
+        This is deliberately narrower than looking for mutation nouns.  For
+        example, "查看这次修改为什么失败" remains read-only, while "定位并修复"
+        and "apply the minimal fix" are implementation contracts.
+        """
+        text = " ".join((
+            str(task.get("title") or ""),
+            str(task.get("description") or ""),
+        )).lower()
+        if REPORT_ARTIFACT_PATTERN.search(text):
+            return True
+
+        mutation_action = re.search(
+            r"(?:^|[，,；;。:]|并且|并|然后|随后|再|接着|之后|请|需要|应当|必须|"
+            r"直接|将|把|to\s+|and\s+|then\s+|please\s+|must\s+|should\s+)"
+            r".{0,16}?"
+            r"(?:修复|修改|优化|实现|创建|新建|增加|添加|删除|移除|调整|替换|"
+            r"改成|改为|写入|编辑|更新|重构|合并|构建|开发|制作|搭建|"
+            r"apply\b|fix\b|implement\b|modify\b|edit\b|update\b|change\b|"
+            r"create\b|add\b|remove\b|replace\b|refactor\b|build\b)",
+            text,
+            re.IGNORECASE,
+        )
+        return bool(mutation_action)
 
     @staticmethod
     def _is_document_request(text: str) -> bool:

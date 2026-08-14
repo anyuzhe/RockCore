@@ -320,8 +320,19 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
         exploration_calls = int(restored_state.get("exploration_calls") or 0)
         has_written = bool(restored_state.get("has_written", False))
         exploration_observations: dict[tuple[str, str], tuple[str, str]] = {}
+        restored_evidence = dict(
+            restored_state.get("exploration_evidence") or {}
+        )
+        exploration_evidence: dict[str, set[str]] = {
+            str(key): {str(item) for item in (value or [])}
+            for key, value in restored_evidence.items()
+            if isinstance(value, (list, tuple, set))
+        }
         consecutive_uninformative_reads = 0
         uninformative_read_warning_sent = False
+        exploration_suspended = bool(
+            restored_state.get("exploration_suspended", False)
+        )
         progress_warning_sent = False
         finish_warning_sent = False
         token_compaction_sent = False
@@ -371,6 +382,11 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "delivered_tool_results": delivered_tool_results,
                 "has_written": has_written,
                 "exploration_calls": exploration_calls,
+                "exploration_evidence": {
+                    key: sorted(values)[-200:]
+                    for key, values in list(exploration_evidence.items())[-80:]
+                },
+                "exploration_suspended": exploration_suspended,
                 "document_progress": dict(pending_document_pages),
                 "provider": str(provider_override or ""),
                 "model": str(model_override or ""),
@@ -544,11 +560,18 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                     )
                 else:
                     estimated_output_tokens = REPORT_OUTPUT_TOKENS
+                active_tool_definitions = tool_definitions
+                if exploration_suspended:
+                    active_tool_definitions = [
+                        definition for definition in tool_definitions
+                        if str(definition.get("function", {}).get("name") or "")
+                        not in EXPLORATION_TOOLS
+                    ]
                 response = await self.model_router.chat_with_tools(
                     self.agent_type,
                     system_prompt,
                     messages,
-                    tools=tool_definitions,
+                    tools=active_tool_definitions,
                     provider_override=provider_override,
                     # Provider/model switching is owned by Engine so existing
                     # artifacts can be validated before any fallback. Keeping it
@@ -883,6 +906,21 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                             ),
                         }
                     elif (
+                        exploration_suspended
+                        and is_exploration
+                    ):
+                        result = {
+                            "status": "rejected",
+                            "error_code": "exploration_strategy_change_required",
+                            "error": (
+                                "Repeated unchanged exploration is paused for this "
+                                "strategy. Reuse collected evidence and edit, verify, "
+                                "or return the report. A successful edit will allow "
+                                "focused verification reads again."
+                            ),
+                        }
+                        exploration_blocked = True
+                    elif (
                         budget_finalization_mode
                         and is_exploration
                     ):
@@ -1030,10 +1068,22 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         result_truncated = self._exploration_result_is_truncated(
                             result, func_name
                         )
-                        uninformative_exploration = bool(
-                            previous_observation == observation
-                            and not result_truncated
+                        semantic_evidence = self._search_evidence(
+                            func_name, args, result
                         )
+                        if semantic_evidence is not None and not result_truncated:
+                            evidence_scope, evidence_items = semantic_evidence
+                            seen_items = exploration_evidence.setdefault(
+                                evidence_scope, set()
+                            )
+                            new_items = evidence_items - seen_items
+                            uninformative_exploration = not bool(new_items)
+                            seen_items.update(evidence_items)
+                        else:
+                            uninformative_exploration = bool(
+                                previous_observation == observation
+                                and not result_truncated
+                            )
                         exploration_observations[exploration_signature] = observation
                         if uninformative_exploration:
                             consecutive_uninformative_reads += 1
@@ -1048,14 +1098,15 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         ):
                             batch_notices.append(
                                 f"The last {UNINFORMATIVE_READ_WARNING} "
-                                "reads/searches repeated previously used "
-                                "parameters against unchanged source state and "
-                                "returned identical, non-truncated results. The "
-                                "calls remain allowed and this is not a provider "
-                                "failure, but they produced no new information. "
-                                "Reuse the existing evidence and change strategy."
+                                "reads/searches used unchanged source versions and "
+                                "produced no new lines, matches, or result evidence. "
+                                "Changing only the search keyword is not progress. "
+                                "This is a strategy issue, not a provider failure. "
+                                "Further exploration is paused until a concrete edit; "
+                                "reuse the existing evidence and change strategy."
                             )
                             uninformative_read_warning_sent = True
+                            exploration_suspended = True
                         if (
                             exploration_calls >= self.max_exploration_turns
                             and not exploration_warning_sent
@@ -1090,6 +1141,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         meaningful_progress = True
                         consecutive_uninformative_reads = 0
                         uninformative_read_warning_sent = False
+                        exploration_suspended = False
                     elif (
                         (
                             func_name in TEMP_WRITE_TOOLS
@@ -1153,6 +1205,15 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                                 "returned an oversized incomplete write payload",
                                 tool_calls_made, total_input, total_output,
                             ))
+                    elif (
+                        result.get("error_code")
+                        == "exploration_strategy_change_required"
+                    ):
+                        batch_notices.append(
+                            "Exploration remains paused because it produced no new "
+                            "evidence. Do not retry the read with another keyword; "
+                            "edit, verify, or finish with the evidence already held."
+                        )
                     elif result.get("status") in {"error", "rejected"} or result.get("error"):
                         signature = re.sub(
                             r"\d+", "#", str(result.get("error") or result.get("status"))
@@ -1333,6 +1394,49 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             stable_result, ensure_ascii=False, sort_keys=True, default=str
         ).encode("utf-8")
         return source_version, hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _search_evidence(
+        tool_name: str, arguments: dict, result: dict,
+    ) -> tuple[str, set[str]] | None:
+        """Group searches by unchanged source and count only novel evidence.
+
+        Exact argument signatures let a model evade repetition detection by
+        changing one keyword at a time.  Search progress is instead the union of
+        matched source locations and snippets for a particular source version.
+        A changed file version starts a new scope, as required for legitimate
+        re-analysis after an edit.
+        """
+        if tool_name not in {"search_in_file", "search_code"}:
+            return None
+        source_version = str(result.get("source_version") or "")
+        path = str(result.get("path") or arguments.get("path") or ".")
+        if not source_version:
+            return None
+        rows = (
+            result.get("matches")
+            if tool_name == "search_in_file"
+            else result.get("results")
+        )
+        if not isinstance(rows, list):
+            return None
+        evidence: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            stable_row = {
+                key: row.get(key)
+                for key in ("file", "line", "content", "context")
+                if row.get(key) not in {None, ""}
+            }
+            evidence.add(hashlib.sha256(json.dumps(
+                stable_row, ensure_ascii=False, sort_keys=True, default=str,
+            ).encode("utf-8")).hexdigest())
+        if not evidence:
+            evidence.add("<empty-result>")
+        scope_payload = f"{tool_name}\0{path}\0{source_version}"
+        scope = hashlib.sha256(scope_payload.encode("utf-8")).hexdigest()
+        return scope, evidence
 
     @classmethod
     def _incremental_result_for_model(
