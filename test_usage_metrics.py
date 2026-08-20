@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,15 +14,22 @@ from storage.database import init_database
 from orchestrator.engine import Engine
 
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+DEEPSEEK_PEAK_TIME = datetime(2026, 8, 20, 10, 0, tzinfo=BEIJING_TZ)
+DEEPSEEK_OFF_PEAK_TIME = datetime(2026, 8, 20, 13, 0, tzinfo=BEIJING_TZ)
+
+
 def test_cost_estimate_uses_model_specific_rmb_rate():
     assert CostEngine.estimate_cost(
         "worker", 1_000_000, 1_000_000,
         provider="deepseek", model_name="deepseek-v4-flash",
-    ) == 3.0
+        at_time=DEEPSEEK_PEAK_TIME,
+    ) == 12.0
     assert CostEngine.estimate_cost(
         "worker", 1_000_000, 1_000_000,
         provider="deepseek", model_name="deepseek-v4-pro",
-    ) == 9.0
+        at_time=DEEPSEEK_PEAK_TIME,
+    ) == 36.0
     assert CostEngine.estimate_cost(
         "planner", 1_000_000, 1_000_000,
         provider="kimi", model_name="kimi-k2.6",
@@ -41,11 +49,13 @@ def test_cached_input_uses_the_discounted_rmb_rate():
         "worker", 1_000_000, 0,
         provider="deepseek", model_name="deepseek-v4-flash-0731",
         cached_input_tokens=1_000_000,
+        at_time=DEEPSEEK_PEAK_TIME,
     )
     pro = CostEngine.estimate_cost(
         "worker", 1_000_000, 0,
         provider="deepseek", model_name="deepseek-v4-pro",
         cached_input_tokens=1_000_000,
+        at_time=DEEPSEEK_PEAK_TIME,
     )
     k27 = CostEngine.estimate_cost(
         "worker", 1_000_000, 0,
@@ -58,10 +68,60 @@ def test_cached_input_uses_the_discounted_rmb_rate():
         cached_input_tokens=1_000_000,
     )
 
-    assert flash == 0.02
-    assert pro == 0.025
+    assert flash == 0.10
+    assert pro == 0.30
     assert k27 == 1.30
     assert k3 == 2.0
+
+
+def test_deepseek_off_peak_prices_are_half_of_peak_prices():
+    flash = CostEngine.estimate_cost(
+        "worker", 2_000_000, 1_000_000,
+        provider="deepseek", model_name="deepseek-v4-flash",
+        cached_input_tokens=1_000_000, at_time=DEEPSEEK_OFF_PEAK_TIME,
+    )
+    pro = CostEngine.estimate_cost(
+        "worker", 2_000_000, 1_000_000,
+        provider="deepseek", model_name="deepseek-v4-pro-0813",
+        cached_input_tokens=1_000_000, at_time=DEEPSEEK_OFF_PEAK_TIME,
+    )
+
+    assert flash == 0.05 + 1.5 + 4.5
+    assert pro == 0.15 + 4.5 + 13.5
+
+
+def test_deepseek_peak_period_uses_beijing_time_and_exclusive_endpoints():
+    assert CostEngine.is_deepseek_peak_period(DEEPSEEK_PEAK_TIME)
+    assert CostEngine.is_deepseek_peak_period("2026-08-20T01:00:00+00:00")
+    assert not CostEngine.is_deepseek_peak_period(DEEPSEEK_OFF_PEAK_TIME)
+    assert not CostEngine.is_deepseek_peak_period(
+        datetime(2026, 8, 20, 12, 0, tzinfo=BEIJING_TZ)
+    )
+    assert CostEngine.is_deepseek_peak_period(
+        datetime(2026, 8, 20, 14, 0, tzinfo=BEIJING_TZ)
+    )
+    assert not CostEngine.is_deepseek_peak_period(
+        datetime(2026, 8, 20, 18, 0, tzinfo=BEIJING_TZ)
+    )
+
+
+def test_deepseek_usage_summary_preserves_each_calls_pricing_period():
+    async def scenario():
+        engine = CostEngine()
+        for timestamp in (DEEPSEEK_PEAK_TIME, DEEPSEEK_OFF_PEAK_TIME):
+            await engine.record_usage(
+                "JOB-TIME-PRICING", "worker",
+                output_tokens=1_000_000,
+                provider="deepseek",
+                model_name="deepseek-v4-flash",
+                timestamp=timestamp.isoformat(),
+            )
+
+        summary = engine.get_usage_summary("JOB-TIME-PRICING")
+        assert summary["equivalent_cost"] == 13.5
+        assert summary["billable_cost"] == 13.5
+
+    asyncio.run(scenario())
 
 
 def test_provider_usage_normalization_reads_cache_hit_tokens():
@@ -547,6 +607,7 @@ def test_resumed_budget_restores_only_usage_missing_from_live_memory():
             output_tokens=10_000,
             provider="deepseek",
             model_name="deepseek-v4-pro",
+            timestamp=DEEPSEEK_PEAK_TIME.isoformat(),
         )
         engine.restore_persisted_usage(
             "JOB-RESUMED",
@@ -554,13 +615,13 @@ def test_resumed_budget_restores_only_usage_missing_from_live_memory():
             cached_input_tokens=30_000,
             output_tokens=15_000,
             calls=2,
-            billable_cost=0.34,
+            billable_cost=1.34,
         )
         snapshot = engine.get_budget_snapshot("JOB-RESUMED")
 
         assert snapshot["used_effective_input_tokens"] == 134_500
         assert snapshot["used_output_tokens"] == 15_000
         assert snapshot["used_calls"] == 2
-        assert snapshot["billable_cost"] == 0.34
+        assert snapshot["billable_cost"] == 1.34
 
     asyncio.run(scenario())

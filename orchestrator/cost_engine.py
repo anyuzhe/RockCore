@@ -5,7 +5,7 @@ import logging
 import math
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -63,15 +63,22 @@ class CostEngine:
     CURRENCY = "CNY"
     LEGACY_USD_TO_CNY = 7.20
     DEFAULT_MAX_COST_CNY = 10.00
+    BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+    DEEPSEEK_OFF_PEAK_MULTIPLIER = 0.5
     MODEL_PRICES_CNY_PER_MILLION = {
+        # DeepSeek publishes peak prices for 09:00-12:00 and 14:00-18:00
+        # Beijing time. All other hours are charged at half these rates.
         "deepseek-v4-flash-0731": {
-            "cached_input": 0.02, "input": 1.00, "output": 2.00,
+            "cached_input": 0.10, "input": 3.00, "output": 9.00,
         },
         "deepseek-v4-flash": {
-            "cached_input": 0.02, "input": 1.00, "output": 2.00,
+            "cached_input": 0.10, "input": 3.00, "output": 9.00,
+        },
+        "deepseek-v4-pro-0813": {
+            "cached_input": 0.30, "input": 9.00, "output": 27.00,
         },
         "deepseek-v4-pro": {
-            "cached_input": 0.025, "input": 3.00, "output": 6.00,
+            "cached_input": 0.30, "input": 9.00, "output": 27.00,
         },
         "kimi-k2.6": {
             "cached_input": 1.10, "input": 6.50, "output": 27.00,
@@ -399,6 +406,7 @@ class CostEngine:
                 record.agent_type, record.input_tokens, record.output_tokens,
                 record.provider, record.billing_mode,
                 record.cached_input_tokens, record.model_name,
+                at_time=record.timestamp,
             )
             for record in live
         )
@@ -421,7 +429,8 @@ class CostEngine:
                            provider: str = "", model_name: str = "",
                            task_id: str = "",
                            billing_mode: str = "api",
-                           reservation_id: str = ""):
+                           reservation_id: str = "",
+                           timestamp: str = ""):
         """Record token usage for a job."""
         lock = self._budget_locks.setdefault(job_id, asyncio.Lock())
         async with lock:
@@ -443,7 +452,10 @@ class CostEngine:
                 model_name=model_name or "",
                 billing_mode=billing_mode or "api",
                 task_id=task_id or "",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=(
+                    str(timestamp).strip()
+                    or datetime.now(timezone.utc).isoformat()
+                ),
             ))
             # Actual usage may be larger than the estimate. Grow soft limits
             # after settlement so the next request is never rejected merely
@@ -573,6 +585,7 @@ class CostEngine:
                 record.agent_type, record.input_tokens, record.output_tokens,
                 record.provider, record.billing_mode,
                 record.cached_input_tokens, record.model_name,
+                at_time=record.timestamp,
             )
             for record in usage
         )
@@ -606,6 +619,7 @@ class CostEngine:
                 record.billing_mode,
                 record.cached_input_tokens,
                 record.model_name,
+                at_time=record.timestamp,
             )
             for record in usage
         )
@@ -723,6 +737,7 @@ class CostEngine:
                 record.provider,
                 record.cached_input_tokens,
                 record.model_name,
+                at_time=record.timestamp,
             )
             for record in usage
         )
@@ -735,6 +750,7 @@ class CostEngine:
                 record.billing_mode,
                 record.cached_input_tokens,
                 record.model_name,
+                at_time=record.timestamp,
             )
             for record in usage
         )
@@ -758,8 +774,10 @@ class CostEngine:
         }
 
     @classmethod
-    def _cost_rates(cls, agent_type: str, provider: str = "",
-                    model_name: str = "") -> dict:
+    def _cost_rates(
+        cls, agent_type: str, provider: str = "", model_name: str = "",
+        at_time: datetime | str | None = None,
+    ) -> dict:
         normalized = str(model_name or "").strip().lower()
         if normalized not in cls.MODEL_PRICES_CNY_PER_MILLION:
             for candidate in sorted(
@@ -773,15 +791,49 @@ class CostEngine:
                 (provider or "").lower(),
                 cls.DEFAULT_MODEL_BY_AGENT.get(agent_type, "deepseek-v4-pro"),
             )
-        return cls.MODEL_PRICES_CNY_PER_MILLION[normalized]
+        rates = dict(cls.MODEL_PRICES_CNY_PER_MILLION[normalized])
+        if normalized.startswith("deepseek-v4-") and not cls.is_deepseek_peak_period(
+            at_time
+        ):
+            return {
+                name: value * cls.DEEPSEEK_OFF_PEAK_MULTIPLIER
+                for name, value in rates.items()
+            }
+        return rates
+
+    @classmethod
+    def is_deepseek_peak_period(
+        cls, at_time: datetime | str | None = None,
+    ) -> bool:
+        """Return whether DeepSeek's Beijing-time peak pricing applies."""
+        moment: datetime
+        if isinstance(at_time, str):
+            try:
+                moment = datetime.fromisoformat(at_time.replace("Z", "+00:00"))
+            except ValueError:
+                moment = datetime.now(timezone.utc)
+        elif isinstance(at_time, datetime):
+            moment = at_time
+        else:
+            moment = datetime.now(timezone.utc)
+
+        if moment.tzinfo is None:
+            beijing = moment.replace(tzinfo=cls.BEIJING_TIMEZONE)
+        else:
+            beijing = moment.astimezone(cls.BEIJING_TIMEZONE)
+        minute = beijing.hour * 60 + beijing.minute
+        return (9 * 60 <= minute < 12 * 60) or (
+            14 * 60 <= minute < 18 * 60
+        )
 
     @classmethod
     def estimate_cost(cls, agent_type: str, input_tokens: int = 0,
                       output_tokens: int = 0, provider: str = "",
                       cached_input_tokens: int = 0,
-                      model_name: str = "") -> float:
+                      model_name: str = "",
+                      at_time: datetime | str | None = None) -> float:
         """Estimate an API-price-equivalent RMB value for model usage."""
-        rates = cls._cost_rates(agent_type, provider, model_name)
+        rates = cls._cost_rates(agent_type, provider, model_name, at_time)
         input_count = max(0, int(input_tokens or 0))
         cached_count = min(
             input_count, max(0, int(cached_input_tokens or 0))
@@ -806,11 +858,12 @@ class CostEngine:
                                provider: str = "",
                                billing_mode: str = "api",
                                cached_input_tokens: int = 0,
-                               model_name: str = "") -> float:
+                               model_name: str = "",
+                               at_time: datetime | str | None = None) -> float:
         """Estimate cost that should count against the paid-API budget."""
         if not cls.is_billable_api_mode(billing_mode):
             return 0.0
         return cls.estimate_cost(
             agent_type, input_tokens, output_tokens, provider,
-            cached_input_tokens, model_name,
+            cached_input_tokens, model_name, at_time,
         )
