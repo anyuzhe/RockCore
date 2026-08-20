@@ -145,6 +145,26 @@ def test_legacy_root_page_text_is_relocated_and_continuation_restores_it(tmp_pat
     assert restored["content"] == "checkpoint"
 
 
+def test_unmanifested_markdown_output_stays_in_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    broker = ToolBroker(project, PolicyEngine())
+    broker.configure_task_runtime(project, "JOB-UNMANIFESTED", "T001")
+
+    (project / "Docs").mkdir()
+    (project / "Docs" / "summary.md").write_text(
+        "final document summary", encoding="utf-8"
+    )
+
+    moved = broker.relocate_task_intermediates(["Docs/summary.md"])
+
+    assert moved == []
+    assert (project / "Docs" / "summary.md").read_text(
+        encoding="utf-8"
+    ) == "final document summary"
+    assert not broker.runtime_tools.has_temp_file("Docs/summary.md")
+
+
 def test_runtime_tools_are_available_only_after_task_scope_is_configured(tmp_path):
     broker = ToolBroker(tmp_path, PolicyEngine())
     before = {

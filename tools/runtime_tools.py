@@ -239,7 +239,17 @@ class TaskRuntimeTools:
         )
 
     def relocate_project_intermediates(self, added_paths: list[str]) -> list[dict]:
-        """Move newly generated helper files out of the visible worktree."""
+        """Move helper files only when final outputs were declared.
+
+        An empty output declaration means the planner did not provide a
+        manifest. In that case a newly-created Markdown/TXT file may be the
+        user's requested deliverable, so hiding it in the task runtime would
+        silently lose the result from the visible project. Explicit temporary
+        files already go through ``write_temp_file`` and do not need this
+        fallback relocation.
+        """
+        if not self.final_outputs and not self.explicit_final_outputs:
+            return []
         moved = []
         for relative in added_paths:
             if (
