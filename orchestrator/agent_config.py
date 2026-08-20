@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -39,12 +40,80 @@ PROVIDER_MODELS = {
     "codex": ["gpt-5.6-sol", "codex-sdk"],
 }
 
+MODEL_DISPLAY_NAMES = {
+    ("codex", "gpt-5.6-sol"): "GPT-5.6 Sol（固定模型）",
+    # ``codex-sdk`` is an internal sentinel: Codex CLI receives no --model
+    # argument and therefore follows its own configured/default model.
+    ("codex", "codex-sdk"): "Codex 自动（跟随 CLI 默认模型）",
+}
+
+
+def model_display_name(provider: str, model: str) -> str:
+    """Return a user-facing model label without changing the stored model ID."""
+    provider_id = str(provider or "").strip().lower()
+    model_id = str(model or "").strip()
+    return MODEL_DISPLAY_NAMES.get((provider_id, model_id), model_id)
+
 PROVIDER_REASONING_LEVELS = {
     "codex": ["none", "low", "medium", "high", "xhigh", "max"],
     # These providers do not expose the same Codex reasoning-effort contract.
     "kimi": ["default"],
     "deepseek": ["default"],
 }
+
+WORKFLOW_MODES = {"auto", "fast", "standard", "strict", "custom"}
+
+
+def normalize_job_workflow_override(values: dict | None) -> dict:
+    """Validate the small per-conversation override persisted on a Job."""
+    source = values if isinstance(values, dict) else {}
+    result: dict[str, Any] = {}
+    mode = str(source.get("mode") or "").strip().lower()
+    if mode in WORKFLOW_MODES:
+        result["mode"] = mode
+    main = source.get("main_agent")
+    main = main if isinstance(main, dict) else {}
+    provider = str(main.get("provider") or "").strip().lower()
+    model = normalize_model_id(provider, str(main.get("model") or ""))
+    if provider in PROVIDER_MODELS and model in PROVIDER_MODELS[provider]:
+        effort = str(main.get("reasoning_effort") or "default").strip().lower()
+        allowed_efforts = PROVIDER_REASONING_LEVELS.get(provider, ["default"])
+        result["main_agent"] = {
+            "provider": provider,
+            "model": model,
+            "reasoning_effort": effort if effort in allowed_efforts else allowed_efforts[0],
+        }
+    return result
+
+
+def apply_job_workflow_override(
+    config: "ProjectAgentConfig", values: dict | None,
+) -> "ProjectAgentConfig":
+    """Return a Job-local config without mutating project defaults."""
+    result = deepcopy(config)
+    override = normalize_job_workflow_override(values)
+    mode = override.get("mode")
+    if mode:
+        result.mode = mode
+        if mode == "fast":
+            result.governor.enabled = False
+            result.planner.enabled = False
+            result.reviewer.enabled = False
+            result.emergency_coder.enabled = True
+            result.auto_repair = False
+        elif mode in {"auto", "standard", "strict"}:
+            result.governor.enabled = True
+            result.planner.enabled = True
+            result.reviewer.enabled = True
+            result.emergency_coder.enabled = True
+            result.auto_validation = True
+            result.auto_repair = True
+    main = override.get("main_agent")
+    if main:
+        result.governor.provider = main["provider"]
+        result.governor.model = main["model"]
+        result.governor.reasoning_effort = main["reasoning_effort"]
+    return result
 
 
 @dataclass

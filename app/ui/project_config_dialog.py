@@ -16,6 +16,7 @@ from orchestrator.agent_config import (
     ProjectAgentConfig, load_project_config, save_project_config,
     PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, CORE_BUILTIN_SKILLS,
     COMMON_PLUGINS, SkillConfig, PluginConfig, MCPConfig, HookConfig,
+    model_display_name,
 )
 from mcp_runtime.trust import approve_project_mcp, revoke_project_mcp
 from skills.trust import approve_project_skills, revoke_project_skills
@@ -125,7 +126,7 @@ class ProjectConfigDialog(QDialog):
                 models = PROVIDER_MODELS.get(provider, [provider])
                 mc.clear()
                 for m in models:
-                    mc.addItem(m, m)
+                    mc.addItem(model_display_name(provider, m), m)
                 rc.clear()
                 for effort in PROVIDER_REASONING_LEVELS.get(provider, ["default"]):
                     rc.addItem(
@@ -178,7 +179,7 @@ class ProjectConfigDialog(QDialog):
             models = PROVIDER_MODELS.get(provider, [provider])
             self.worker_model.clear()
             for m in models:
-                self.worker_model.addItem(m, m)
+                self.worker_model.addItem(model_display_name(provider, m), m)
             self.worker_reasoning.clear()
             for effort in PROVIDER_REASONING_LEVELS.get(provider, ["default"]):
                 self.worker_reasoning.addItem(
@@ -231,7 +232,9 @@ class ProjectConfigDialog(QDialog):
             provider = self.worker_fallback_provider.currentData() or ""
             self.worker_fallback_model.clear()
             for model in PROVIDER_MODELS.get(provider, [provider]):
-                self.worker_fallback_model.addItem(model, model)
+                self.worker_fallback_model.addItem(
+                    model_display_name(provider, model), model
+                )
 
         self.worker_fallback_provider.currentIndexChanged.connect(
             lambda _: _refresh_fallback_models()

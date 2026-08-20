@@ -37,6 +37,36 @@ def test_explicit_followup_persists_and_builds_context(tmp_path):
     asyncio.run(scenario())
 
 
+def test_followup_inherits_conversation_workflow_override(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        source = await engine.create_job(
+            project.id, "原需求", str(tmp_path), workflow_override={
+                "mode": "strict",
+                "main_agent": {"provider": "kimi", "model": "kimi-k3"},
+            },
+        )
+        followup = await engine.create_job(
+            project.id, "继续修改", str(tmp_path),
+            source_job_id=source["job_id"],
+        )
+        repos = engine._get_repos()
+        try:
+            job = repos["job"].get_by_id(followup["job_id"])
+            override = (job.last_checkpoint or {}).get("workflow_override")
+            assert override["mode"] == "strict"
+            assert override["main_agent"]["model"] == "kimi-k3"
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
+
+
 def test_followup_source_must_belong_to_project(tmp_path):
     async def scenario():
         engine = Engine(db_path=str(tmp_path / "studio.db"))

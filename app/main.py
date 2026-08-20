@@ -299,6 +299,17 @@ async def main():
         QFrame#composer {
             background: #ffffff; border: 1px solid #d7d2ca; border-radius: 8px;
         }
+        QComboBox#composerQuickCombo {
+            background: #f4f1ec; color: #514b44; border: 1px solid #e1dcd4;
+            border-radius: 5px; padding: 3px 22px 3px 7px; min-height: 22px;
+            font-size: 11px;
+        }
+        QComboBox#composerQuickCombo:hover,
+        QComboBox#composerQuickCombo:focus { background: #eeeae4; border-color: #c9bfb3; }
+        QComboBox#composerQuickCombo QAbstractItemView {
+            background: #ffffff; color: #25231f; border: 1px solid #d6d1c9;
+            selection-background-color: #e6dfd5; selection-color: #25231f;
+        }
         QFrame#queueBar {
             background: #fff8e6; border: 1px solid #e6cf91; border-radius: 6px;
         }

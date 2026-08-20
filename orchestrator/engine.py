@@ -118,7 +118,10 @@ from .main_agent import MainAgent
 from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
 from .merge_manager import MergeManager
-from .agent_config import ProjectAgentConfig, load_project_config
+from .agent_config import (
+    ProjectAgentConfig, apply_job_workflow_override, load_project_config,
+    normalize_job_workflow_override,
+)
 from .failure_evals import FailureEvalStore
 from .runtime_paths import is_runtime_path
 from .hooks import HookRunner
@@ -1325,7 +1328,8 @@ class Engine:
     async def create_job(self, project_id: int, user_request: str,
                          project_root: str, risk_level: str = "medium",
                          source_job_id: str | None = None,
-                         attachments: list[dict] | None = None) -> dict:
+                         attachments: list[dict] | None = None,
+                         workflow_override: dict | None = None) -> dict:
         from app.image_attachments import normalize_attachments
 
         repos = self._get_repos()
@@ -1335,6 +1339,12 @@ class Engine:
                 source_job = repos["job"].get_by_id(source_job_id)
                 if not source_job or source_job.project_id != project_id:
                     raise ValueError("The source job does not belong to this project")
+            if workflow_override is None and source_job:
+                workflow_override = dict(
+                    (source_job.last_checkpoint or {}).get(
+                        "workflow_override"
+                    ) or {}
+                )
 
             # Job IDs are user-facing, so their calendar date follows the
             # machine's local timezone. Persisted timestamps remain UTC.
@@ -1387,6 +1397,9 @@ class Engine:
                 session["next_action"] = "Plan only the requested continuation"
             repos["job"].update_checkpoint(job_id_str, {
                 "execution_session": session,
+                "workflow_override": normalize_job_workflow_override(
+                    workflow_override
+                ),
             })
             self._cancelled_job_ids.discard(job_id_str)
             self.state_machine.transition(job_id_str, JobState.CREATED)
@@ -1685,7 +1698,10 @@ class Engine:
             self.state_machine.restore(job_id, JobState.WAITING_USER)
             self._cancelled_job_ids.discard(job_id)
             proj_root = job.project.root_path if job.project else project_root
-            proj_config = load_project_config(proj_root)
+            proj_config = apply_job_workflow_override(
+                load_project_config(proj_root),
+                (job.last_checkpoint or {}).get("workflow_override"),
+            )
             self._configure_job_runtime(job, proj_root, proj_config)
             self.model_router.cost_engine.refresh_job_limits(job_id)
             self.model_router.cost_engine.restore_persisted_usage(
@@ -1931,7 +1947,10 @@ class Engine:
 
             # Load project-level AI config
             proj_root = job.project.root_path if job.project else project_root
-            proj_config = load_project_config(proj_root)
+            proj_config = apply_job_workflow_override(
+                load_project_config(proj_root),
+                (job.last_checkpoint or {}).get("workflow_override"),
+            )
             logger.info(f"Job {job_id}: mode={proj_config.mode}")
             before_job_hooks = await self._run_project_hooks(
                 proj_config, "before_job", job_id=job_id,
@@ -8116,3 +8135,21 @@ Prefer these existing files when relevant:
         if job_task and job_task is not current and not job_task.done():
             job_task.cancel()
             await asyncio.gather(job_task, return_exceptions=True)
+
+    async def update_job_workflow_override(
+        self, job_id: str, workflow_override: dict | None,
+    ) -> bool:
+        """Persist a conversation-local mode/model choice before resume."""
+        repos = self._get_repos()
+        try:
+            job = repos["job"].get_by_id(job_id)
+            if not job:
+                return False
+            checkpoint = dict(job.last_checkpoint or {})
+            checkpoint["workflow_override"] = normalize_job_workflow_override(
+                workflow_override
+            )
+            repos["job"].update_checkpoint(job_id, checkpoint)
+            return True
+        finally:
+            self._close_repos(repos)

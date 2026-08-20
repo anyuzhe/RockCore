@@ -9,11 +9,56 @@ from agents.planner import PlannerAgent, PlannerOutputTruncatedError
 from agents.governor import GovernorAgent
 from orchestrator.agent_config import (
     ProjectAgentConfig,
+    apply_job_workflow_override,
     load_project_config,
     save_project_config,
 )
 from orchestrator.engine import Engine
 from orchestrator.state_machine import JobState
+
+
+def test_job_workflow_override_changes_only_conversation_config():
+    project = ProjectAgentConfig.standard_preset()
+    effective = apply_job_workflow_override(project, {
+        "mode": "fast",
+        "main_agent": {
+            "provider": "kimi", "model": "kimi-k3",
+        },
+    })
+
+    assert project.mode == "standard"
+    assert project.governor.enabled is True
+    assert effective.mode == "fast"
+    assert effective.governor.enabled is False
+    assert effective.planner.enabled is False
+    assert effective.governor.provider == "kimi"
+    assert effective.governor.model == "kimi-k3"
+
+
+def test_job_workflow_override_is_persisted_and_used_for_routing(tmp_path):
+    async def scenario():
+        engine = Engine(db_path=str(tmp_path / "studio.db"))
+        repos = engine._get_repos()
+        try:
+            project = repos["project"].create("Demo", str(tmp_path))
+        finally:
+            repos["_session"].close()
+        result = await engine.create_job(
+            project.id, "创建页面", str(tmp_path), workflow_override={
+                "mode": "fast",
+                "main_agent": {"provider": "kimi", "model": "kimi-k3"},
+            }
+        )
+        repos = engine._get_repos()
+        try:
+            job = repos["job"].get_by_id(result["job_id"])
+            override = (job.last_checkpoint or {}).get("workflow_override")
+            assert override["mode"] == "fast"
+            assert override["main_agent"]["provider"] == "kimi"
+        finally:
+            repos["_session"].close()
+
+    asyncio.run(scenario())
 
 
 def test_governor_returns_structured_risk_score_and_reasons():

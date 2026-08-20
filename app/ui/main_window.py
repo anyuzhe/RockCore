@@ -11,7 +11,7 @@ from typing import Any
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QPushButton, QLabel, QTextEdit, QMessageBox, QFrame, QFileDialog,
-    QScrollArea,
+    QScrollArea, QComboBox,
     QApplication,
 )
 from PyQt6.QtCore import (
@@ -37,6 +37,10 @@ from .time_utils import as_utc_isoformat
 from app.branding import COMPANY_NAME, FULL_PRODUCT_NAME, LEGAL_COMPANY_NAME, PRODUCT_LINE
 from app.subprocess_utils import run_process
 from app.text_utils import strip_runtime_task_context
+from orchestrator.agent_config import (
+    PROVIDER_MODELS, PROVIDER_REASONING_LEVELS, load_project_config,
+    model_display_name, normalize_job_workflow_override,
+)
 from app.updater import (
     NoStableRelease, UpdateError, UpdateInfo, UpdateManager, current_version,
 )
@@ -101,6 +105,8 @@ class MainWindow(QMainWindow):
         self._queued_source_job_id = None
         self._attachments: list[dict] = []
         self._queued_attachments: list[dict] = []
+        self._workflow_override: dict = {}
+        self._workflow_base: dict = {"mode": "auto"}
         self._execution_tasks: set[asyncio.Task] = set()
         self._closing = False
         self._shutdown_task: asyncio.Task | None = None
@@ -124,6 +130,127 @@ class MainWindow(QMainWindow):
 
     def _current_project_key(self) -> str:
         return self._project_key(self._current_project)
+
+    @staticmethod
+    def _workflow_mode_label(mode: str) -> str:
+        return {
+            "auto": "自动",
+            "fast": "快速",
+            "standard": "标准",
+            "strict": "严格",
+            "custom": "自定义",
+        }.get(mode, mode or "自动")
+
+    def _setup_workflow_controls(self, composer_actions):
+        self.mode_quick_combo = QComboBox()
+        self.mode_quick_combo.setObjectName("composerQuickCombo")
+        self.mode_quick_combo.setFixedWidth(112)
+        self.mode_quick_combo.setToolTip("当前对话的工作模式；不会修改项目默认配置")
+        for mode in ("auto", "fast", "standard", "strict", "custom"):
+            self.mode_quick_combo.addItem(
+                f"模式：{self._workflow_mode_label(mode)}", mode
+            )
+        self.mode_quick_combo.currentIndexChanged.connect(
+            self._on_workflow_control_changed
+        )
+        composer_actions.addWidget(self.mode_quick_combo)
+
+        self.main_model_quick_combo = QComboBox()
+        self.main_model_quick_combo.setObjectName("composerQuickCombo")
+        self.main_model_quick_combo.setFixedWidth(270)
+        self.main_model_quick_combo.setToolTip("当前对话的主控模型；不会修改项目默认配置")
+        self.main_model_quick_combo.addItem("主控：项目默认", "")
+        for provider, models in PROVIDER_MODELS.items():
+            for model in models:
+                self.main_model_quick_combo.addItem(
+                    f"主控：{model_display_name(provider, model)}",
+                    {"provider": provider, "model": model},
+                )
+        self.main_model_quick_combo.currentIndexChanged.connect(
+            self._on_workflow_control_changed
+        )
+        composer_actions.addWidget(self.main_model_quick_combo)
+
+    def _on_workflow_control_changed(self, _index: int = -1):
+        if not hasattr(self, "mode_quick_combo") or not self.mode_quick_combo.isEnabled():
+            return
+        mode = self.mode_quick_combo.currentData() or "auto"
+        model = self.main_model_quick_combo.currentData() or {}
+        self.main_model_quick_combo.setEnabled(mode != "fast")
+        self.main_model_quick_combo.setToolTip(
+            "快速模式跳过主控模型"
+            if mode == "fast"
+            else "当前对话的主控模型；不会修改项目默认配置"
+        )
+        override = {"mode": mode}
+        if isinstance(model, dict) and model.get("provider"):
+            provider = model["provider"]
+            base_main = self._workflow_base.get("main_agent") or {}
+            effort = (
+                base_main.get("reasoning_effort")
+                if base_main.get("provider") == provider else None
+            )
+            if effort not in PROVIDER_REASONING_LEVELS.get(provider, ["default"]):
+                effort = "high" if provider == "codex" else "default"
+            override["main_agent"] = {
+                "provider": provider,
+                "model": model["model"],
+                "reasoning_effort": effort,
+            }
+        self._workflow_override = normalize_job_workflow_override(override)
+        self.status_label.setToolTip(
+            "当前对话："
+            f"{self._workflow_mode_label(mode)} · "
+            f"{model_display_name(model.get('provider'), model.get('model')) if isinstance(model, dict) and model.get('model') else '项目默认'}"
+        )
+
+    def _set_workflow_controls(self, override: dict | None = None):
+        if not hasattr(self, "mode_quick_combo"):
+            return
+        source = normalize_job_workflow_override(override)
+        base = self._workflow_base
+        mode = source.get("mode") or base.get("mode") or "auto"
+        main = source.get("main_agent") or {}
+        self._workflow_override = source
+        self.mode_quick_combo.blockSignals(True)
+        index = self.mode_quick_combo.findData(mode)
+        self.mode_quick_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.mode_quick_combo.blockSignals(False)
+        self.main_model_quick_combo.blockSignals(True)
+        model_index = 0
+        if main.get("provider") and main.get("model"):
+            model_index = self.main_model_quick_combo.findData({
+                "provider": main["provider"], "model": main["model"]
+            })
+            if model_index < 0:
+                model_index = 0
+        self.main_model_quick_combo.setCurrentIndex(model_index)
+        self.main_model_quick_combo.blockSignals(False)
+        self.main_model_quick_combo.setEnabled(mode != "fast")
+
+    def _refresh_workflow_base(self, project_root: str):
+        config = load_project_config(project_root)
+        self._workflow_base = {
+            "mode": config.mode,
+            "main_agent": {
+                "provider": config.governor.provider,
+                "model": config.governor.model,
+                "reasoning_effort": config.governor.reasoning_effort,
+            },
+        }
+        self._set_workflow_controls({})
+
+    def _load_job_workflow_override(self, job_id: str | None) -> dict:
+        if not self.engine or not job_id:
+            return {}
+        repos = self._get_repos()
+        try:
+            job = repos["job"].get_by_id(str(job_id))
+            return normalize_job_workflow_override(
+                (job.last_checkpoint or {}).get("workflow_override")
+            ) if job else {}
+        finally:
+            self._close_repos(repos)
 
     def _track_execution(self, coroutine):
         """Track job coroutines so window shutdown can cancel them first."""
@@ -169,6 +296,9 @@ class MainWindow(QMainWindow):
             queued.get("attachments") or []
         ) if queued else []
         if queued:
+            self._set_workflow_controls(
+                queued.get("workflow_override") or {}
+            )
             preview = str(queued["request"]).replace("\n", " ")[:80]
             self.queue_label.setText(f"下一轮已排队：{preview}")
             self.queue_bar.show()
@@ -290,6 +420,7 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("composerStatus")
         composer_actions.addWidget(self.status_label)
         composer_actions.addStretch()
+        self._setup_workflow_controls(composer_actions)
 
         self.run_btn = QPushButton("▶")
         self.run_btn.setObjectName("composerToolButton")
@@ -396,6 +527,10 @@ class MainWindow(QMainWindow):
         self._current_project = data
         self._selected_job_id = None
         self._followup_source_job_id = self._latest_project_job_id(data)
+        self._refresh_workflow_base(str(data.get("root_path") or ""))
+        self._set_workflow_controls(
+            self._load_job_workflow_override(self._followup_source_job_id)
+        )
         self._sync_project_runtime_state()
         self._sync_current_queue_state()
         if self._followup_source_job_id:
@@ -508,6 +643,9 @@ class MainWindow(QMainWindow):
                         "attachments": list(getattr(job, "attachments", None) or []),
                         "status": job.status,
                         "source_job_id": job.source_job_id,
+                        "workflow_override": normalize_job_workflow_override(
+                            (job.last_checkpoint or {}).get("workflow_override")
+                        ),
                         "execution_session_id": job.execution_session_id,
                         "failure_code": getattr(job, "failure_code", "") or "",
                         "failure_reason": getattr(job, "failure_reason", "") or "",
@@ -585,6 +723,7 @@ class MainWindow(QMainWindow):
                             "summary": public_entry.get("summary") or summary,
                         })
                     self.task_panel.set_conversation(session_dict, public_turns)
+                    self._set_workflow_controls(job_dict["workflow_override"])
                     if job.status in {"needs_attention", "interrupted"}:
                         self._followup_source_job_id = None
                         self.followup_source_label.setText(
@@ -660,6 +799,10 @@ class MainWindow(QMainWindow):
                                           project_data: dict):
         project_key = self._project_key(project_data)
         try:
+            if hasattr(self.engine, "update_job_workflow_override"):
+                await self.engine.update_job_workflow_override(
+                    job_id, dict(self._workflow_override)
+                )
             await self.engine.resume_attention_job(
                 job_id, str(project_data.get("root_path") or "")
             )
@@ -1102,6 +1245,7 @@ class MainWindow(QMainWindow):
             queued = {
                 "request": request,
                 "attachments": attachments,
+                "workflow_override": dict(self._workflow_override),
                 # Only an explicitly selected follow-up inherits the running
                 # Job. Clicking "新需求" leaves this empty.
                 "source_job_id": self._followup_source_job_id,
@@ -1138,7 +1282,8 @@ class MainWindow(QMainWindow):
             self._job_starting = True
             self._track_execution(
                 self._run_job_async(
-                    request, source_job_id, attachments, project_data
+                    request, source_job_id, attachments, project_data,
+                    dict(self._workflow_override),
                 )
             )
         else:
@@ -1157,7 +1302,8 @@ class MainWindow(QMainWindow):
 
     async def _run_job_async(self, request: str, source_job_id: str | None,
                              attachments: list[dict] | None = None,
-                             project_data: dict | None = None):
+                             project_data: dict | None = None,
+                             workflow_override: dict | None = None):
         project_data = dict(project_data or self._current_project or {})
         project_key = self._project_key(project_data)
         project_name = str(project_data.get("name") or "")
@@ -1172,12 +1318,20 @@ class MainWindow(QMainWindow):
                     return
 
                 # Create job
+                # Preserve the source conversation's override when callers do
+                # not explicitly provide one (for example, legacy queued
+                # jobs and programmatic follow-ups).
+                effective_override = (
+                    normalize_job_workflow_override(workflow_override)
+                    if workflow_override is not None else None
+                )
                 result = await self.engine.create_job(
                     project_id=project.id,
                     user_request=request,
                     project_root=project.root_path,
                     source_job_id=source_job_id,
                     attachments=attachments or [],
+                    workflow_override=effective_override,
                 )
                 finished_job_id = result["job_id"]
                 self._running_jobs[project_key] = finished_job_id
@@ -1267,6 +1421,7 @@ class MainWindow(QMainWindow):
             queued.get("source_job_id"),
             list(queued.get("attachments") or []),
             dict(queued["project"]),
+            dict(queued.get("workflow_override") or {}),
         ))
 
     def _cancel_queued_request(self):

@@ -104,6 +104,81 @@ def test_running_other_project_does_not_block_new_project(monkeypatch, tmp_path)
     window.close()
 
 
+def test_composer_quick_controls_set_conversation_workflow_only():
+    _app()
+    window = MainWindow(None)
+
+    window.mode_quick_combo.setCurrentIndex(
+        window.mode_quick_combo.findData("strict")
+    )
+    window.main_model_quick_combo.setCurrentIndex(
+        window.main_model_quick_combo.findData({
+            "provider": "kimi", "model": "kimi-k3",
+        })
+    )
+
+    assert window._workflow_override["mode"] == "strict"
+    assert window._workflow_override["main_agent"] == {
+        "provider": "kimi",
+        "model": "kimi-k3",
+        "reasoning_effort": "default",
+    }
+    assert window.mode_quick_combo.toolTip().startswith("当前对话")
+    window.close()
+
+
+def test_composer_mode_change_keeps_project_default_main_model_unpinned():
+    _app()
+    window = MainWindow(None)
+
+    window._set_workflow_controls({})
+    window.mode_quick_combo.setCurrentIndex(
+        window.mode_quick_combo.findData("strict")
+    )
+
+    assert window._workflow_override == {"mode": "strict"}
+    assert window.main_model_quick_combo.currentIndex() == 0
+    window.close()
+
+
+def test_codex_model_choices_distinguish_fixed_model_from_cli_default():
+    _app()
+    window = MainWindow(None)
+
+    fixed_index = window.main_model_quick_combo.findData({
+        "provider": "codex", "model": "gpt-5.6-sol",
+    })
+    automatic_index = window.main_model_quick_combo.findData({
+        "provider": "codex", "model": "codex-sdk",
+    })
+
+    assert window.main_model_quick_combo.itemText(fixed_index) == (
+        "主控：GPT-5.6 Sol（固定模型）"
+    )
+    assert window.main_model_quick_combo.itemText(automatic_index) == (
+        "主控：Codex 自动（跟随 CLI 默认模型）"
+    )
+    assert "codex-sdk" not in window.main_model_quick_combo.itemText(
+        automatic_index
+    )
+    window.close()
+
+
+def test_project_config_uses_the_same_codex_model_labels(tmp_path):
+    _app()
+    dialog = ProjectConfigDialog(str(tmp_path))
+    combo = dialog._agent_widgets["governor"]["model"]
+
+    fixed_index = combo.findData("gpt-5.6-sol")
+    automatic_index = combo.findData("codex-sdk")
+
+    assert combo.itemText(fixed_index) == "GPT-5.6 Sol（固定模型）"
+    assert combo.itemText(automatic_index) == (
+        "Codex 自动（跟随 CLI 默认模型）"
+    )
+    dialog.close()
+
+
 def test_background_job_events_are_buffered_until_job_is_selected():
     _app()
     window = MainWindow(None)
