@@ -195,6 +195,12 @@ class Engine:
             "rockcore_job_runtime", default=None
         )
         self._job_runtimes: dict[str, JobRuntime] = {}
+        # Keep the outer job coroutines visible to shutdown.  Scheduler.stop()
+        # only cancels individual worker slots; without this registry a model
+        # request currently awaited by run_job can outlive the GUI process.
+        self._job_tasks: dict[str, asyncio.Task] = {}
+        self._stop_lock = asyncio.Lock()
+        self._stopped = False
         self._project_job_locks: dict[str, asyncio.Lock] = {}
         # User guidance for an active requirement is consumed by the same
         # long-lived Worker.  It is deliberately kept outside model history
@@ -791,6 +797,7 @@ class Engine:
         asyncio.ensure_future(self._on_state_change(job_id, old_state, new_state))
 
     async def start(self):
+        self._stopped = False
         self._running = True
         repos = self._get_repos()
         try:
@@ -826,18 +833,44 @@ class Engine:
         logger.info("Engine started")
 
     async def stop(self):
-        self._running = False
-        self._default_scheduler.stop()
-        for runtime in list(self._job_runtimes.values()):
-            runtime.scheduler.stop()
-        for runtime in list(self._job_runtimes.values()):
-            await self._close_job_runtime(runtime)
-        if (
-            self._default_tool_broker
-            and hasattr(self._default_tool_broker, "close")
-        ):
-            await self._default_tool_broker.close()
-        logger.info("Engine stopped")
+        async with self._stop_lock:
+            if self._stopped:
+                return
+            self._running = False
+            self._default_scheduler.stop()
+            for runtime in list(self._job_runtimes.values()):
+                runtime.scheduler.stop()
+
+            current = asyncio.current_task()
+            active_tasks = [
+                task for task in dict.fromkeys(self._job_tasks.values())
+                if task is not None and task is not current and not task.done()
+            ]
+            for task in active_tasks:
+                task.cancel()
+            if active_tasks:
+                # Provider cancellation handlers terminate their subprocesses
+                # when the outer coroutine receives CancelledError.  Bound the
+                # wait so a broken third-party provider cannot block app exit.
+                done, pending = await asyncio.wait(active_tasks, timeout=10)
+                for task in pending:
+                    logger.error(
+                        "Job task did not stop before shutdown: %s",
+                        task.get_name(),
+                    )
+
+            for runtime in list(self._job_runtimes.values()):
+                await self._close_job_runtime(runtime)
+            if (
+                self._default_tool_broker
+                and hasattr(self._default_tool_broker, "close")
+            ):
+                try:
+                    await self._default_tool_broker.close()
+                except Exception as error:
+                    logger.warning("Could not close default tools: %s", error)
+            self._stopped = True
+            logger.info("Engine stopped")
 
     async def _skip_phase(self, job, repos, phase: str,
                           reason: str = "已按项目配置禁用"):
@@ -1429,47 +1462,61 @@ class Engine:
 
     async def run_job(self, job_id: str, project_root: str):
         """Run one Job with isolated services; serialize only the same project."""
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._job_tasks[job_id] = current_task
         project_key = str(Path(project_root).resolve())
         lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
-        async with lock:
-            runtime = await self._create_job_runtime(job_id, project_key)
-            token = self._runtime_context.set(runtime)
-            event_token = (
-                self.event_bus.bind_job(job_id)
-                if hasattr(self.event_bus, "bind_job") else None
-            )
-            self._job_runtimes[job_id] = runtime
-            try:
-                return await self._run_job_pipeline(job_id, project_key)
-            finally:
-                self._job_runtimes.pop(job_id, None)
-                if event_token is not None:
-                    self.event_bus.reset_job(event_token)
-                self._runtime_context.reset(token)
-                await self._close_job_runtime(runtime)
+        try:
+            async with lock:
+                runtime = await self._create_job_runtime(job_id, project_key)
+                token = self._runtime_context.set(runtime)
+                event_token = (
+                    self.event_bus.bind_job(job_id)
+                    if hasattr(self.event_bus, "bind_job") else None
+                )
+                self._job_runtimes[job_id] = runtime
+                try:
+                    return await self._run_job_pipeline(job_id, project_key)
+                finally:
+                    self._job_runtimes.pop(job_id, None)
+                    if event_token is not None:
+                        self.event_bus.reset_job(event_token)
+                    self._runtime_context.reset(token)
+                    await self._close_job_runtime(runtime)
+        finally:
+            if self._job_tasks.get(job_id) is current_task:
+                self._job_tasks.pop(job_id, None)
 
     async def resume_attention_job(self, job_id: str, project_root: str):
         """Resume one persisted interrupted/needs-attention Job checkpoint."""
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._job_tasks[job_id] = current_task
         project_key = str(Path(project_root).resolve())
         lock = self._project_job_locks.setdefault(project_key, asyncio.Lock())
-        async with lock:
-            runtime = await self._create_job_runtime(job_id, project_key)
-            token = self._runtime_context.set(runtime)
-            event_token = (
-                self.event_bus.bind_job(job_id)
-                if hasattr(self.event_bus, "bind_job") else None
-            )
-            self._job_runtimes[job_id] = runtime
-            try:
-                return await self._resume_attention_pipeline(
-                    job_id, project_key
+        try:
+            async with lock:
+                runtime = await self._create_job_runtime(job_id, project_key)
+                token = self._runtime_context.set(runtime)
+                event_token = (
+                    self.event_bus.bind_job(job_id)
+                    if hasattr(self.event_bus, "bind_job") else None
                 )
-            finally:
-                self._job_runtimes.pop(job_id, None)
-                if event_token is not None:
-                    self.event_bus.reset_job(event_token)
-                self._runtime_context.reset(token)
-                await self._close_job_runtime(runtime)
+                self._job_runtimes[job_id] = runtime
+                try:
+                    return await self._resume_attention_pipeline(
+                        job_id, project_key
+                    )
+                finally:
+                    self._job_runtimes.pop(job_id, None)
+                    if event_token is not None:
+                        self.event_bus.reset_job(event_token)
+                    self._runtime_context.reset(token)
+                    await self._close_job_runtime(runtime)
+        finally:
+            if self._job_tasks.get(job_id) is current_task:
+                self._job_tasks.pop(job_id, None)
 
     async def rollback_job(self, job_id: str, project_root: str) -> dict:
         """Reverse one terminal Job through Git without restarting its workflow."""
@@ -8053,6 +8100,8 @@ Prefer these existing files when relevant:
                                       pending_count=len(pending))
 
     async def cancel_job(self, job_id: str):
+        current = asyncio.current_task()
+        job_task = self._job_tasks.get(job_id)
         repos = self._get_repos()
         try:
             self._cancelled_job_ids.add(job_id)
@@ -8064,3 +8113,6 @@ Prefer these existing files when relevant:
             await self.event_bus.publish("job_cancelled", job_id=job_id)
         finally:
             self._close_repos(repos)
+        if job_task and job_task is not current and not job_task.done():
+            job_task.cancel()
+            await asyncio.gather(job_task, return_exceptions=True)

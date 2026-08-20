@@ -1,13 +1,17 @@
 """Cross-platform subprocess helpers for GUI and packaged runtimes."""
 
 import locale
+import logging
 import os
 import re
+import signal
 import shlex
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def utf8_environment(environ: dict | None = None) -> dict:
@@ -83,6 +87,63 @@ def no_window_creation_flags() -> int:
     if sys.platform != "win32":
         return 0
     return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def terminate_process_tree(process: Any, *, timeout: float = 5.0) -> bool:
+    """Terminate a child process and descendants without leaving Windows tasks.
+
+    ``Popen.kill`` only targets the process created by RockCore.  Commands
+    started through ``cmd.exe`` (and Codex's launcher) can leave descendants
+    alive, so Windows needs ``taskkill /T``.  The direct kill is retained as a
+    fallback for tests, non-Windows platforms, and already-detached children.
+    """
+    if process is None:
+        return False
+    pid = getattr(process, "pid", None)
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid <= 0:
+        try:
+            process.kill()
+            return True
+        except (AttributeError, OSError, ProcessLookupError):
+            return False
+
+    terminated = False
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=max(0.5, float(timeout)),
+                creationflags=no_window_creation_flags(),
+                check=False,
+            )
+            terminated = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("taskkill could not terminate process tree %s", pid)
+    else:
+        # Shell commands are launched in a fresh session on POSIX.  Killing
+        # the process group also removes descendants such as npm/node.
+        try:
+            group_id = os.getpgid(pid)
+            if group_id != os.getpgrp():
+                os.killpg(group_id, signal.SIGKILL)
+                terminated = True
+        except (OSError, ProcessLookupError):
+            pass
+
+    if not terminated:
+        try:
+            process.kill()
+            terminated = True
+        except (AttributeError, OSError, ProcessLookupError):
+            pass
+    return terminated
 
 
 def command_basename(command: str, platform: str | None = None) -> str:

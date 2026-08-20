@@ -2,9 +2,12 @@
 
 import asyncio
 import logging
+import sys
+import threading
 from typing import Any
 
 from app.python_validation import run_embedded_python_command
+from app.subprocess_utils import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +22,29 @@ class TestTools:
 
     async def run_tests(self, command: str = "pytest", timeout: int = 300) -> dict:
         """Run tests and return results."""
+        embedded_cancel = threading.Event()
         try:
             embedded = await asyncio.wait_for(
                 asyncio.to_thread(
                     run_embedded_python_command, command, self.project_root,
                     timeout=max(1, timeout - 1),
+                    cancel_event=embedded_cancel,
                 ),
                 timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            embedded_cancel.set()
+            await asyncio.sleep(0.3)
+            return {
+                "status": "timeout",
+                "output": f"Tests timed out ({timeout}s)",
+                "passed": 0, "failed": 0, "skipped": 0,
+            }
+        except asyncio.CancelledError:
+            embedded_cancel.set()
+            await asyncio.sleep(0.3)
+            raise
+        try:
             if embedded is not None:
                 stdout_str = str(embedded.stdout or "")
                 stderr_str = str(embedded.stderr or "")
@@ -45,6 +63,7 @@ class TestTools:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.project_root,
+                start_new_session=(sys.platform != "win32"),
             )
 
             try:
@@ -52,12 +71,17 @@ class TestTools:
                     proc.communicate(), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                terminate_process_tree(proc)
+                await proc.communicate()
                 return {
                     "status": "timeout",
                     "output": f"Tests timed out ({timeout}s)",
                     "passed": 0, "failed": 0, "skipped": 0,
                 }
+            except asyncio.CancelledError:
+                terminate_process_tree(proc)
+                await proc.communicate()
+                raise
 
             stdout_str = stdout.decode("utf-8", errors="replace")
             stderr_str = stderr.decode("utf-8", errors="replace")
@@ -75,6 +99,10 @@ class TestTools:
                 "skipped": skipped,
                 "return_code": proc.returncode or 0,
             }
+        except asyncio.CancelledError:
+            embedded_cancel.set()
+            await asyncio.sleep(0.3)
+            raise
         except Exception as e:
             logger.error(f"Test execution error: {e}")
             return {

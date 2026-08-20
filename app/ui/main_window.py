@@ -101,6 +101,9 @@ class MainWindow(QMainWindow):
         self._queued_source_job_id = None
         self._attachments: list[dict] = []
         self._queued_attachments: list[dict] = []
+        self._execution_tasks: set[asyncio.Task] = set()
+        self._closing = False
+        self._shutdown_task: asyncio.Task | None = None
         self._config = load_config()
         self.update_manager = UpdateManager()
         self._update_check_running = False
@@ -121,6 +124,17 @@ class MainWindow(QMainWindow):
 
     def _current_project_key(self) -> str:
         return self._project_key(self._current_project)
+
+    def _track_execution(self, coroutine):
+        """Track job coroutines so window shutdown can cancel them first."""
+        task = asyncio.ensure_future(coroutine)
+        # Test doubles and a few embedding hosts intentionally return no
+        # handle from ensure_future after consuming the coroutine.
+        if task is None:
+            return None
+        self._execution_tasks.add(task)
+        task.add_done_callback(self._execution_tasks.discard)
+        return task
 
     def _current_running_job(self) -> str | None:
         key = self._current_project_key()
@@ -638,7 +652,7 @@ class MainWindow(QMainWindow):
         self.stop_btn.show()
         self.task_panel.update_job_status(job_id, "executing")
         self.status_label.setText("正在从中断位置继续任务")
-        asyncio.ensure_future(
+        self._track_execution(
             self._resume_attention_job_async(job_id, project_data)
         )
 
@@ -1122,7 +1136,7 @@ class MainWindow(QMainWindow):
             self.clear_followup_btn.setVisible(False)
             self._starting_projects.add(project_key)
             self._job_starting = True
-            asyncio.ensure_future(
+            self._track_execution(
                 self._run_job_async(
                     request, source_job_id, attachments, project_data
                 )
@@ -1248,7 +1262,7 @@ class MainWindow(QMainWindow):
             self.queue_bar.hide()
             self._job_starting = True
             self.followup_source_label.setText("正在创建任务")
-        asyncio.ensure_future(self._run_job_async(
+        self._track_execution(self._run_job_async(
             str(queued["request"]),
             queued.get("source_job_id"),
             list(queued.get("attachments") or []),
@@ -2318,8 +2332,35 @@ class MainWindow(QMainWindow):
     def _close_repos(self, repos):
         repos["_session"].close()
 
-    def closeEvent(self, event):
-        self._poll_timer.stop()
+    async def _shutdown_before_close(self):
+        """Cancel UI jobs and await engine/process cleanup before closing."""
+        for task in list(self._execution_tasks):
+            if not task.done():
+                task.cancel()
+        if self._execution_tasks:
+            await asyncio.gather(*self._execution_tasks, return_exceptions=True)
         if self.engine:
-            asyncio.ensure_future(self.engine.stop())
-        event.accept()
+            try:
+                await asyncio.wait_for(self.engine.stop(), timeout=20)
+            except asyncio.TimeoutError:
+                logger.error("Engine shutdown exceeded 20 seconds")
+            except Exception:
+                logger.exception("Engine shutdown failed")
+        self.close()
+
+    def closeEvent(self, event):
+        if self._closing:
+            event.accept()
+            return
+        self._closing = True
+        self._poll_timer.stop()
+        if not self.engine:
+            event.accept()
+            return
+        # Keep the Qt event loop alive while active model/tool processes are
+        # cancelled.  Accepting immediately here used to orphan descendants
+        # after the last window disappeared.
+        event.ignore()
+        self._shutdown_task = asyncio.ensure_future(
+            self._shutdown_before_close()
+        )

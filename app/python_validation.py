@@ -18,10 +18,13 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import tokenize
 import traceback
 import unittest
 from pathlib import Path, PureWindowsPath
+
+from app.subprocess_utils import terminate_process_tree
 
 
 PYTHON_COMMANDS = {"python", "python3", "py"}
@@ -245,8 +248,27 @@ def _unittest_worker(connection, arguments: list[str], root_text: str):
         connection.close()
 
 
+def _wait_for_validation_result(
+    parent, process, timeout: int | float,
+    cancel_event: threading.Event | None = None,
+) -> bool | None:
+    """Poll an isolated validation child while allowing async cancellation."""
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            terminate_process_tree(process)
+            process.join(timeout=2)
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        if parent.poll(min(0.25, remaining)):
+            return True
+
+
 def _run_unittest_isolated(
-    arguments: list[str], root: Path, timeout: int | float
+    arguments: list[str], root: Path, timeout: int | float,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
@@ -258,17 +280,25 @@ def _run_unittest_isolated(
     process.start()
     child.close()
     try:
-        if parent.poll(max(1.0, float(timeout))):
+        ready = _wait_for_validation_result(
+            parent, process, timeout, cancel_event
+        )
+        if ready is None:
+            return subprocess.CompletedProcess(
+                ["embedded-python", "-m", "unittest", *arguments],
+                130, "", "RockCore 内置 unittest 已取消",
+            )
+        if ready:
             returncode, stdout, stderr = parent.recv()
             process.join(timeout=2)
             if process.is_alive():
-                process.terminate()
+                terminate_process_tree(process)
                 process.join(timeout=2)
             return subprocess.CompletedProcess(
                 ["embedded-python", "-m", "unittest", *arguments],
                 int(returncode), str(stdout or ""), str(stderr or ""),
             )
-        process.terminate()
+        terminate_process_tree(process)
         process.join(timeout=2)
         return subprocess.CompletedProcess(
             ["embedded-python", "-m", "unittest", *arguments],
@@ -364,7 +394,8 @@ def _pytest_worker(connection, arguments: list[str], root_text: str):
 
 
 def _run_pytest_isolated(
-    arguments: list[str], root: Path, timeout: int | float
+    arguments: list[str], root: Path, timeout: int | float,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
@@ -377,18 +408,25 @@ def _run_pytest_isolated(
     child.close()
     command = ["embedded-python", "-m", "pytest", *arguments]
     try:
-        if parent.poll(max(1.0, float(timeout))):
+        ready = _wait_for_validation_result(
+            parent, process, timeout, cancel_event
+        )
+        if ready is None:
+            return subprocess.CompletedProcess(
+                command, 130, "", "RockCore 内置 pytest 已取消",
+            )
+        if ready:
             returncode, stdout, stderr = parent.recv()
             process.join(timeout=2)
             if process.is_alive():
-                process.terminate()
+                terminate_process_tree(process)
                 process.join(timeout=2)
             prefix = "RockCore 内置 Python pytest 验收\n"
             return subprocess.CompletedProcess(
                 command, int(returncode), prefix + str(stdout or ""),
                 str(stderr or ""),
             )
-        process.terminate()
+        terminate_process_tree(process)
         process.join(timeout=2)
         return subprocess.CompletedProcess(
             command, 124, "", f"RockCore 内置 pytest 超时（{timeout:g} 秒）",
@@ -443,7 +481,8 @@ def _script_worker(connection, arguments: list[str], root_text: str):
 
 
 def _run_script_isolated(
-    arguments: list[str], root: Path, timeout: int | float
+    arguments: list[str], root: Path, timeout: int | float,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe(duplex=False)
@@ -456,16 +495,23 @@ def _run_script_isolated(
     child.close()
     command = ["embedded-python", *arguments]
     try:
-        if parent.poll(max(1.0, float(timeout))):
+        ready = _wait_for_validation_result(
+            parent, process, timeout, cancel_event
+        )
+        if ready is None:
+            return subprocess.CompletedProcess(
+                command, 130, "", "RockCore 内置 Python 验收已取消",
+            )
+        if ready:
             returncode, stdout, stderr = parent.recv()
             process.join(timeout=2)
             if process.is_alive():
-                process.terminate()
+                terminate_process_tree(process)
                 process.join(timeout=2)
             return subprocess.CompletedProcess(
                 command, int(returncode), str(stdout or ""), str(stderr or ""),
             )
-        process.terminate()
+        terminate_process_tree(process)
         process.join(timeout=2)
         return subprocess.CompletedProcess(
             command, 124, "", f"RockCore 内置 Python 脚本验收超时（{timeout:g} 秒）",
@@ -482,6 +528,7 @@ def _run_script_isolated(
 def run_embedded_python_command(
     command: str, project_root: str | os.PathLike[str], *,
     timeout: int | float = 120,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess | None:
     """Run Python validation with RockCore, never with a host interpreter.
 
@@ -508,7 +555,9 @@ def run_embedded_python_command(
             )
     pytest_arguments = _pytest_arguments(command)
     if pytest_arguments is not None:
-        return _run_pytest_isolated(pytest_arguments, root, timeout)
+        return _run_pytest_isolated(
+            pytest_arguments, root, timeout, cancel_event
+        )
 
     arguments = _python_arguments(command)
     if arguments is None:
@@ -529,12 +578,16 @@ def run_embedded_python_command(
         if module == "compileall":
             return _run_compileall(module_arguments, root)
         if module == "unittest":
-            return _run_unittest_isolated(module_arguments, root, timeout)
+            return _run_unittest_isolated(
+                module_arguments, root, timeout, cancel_event
+            )
         if module == "pytest":
-            return _run_pytest_isolated(module_arguments, root, timeout)
+            return _run_pytest_isolated(
+                module_arguments, root, timeout, cancel_event
+            )
         return subprocess.CompletedProcess(
             ["embedded-python", *arguments], 2, "",
             f"RockCore 内置 Python 不支持验收模块：{module}。"
             "请使用 pytest、unittest、py_compile 或 compileall。",
         )
-    return _run_script_isolated(arguments, root, timeout)
+    return _run_script_isolated(arguments, root, timeout, cancel_event)

@@ -22,7 +22,11 @@ from typing import Any
 
 import httpx
 
-from app.subprocess_utils import no_window_creation_flags, utf8_environment
+from app.subprocess_utils import (
+    no_window_creation_flags,
+    terminate_process_tree,
+    utf8_environment,
+)
 from orchestrator.agent_config import MCPServerConfig
 
 logger = logging.getLogger(__name__)
@@ -184,6 +188,8 @@ class MCPStdioClient:
         }
         if sys.platform == "win32":
             kwargs["creationflags"] = no_window_creation_flags()
+        else:
+            kwargs["start_new_session"] = True
         try:
             self.process = subprocess.Popen(command, **kwargs)
         except OSError as error:
@@ -282,12 +288,11 @@ class MCPStdioClient:
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            process.terminate()
+            terminate_process_tree(process)
             try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                process.kill()
                 process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                logger.warning("MCP process tree did not exit after termination")
 
 
 class MCPStreamableHTTPClient:

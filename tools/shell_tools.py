@@ -5,12 +5,14 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from typing import Any
 
 from app.subprocess_utils import (
     command_basename,
     decode_process_output,
     no_window_creation_flags,
+    terminate_process_tree,
     utf8_environment,
 )
 from app.python_validation import run_embedded_python_command
@@ -76,10 +78,12 @@ class ShellTools:
                 "return_code": -1,
             }
 
+        embedded_cancel = threading.Event()
         try:
             embedded = await asyncio.to_thread(
                 run_embedded_python_command, command, self.project_root,
                 timeout=timeout,
+                cancel_event=embedded_cancel,
             )
             if embedded is not None:
                 return {
@@ -106,11 +110,11 @@ class ShellTools:
                         proc.communicate, timeout=timeout
                     )
                 except asyncio.CancelledError:
-                    proc.kill()
+                    terminate_process_tree(proc)
                     await asyncio.to_thread(proc.communicate)
                     raise
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    terminate_process_tree(proc)
                     await asyncio.to_thread(proc.communicate)
                     return {
                         "error": f"Command timed out ({timeout}s)",
@@ -132,6 +136,7 @@ class ShellTools:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.project_root,
                 env=self._command_environment(),
+                start_new_session=(sys.platform != "win32"),
             )
 
             try:
@@ -139,7 +144,8 @@ class ShellTools:
                     proc.communicate(), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                terminate_process_tree(proc)
+                await proc.communicate()
                 return {
                     "error": f"Command timed out ({timeout}s)",
                     "status": "timeout",
@@ -147,6 +153,10 @@ class ShellTools:
                     "stderr": "",
                     "return_code": -1,
                 }
+            except asyncio.CancelledError:
+                terminate_process_tree(proc)
+                await proc.communicate()
+                raise
 
             stdout_str = decode_process_output(stdout)[:max_output]
             stderr_str = decode_process_output(stderr)[:max_output]
@@ -157,6 +167,12 @@ class ShellTools:
                 "return_code": proc.returncode or 0,
                 "status": "success" if proc.returncode == 0 else "failed",
             }
+        except asyncio.CancelledError:
+            embedded_cancel.set()
+            # The isolated validation child observes this event within its
+            # polling interval and is terminated as a process tree.
+            await asyncio.sleep(0.3)
+            raise
         except Exception as e:
             logger.error(f"Command execution error: {e}")
             return {

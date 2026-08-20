@@ -18,6 +18,7 @@ from app.subprocess_utils import (
     decode_process_output,
     no_window_creation_flags,
     run_process,
+    terminate_process_tree,
     utf8_environment,
 )
 from .base import BaseProvider
@@ -846,11 +847,11 @@ class CodexProvider(BaseProvider):
                     timeout=self.cli_timeout,
                 )
             except asyncio.CancelledError:
-                process.kill()
+                terminate_process_tree(process)
                 await asyncio.to_thread(process.communicate)
                 raise
             except subprocess.TimeoutExpired as error:
-                process.kill()
+                terminate_process_tree(process)
                 await asyncio.to_thread(process.communicate)
                 raise RuntimeError(
                     f"Codex CLI 执行超时（{self.cli_timeout:g} 秒）"
@@ -868,16 +869,13 @@ class CodexProvider(BaseProvider):
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=self._process_environment,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await process.communicate(prompt.encode("utf-8"))
         except asyncio.CancelledError:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            terminate_process_tree(process)
+            await process.wait()
             raise
         stdout_text = decode_process_output(stdout)
         stderr_text = decode_process_output(stderr)
