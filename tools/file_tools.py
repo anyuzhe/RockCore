@@ -47,6 +47,32 @@ class FileTools:
         """Return the model/API path with platform-independent separators."""
         return path.relative_to(self.project_root).as_posix()
 
+    @staticmethod
+    def _source_version(path: Path) -> str:
+        if not path.is_file():
+            return "missing"
+        stat = path.stat()
+        return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+    def _version_conflict(self, path: Path,
+                          expected_version: str = "") -> dict | None:
+        if not expected_version:
+            return None
+        current = self._source_version(path)
+        if current == expected_version:
+            return None
+        return {
+            "path": self._relative_path(path),
+            "status": "conflict",
+            "error_code": "stale_file_version",
+            "error": (
+                "The file changed after it was read. Read the current version "
+                "and reapply the focused edit instead of overwriting newer work."
+            ),
+            "expected_version": expected_version,
+            "source_version": current,
+        }
+
     async def list_files(self, path: str = ".", pattern: str | None = None,
                           **kwargs) -> dict:
         """List files in a directory within the project."""
@@ -332,9 +358,13 @@ class FileTools:
         }
 
     async def write_file(self, path: str, content: str,
-                         encoding: str = "preserve", **kwargs) -> dict:
+                         encoding: str = "preserve",
+                         expected_version: str = "", **kwargs) -> dict:
         """Write content to a file (overwrite)."""
         resolved = self._resolve_path(path)
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
         file_encoding = str(encoding or "preserve").lower()
         if file_encoding == "preserve":
             if resolved.is_file():
@@ -354,8 +384,12 @@ class FileTools:
                 ),
                 "encoding": file_encoding,
             }
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_bytes(encoded)
+        source_version = self._source_version(resolved)
         logger.info(f"[file_written] path={resolved} bytes={len(encoded)}")
         return {
             "path": self._relative_path(resolved),
@@ -363,6 +397,7 @@ class FileTools:
             "size": len(encoded),
             "encoding": file_encoding,
             "status": "written",
+            "source_version": source_version,
         }
 
     async def search_in_file(self, path: str, text: str, context: int = 3) -> dict:
@@ -402,12 +437,16 @@ class FileTools:
             "source_version": f"{stat.st_mtime_ns}:{stat.st_size}",
         }
 
-    async def apply_patch(self, path: str, search: str, replace: str) -> dict:
+    async def apply_patch(self, path: str, search: str, replace: str,
+                          expected_version: str = "") -> dict:
         """Apply a search-and-replace patch to a file.
         Returns match_count and reason on failure — no more silent '0 changes'."""
         resolved = self._resolve_path(path)
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed", "reason": "file_not_found"}
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
 
         content, file_encoding = read_text_compatible(resolved)
         match_count = content.count(search)
@@ -431,6 +470,9 @@ class FileTools:
             }
 
         new_content = content.replace(search, replace, 1)
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
         try:
             write_text_compatible(resolved, new_content, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
@@ -447,13 +489,18 @@ class FileTools:
             "status": "patched",
             "line_delta": new_lines - old_lines,
             "encoding": file_encoding,
+            "source_version": self._source_version(resolved),
         }
 
-    async def insert_before(self, path: str, anchor: str, content: str) -> dict:
+    async def insert_before(self, path: str, anchor: str, content: str,
+                            expected_version: str = "") -> dict:
         """Insert text before the first occurrence of anchor in a file."""
         resolved = self._resolve_path(path)
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed"}
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
 
         text, file_encoding = read_text_compatible(resolved)
         match_count = text.count(anchor)
@@ -477,6 +524,9 @@ class FileTools:
 
         idx = text.index(anchor)
         new_text = text[:idx] + content + text[idx:]
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
         try:
             write_text_compatible(resolved, new_text, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
@@ -491,13 +541,18 @@ class FileTools:
             "status": "inserted",
             "position": idx,
             "encoding": file_encoding,
+            "source_version": self._source_version(resolved),
         }
 
-    async def insert_after(self, path: str, anchor: str, content: str) -> dict:
+    async def insert_after(self, path: str, anchor: str, content: str,
+                           expected_version: str = "") -> dict:
         """Insert text after the first occurrence of anchor in a file."""
         resolved = self._resolve_path(path)
         if not resolved.exists():
             return {"error": f"File not found: {path}", "status": "failed"}
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
 
         text, file_encoding = read_text_compatible(resolved)
         match_count = text.count(anchor)
@@ -521,6 +576,9 @@ class FileTools:
 
         idx = text.index(anchor) + len(anchor)
         new_text = text[:idx] + content + text[idx:]
+        conflict = self._version_conflict(resolved, expected_version)
+        if conflict:
+            return conflict
         try:
             write_text_compatible(resolved, new_text, file_encoding)
         except (LookupError, UnicodeEncodeError, ValueError) as error:
@@ -535,4 +593,5 @@ class FileTools:
             "status": "inserted",
             "position": idx,
             "encoding": file_encoding,
+            "source_version": self._source_version(resolved),
         }

@@ -21,6 +21,9 @@ from tools.search_tools import SearchTools
 from tools.git_tools import GitTools
 from tools.test_tools import TestTools
 from tools.runtime_tools import TaskRuntimeTools
+from tools.tool_pipeline import (
+    SessionToolMiddleware, ToolExecutionContext, ToolPipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,9 @@ class ToolBroker:
         # A broker is scoped to one worker task. Keep exact repeated reads in
         # memory and invalidate them whenever that task successfully writes.
         self._read_cache: dict[tuple[str, str], dict] = {}
+        self._file_observations: dict[str, str] = {}
+        self._pipeline = ToolPipeline()
+        self.session_runtime = None
 
         self._tool_registry = {
             "list_files": self.file_tools.list_files,
@@ -411,7 +417,28 @@ class ToolBroker:
             local_definitions += self.mcp_manager.tool_definitions(task_type)
         return local_definitions
 
+    def set_session_runtime(self, session_runtime) -> None:
+        self.session_runtime = session_runtime
+        self._pipeline.clear()
+        if session_runtime is not None:
+            self._pipeline.add(SessionToolMiddleware(session_runtime))
+
     async def execute(self, task, tool_name: str, args: dict) -> dict:
+        context = ToolExecutionContext(
+            task=task,
+            tool_name=str(tool_name),
+            arguments=dict(args or {}),
+            metadata={"mutating": bool(
+                tool_name in _CACHE_INVALIDATING_TOOLS
+                or self.is_mutating_mcp_tool(str(tool_name))
+            )},
+        )
+        return await self._pipeline.execute(
+            context,
+            lambda: self._execute_impl(task, tool_name, dict(args or {})),
+        )
+
+    async def _execute_impl(self, task, tool_name: str, args: dict) -> dict:
         """Execute a tool call with policy enforcement."""
         start = time.time()
 
@@ -480,6 +507,20 @@ class ToolBroker:
         else:
             args = dict(args) if isinstance(args, dict) else {}
             ignored_arguments = []
+        observed_version = ""
+        observed_path = ""
+        if (
+            requested_tool_name in {
+                "write_file", "apply_patch", "insert_before", "insert_after",
+            }
+            and not routed_to_runtime
+        ):
+            observed_path = self._normalize_observation_path(
+                str(args.get("path") or "")
+            )
+            observed_version = self._file_observations.get(observed_path, "")
+            if observed_version:
+                args["expected_version"] = observed_version
         if ignored_arguments:
             logger.info(
                 "Ignored unsupported arguments for %s: %s",
@@ -576,6 +617,9 @@ class ToolBroker:
                     )
                 if ignored_arguments:
                     result["ignored_arguments"] = ignored_arguments
+                self._remember_file_observation(
+                    requested_tool_name, args, result
+                )
             return result
         except Exception as e:
             logger.error(f"Tool execution error: {tool_name}: {e}")
@@ -595,6 +639,28 @@ class ToolBroker:
             separators=(",", ":"),
         )
         return tool_name, serialized
+
+    def _normalize_observation_path(self, raw_path: str) -> str:
+        try:
+            resolved = (Path(self.project_root) / raw_path).resolve()
+            resolved.relative_to(Path(self.project_root).resolve())
+            return resolved.as_posix()
+        except (OSError, ValueError):
+            return ""
+
+    def _remember_file_observation(self, tool_name: str, args: dict,
+                                   result: dict) -> None:
+        if tool_name not in {
+            "read_file", "search_in_file", "write_file", "apply_patch",
+            "insert_before", "insert_after",
+        }:
+            return
+        path = self._normalize_observation_path(
+            str(result.get("path") or args.get("path") or "")
+        )
+        version = str(result.get("source_version") or "")
+        if path and version:
+            self._file_observations[path] = version
 
     def _cache_dependency(self, tool_name: str, args: dict) -> dict:
         raw_path = str(args.get("path") or ".")
@@ -705,6 +771,7 @@ class ToolBroker:
     def set_project_root(self, project_root: str | os.PathLike[str] | None):
         """Update the project root (called per-job to match the actual project)."""
         self._read_cache.clear()
+        self._file_observations.clear()
         self.project_root = (
             os.fspath(project_root) if project_root is not None else os.getcwd()
         )

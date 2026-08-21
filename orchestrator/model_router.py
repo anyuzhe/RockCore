@@ -1,6 +1,7 @@
 """Model Router — explicit routing, budgets, and provider failover."""
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -12,6 +13,7 @@ from typing import Any
 
 from .risk_engine import RiskEngine
 from .cost_engine import BudgetExceededError, CostEngine
+from .failures import classify_provider_failure
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,35 @@ class ModelRouter:
             "rockcore_model_job_id", default=""
         )
         self.request_timeout = DEFAULT_REQUEST_TIMEOUT
+        self._durability_barrier = None
+
+    def set_durability_barrier(self, callback) -> None:
+        """Install the job runtime's semantic pre-request persistence hook."""
+        self._durability_barrier = callback
+
+    async def _persist_request_intent(
+        self, *, job_id: str, task_id: str, agent_type: str,
+        provider: str, model_name: str, with_tools: bool,
+        messages: list[dict],
+    ) -> None:
+        callback = self._durability_barrier
+        if callback is None:
+            return
+        outcome = callback(
+            "provider_request_prepared",
+            job_id=job_id,
+            task_id=task_id,
+            agent_type=agent_type,
+            provider=provider,
+            model_name=model_name,
+            with_tools=with_tools,
+            message_count=len(messages or []),
+            prompt_fingerprint=hashlib.sha256(
+                json.dumps(messages or [], ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest()[:16],
+        )
+        if inspect.isawaitable(outcome):
+            await outcome
 
     def set_job_id(self, job_id: str):
         self._job_context.set(str(job_id or ""))
@@ -330,48 +361,7 @@ class ModelRouter:
 
     @staticmethod
     def _failure_kind(error: Exception | str) -> str:
-        message = str(error or "").lower()
-        capability = (
-            "does not support this tool_choice", "unsupported tool_choice",
-            "thinking mode", "unsupported parameter", "invalid parameter",
-        )
-        user_action = (
-            "insufficient balance", "insufficient_balance", "quota exceeded",
-            "insufficient_quota", "billing", "error code: 402",
-            "status code: 402", "credit_balance_exhausted",
-        )
-        authentication = (
-            "invalid api key", "authentication", "authorization",
-            "missing credentials", "credentials were not found",
-            "credentials unavailable", "error code: 401", "status code: 401",
-            "error code: 403", "status code: 403", "permission denied",
-        )
-        unavailable = (
-            "timed out", "timeout", "rate limit", "too many requests",
-            "error code: 429", "status code: 429", "overloaded",
-            "not found the model", "model not found", "unknown model",
-            "model does not exist", "model is not available",
-            "resource_not_found_error", "error code: 404", "status code: 404",
-        )
-        retryable = (
-            "connection error", "connection reset", "network error",
-            "temporarily unavailable", "service unavailable", "server error",
-            "status code: 500", "status code: 502", "status code: 503",
-            "status code: 504", "error code: 500", "error code: 502",
-            "error code: 503", "error code: 504", "invalid response",
-            "malformed response", "expected a json object",
-        )
-        if any(marker in message for marker in capability):
-            return "capability"
-        if any(marker in message for marker in user_action):
-            return "user_action"
-        if any(marker in message for marker in authentication):
-            return "authentication"
-        if any(marker in message for marker in unavailable):
-            return "unavailable"
-        if any(marker in message for marker in retryable):
-            return "retryable"
-        return "other"
+        return classify_provider_failure(error).legacy_kind
 
     def _record_provider_success(
         self, provider: str, job_id: str = "", task_id: str = "",
@@ -638,6 +628,11 @@ class ModelRouter:
         chat_prompt = system_prompt
         chat_messages = list(messages) if messages else []
 
+        await self._persist_request_intent(
+            job_id=job_id, task_id=task_id, agent_type=agent_type,
+            provider=route, model_name=model_name, with_tools=False,
+            messages=messages,
+        )
         start = time.monotonic()
         request_timeout = kwargs.pop("request_timeout", self.request_timeout)
         try:
@@ -746,6 +741,9 @@ class ModelRouter:
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),
+                    failure=classify_provider_failure(
+                        normalized_error, provider=route, model=model_name,
+                    ).as_dict(),
                 )
             model_unavailable = self._is_model_unavailable_error(normalized_error)
             if model_unavailable:
@@ -935,6 +933,11 @@ class ModelRouter:
         chat_prompt = system_prompt
         chat_messages = list(messages) if messages else []
 
+        await self._persist_request_intent(
+            job_id=job_id, task_id=task_id, agent_type=agent_type,
+            provider=route, model_name=model_name, with_tools=True,
+            messages=messages,
+        )
         start = time.monotonic()
         request_timeout = kwargs.pop("request_timeout", self.request_timeout)
         try:
@@ -1041,6 +1044,9 @@ class ModelRouter:
                     cost_currency=self.cost_engine.CURRENCY,
                     duration_ms=duration_ms,
                     error=str(normalized_error),
+                    failure=classify_provider_failure(
+                        normalized_error, provider=route, model=model_name,
+                    ).as_dict(),
                 )
             model_unavailable = self._is_model_unavailable_error(normalized_error)
             if model_unavailable:

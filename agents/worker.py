@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from orchestrator.model_router import ModelRouter
+from orchestrator.session_events import AgentInbox
 from tools.tool_broker import ToolBroker
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,9 @@ class WorkerAgent:
         broker = ToolBroker(
             project_root, self.tool_broker.policy,
             mcp_manager=self.tool_broker.mcp_manager,
+        )
+        broker.set_session_runtime(
+            getattr(self.tool_broker, "session_runtime", None)
         )
         return WorkerAgent(
             self.model_router,
@@ -284,10 +288,20 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 + "."
             )
 
+        session_runtime = getattr(self.tool_broker, "session_runtime", None)
+        if session_runtime is not None:
+            surface = session_runtime.model_surface()
+            if surface and surface != "[]":
+                task_context += (
+                    "\n\nRecent durable execution surface (full history remains "
+                    "in the audit journal):\n" + surface
+                )
+
         execution_group_id = str(
             getattr(task, "execution_group_id", "") or task.task_id
         )
         restored_state = dict(session_state or {})
+        inbox = AgentInbox(restored_state.get("inbox") or [])
         restored_messages = restored_state.get("messages")
         can_resume = bool(
             isinstance(restored_messages, list)
@@ -376,7 +390,7 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 checkpoint_messages, max_chars=36_000
             )
             checkpoint = {
-                "version": 1,
+                "version": 2,
                 "execution_group_id": execution_group_id,
                 "messages": checkpoint_messages,
                 "delivered_tool_results": delivered_tool_results,
@@ -390,6 +404,9 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 "document_progress": dict(pending_document_pages),
                 "provider": str(provider_override or ""),
                 "model": str(model_override or ""),
+                "inbox": inbox.checkpoint(),
+                "turn_id": int(getattr(task, "_rockcore_worker_turn", 0) or 0),
+                "step_id": int(getattr(task, "_rockcore_worker_step", 0) or 0),
             }
             task._rockcore_worker_session = checkpoint
             payload["worker_session"] = checkpoint
@@ -399,19 +416,39 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
             for turn in range(self.max_turns):
                 live_guidance = await receive_user_guidance()
                 if live_guidance:
+                    for instruction in live_guidance:
+                        inbox.enqueue(instruction, source="user")
+                inbox_items = inbox.drain()
+                if inbox_items:
                     messages.append({
                         "role": "user",
                         "content": (
                             "The user corrected or refined the current running "
                             "requirement. Apply this guidance in the same task; "
                             "preserve useful work already completed:\n- "
-                            + "\n- ".join(live_guidance)
+                            + "\n- ".join(
+                                str(item.get("content") or "")
+                                for item in inbox_items
+                            )
                         ),
                     })
                     await report_progress(
                         "已接收用户补充说明", turn=turn + 1,
                         event_kind="instruction_applied", status="success",
-                        result={"instructions": live_guidance},
+                        result={"instructions": [
+                            str(item.get("content") or "")
+                            for item in inbox_items
+                        ]},
+                    )
+                task._rockcore_worker_turn = turn + 1
+                event_bus = getattr(self.model_router, "event_bus", None)
+                if event_bus:
+                    await event_bus.publish(
+                        "worker_turn_started",
+                        task_id=task.task_id,
+                        turn=turn + 1,
+                        execution_group_id=execution_group_id,
+                        message_count=len(messages),
                     )
                 job_id = str(
                     getattr(self.model_router, "_current_job_id", "") or "unknown"
@@ -666,6 +703,17 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                         "arguments_truncated": arguments_truncated,
                     })
 
+                event_bus = getattr(self.model_router, "event_bus", None)
+                if event_bus:
+                    await event_bus.publish(
+                        "worker_turn_completed",
+                        task_id=task.task_id,
+                        turn=turn + 1,
+                        execution_group_id=execution_group_id,
+                        tool_call_count=len(tool_calls),
+                        finish_reason=finish_reason,
+                    )
+
                 if malformed_calls:
                     messages.append({
                         "role": "user",
@@ -821,6 +869,9 @@ Selected Skills: {', '.join(selected_skills) or 'none'}
                 meaningful_progress = False
                 batch_notices: list[str] = []
                 for tc in tool_calls:
+                    task._rockcore_worker_step = int(
+                        getattr(task, "_rockcore_worker_step", 0) or 0
+                    ) + 1
                     func_name = tc["function"]["name"]
                     argument_error = tc.get("argument_error")
                     args = dict(tc.get("parsed_arguments") or {})

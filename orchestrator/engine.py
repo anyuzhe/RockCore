@@ -114,6 +114,7 @@ from .execution_session import (
     normalize_session, record_substep, record_turn, render_fixed_context,
     update_checklist,
 )
+from .runtime_services import WorkflowRuntimeServices
 from .main_agent import MainAgent
 from agents.planner import PlannerOutputTruncatedError
 from .test_manager import TestManager
@@ -149,8 +150,13 @@ class JobRuntime:
     tool_broker: Any = None
     skill_manager: Any = None
     context_manager: Any = None
+    runtime_services: WorkflowRuntimeServices | None = None
     agents: dict[str, Any] = field(default_factory=dict)
     closed: bool = False
+
+    @property
+    def session_runtime(self):
+        return self.runtime_services.session if self.runtime_services else None
 
 
 class Engine:
@@ -168,6 +174,7 @@ class Engine:
         self.skill_learning = SkillLearningService(self._session_factory)
         self.hook_runner = HookRunner(self.event_bus)
         self.event_bus.subscribe("*", self.job_reports.record_event)
+        self.event_bus.subscribe("*", self._record_session_event)
         self.event_bus.subscribe("model_chat", self._record_model_usage)
         self.event_bus.subscribe(
             "worker_tool_completed", self._record_worker_tool_call
@@ -185,6 +192,7 @@ class Engine:
         )
         self.policy_engine = PolicyEngine()
         self.model_router = ModelRouter(event_bus=self.event_bus)
+        self.model_router.set_durability_barrier(self._model_durability_barrier)
 
         self._running = False
         self._current_job_id: str | None = None
@@ -691,6 +699,22 @@ class Engine:
             return runtime.agents.get(agent_type)
         return self._agents.get(agent_type)
 
+    async def _record_session_event(self, event_type: str, **data):
+        """Mirror public workflow events into the job's append-only journal."""
+        job_id = str(data.get("job_id") or "")
+        runtime = self._job_runtimes.get(job_id)
+        if runtime is None or runtime.session_runtime is None:
+            return
+        await runtime.runtime_services.record_bus_event(event_type, **data)
+
+    async def _model_durability_barrier(self, event_type: str, **data):
+        """Persist provider intent before the provider can observe a request."""
+        job_id = str(data.get("job_id") or self.model_router._current_job_id or "")
+        runtime = self._job_runtimes.get(job_id)
+        if runtime is None or runtime.session_runtime is None:
+            return
+        await runtime.runtime_services.provider_barrier(event_type, **data)
+
     async def _create_job_runtime(self, job_id: str,
                                   project_root: str) -> JobRuntime:
         """Build isolated mutable services for one concurrently running Job."""
@@ -750,6 +774,7 @@ class Engine:
                     "Could not isolate tool broker for %s: %s", job_id, error
                 )
 
+        runtime_services = WorkflowRuntimeServices.create(root, job_id)
         runtime = JobRuntime(
             job_id=job_id,
             project_root=root,
@@ -759,7 +784,9 @@ class Engine:
             tool_broker=tool_broker,
             skill_manager=skill_manager,
             context_manager=context_manager,
+            runtime_services=runtime_services,
         )
+        runtime_services.attach_tool_broker(tool_broker)
         for agent_type, template in self._agents.items():
             agent = copy.copy(template)
             if hasattr(agent, "model_router"):
@@ -784,6 +811,14 @@ class Engine:
             except Exception as error:
                 logger.warning(
                     "Could not close runtime tools for %s: %s",
+                    runtime.job_id, error,
+                )
+        if runtime.runtime_services is not None:
+            try:
+                await runtime.runtime_services.close()
+            except Exception as error:
+                logger.warning(
+                    "Could not close session journal for %s: %s",
                     runtime.job_id, error,
                 )
 
